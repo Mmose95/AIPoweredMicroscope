@@ -6,6 +6,17 @@ experiment_id = setup_mlflow_experiment("Phase 1: Purulent Area")
 def PH1_PurulentArea():
     metric = "PH1"
 
+
+
+
+
+
+
+
+
+
+
+#Trackking metrics via mlflow
     with mlflow.start_run(experiment_id=experiment_id) as run:
 
         # Log parameters and metrics
