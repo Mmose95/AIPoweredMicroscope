@@ -1,0 +1,7 @@
+(1) run -->
+netstat -ano | findstr :5000
+to find PID
+
+(2) Insert pid into -->
+taskkill /PID xxxxx /F
+to kill server manually

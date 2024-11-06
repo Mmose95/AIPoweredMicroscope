@@ -1,20 +1,11 @@
 import mlflow
+
 from Utils_MLFLOW import setup_mlflow_experiment
 
 experiment_id = setup_mlflow_experiment("Phase 1: Purulent Area")
 
 def PH1_PurulentArea():
     metric = "PH1"
-
-
-
-
-
-
-
-
-
-
 
 #Trackking metrics via mlflow
     with mlflow.start_run(experiment_id=experiment_id) as run:
@@ -24,5 +15,5 @@ def PH1_PurulentArea():
 
     return metric
 
-if __name__ == "__main__":
-    PH1_PurulentArea()
+#if __name__ == "__main__":
+    #PH1_PurulentArea()

@@ -14,5 +14,5 @@ def PH3_SpeciesDetermination():
 
     return metric
 
-if __name__ == "__main__":
-    PH3_SpeciesDetermination()
+#if __name__ == "__main__":
+    #PH3_SpeciesDetermination()
