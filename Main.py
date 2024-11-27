@@ -4,7 +4,7 @@ import numpy as np
 from DataHandling.DataLoader import loadImages
 from numpy import load
 
-from Preprocessing.dataAutmentation import dataAugmentation
+from Preprocessing.dataAugmentation import dataAugmentation
 
 ##Switches/Modes for training different networks.
 train_ph1 = False

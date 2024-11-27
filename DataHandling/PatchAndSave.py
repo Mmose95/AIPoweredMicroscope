@@ -11,7 +11,7 @@ from itertools import product
 import os
 
 
-def patchNsave(images, d, e, overlapPercent, savePath, savePNGPatchs=None):
+def patchNsave(images, d, e, overlapPercent, savePath, savePNGPatchs):
 
     patches = []
     patches_nd = []
