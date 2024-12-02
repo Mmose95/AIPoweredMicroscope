@@ -5,15 +5,15 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import cv2
 
-full_image_annotations_path = "./instances_default.json"
+full_image_annotations_path = "D:/PhdData/instances_default.json"
 
 # Directory where patches are stored
-patches_dir = "./patchesClean/"
-output_annotations_dir = "X:/PhdData/InputPatches_Hvidovre/"
+output_annotations_dir = "D:/PhdData/InputPatches_Hvidovre/InputImgs"
 output_annotations_path = "./coco_patched_annotations.json"
 
 # Patch size
 PATCH_SIZE = 256
+OVERLAP_SIZE = 128  # Step size for patching (stride)
 
 # Load full image annotations
 with open(full_image_annotations_path, "r") as f:
@@ -80,10 +80,10 @@ for image_info in images_info:
     ]
 
     # Loop through patches of the image
-    for patch_x in range(0, img_width, PATCH_SIZE):
-        for patch_y in range(0, img_height, PATCH_SIZE):
+    for patch_x in range(0, img_width, PATCH_SIZE- OVERLAP_SIZE):
+        for patch_y in range(0, img_height, PATCH_SIZE- OVERLAP_SIZE):
             # Add patch as a new image
-            patch_file_name = f"{image_info['file_name']}_patch_{patch_x}_{patch_y}.png"
+            patch_file_name = f"image{image_info['file_name'].rsplit('.', 1)[0]}_patch_{patch_x}_{patch_y}.png"
             coco_output["images"].append({
                 "id": patch_image_id,
                 "width": PATCH_SIZE,

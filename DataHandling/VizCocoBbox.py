@@ -15,7 +15,7 @@ def display_images_with_coco_annotations(image_paths, annotations, display_type=
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
         ax.imshow(image)
-        ax.axis('off')  # Turn off the axes
+        ax.axis('off')  #Turn off the axes
 
         # Define a default color map if none is provided
         if colors is None:

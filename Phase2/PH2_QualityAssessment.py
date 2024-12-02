@@ -11,6 +11,7 @@ def PH2_QualityAssessment():
 
     OrgImages = loadImages("E:/PhdData/Original Data/Hvidovre/10x10")
 
+
     with mlflow.start_run(experiment_id=experiment_id) as run:
 
         # Log parameters and metrics

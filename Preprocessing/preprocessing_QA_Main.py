@@ -9,21 +9,21 @@ from DataHandling.PatchAndSave import patchNsave
 from DataHandling.VizCocoBbox import display_images_with_coco_annotations
 
 ### Loading Data ###
-#orgImages = loadImages("X:/PhdData/BBox/Original/")
+orgImages = loadImages("D:/PhdData/Bbox/Original/")
 
-#patches = patchNsave(orgImages, 256,256, 50, "X:/PhdData/BBox/Patches/", savePNGPatchs=True)
+patches = patchNsave(orgImages, 256,256, 50, "D:/PhdData/Bbox/Patches/", savePNGPatchs=True)
 
 #filename_input = 'test1'
 #savez_compressed(filename_input, patches)
 
 # Load COCO annotations
-with open("C:/Users/mose_/AAU/Sundhedstek/PhD/AIPoweredMicroscope_development/DataHandling/coco_patched_annotations.json", 'r') as f:
+with open("C:/Users/mamo/PycharmProjects/AIPoweredMicroscope/DataHandling/coco_patched_annotations.json", 'r') as f:
     annotations = json.load(f)
 
 # Get all image files
-image_dir = "X:/PhdData/BBox/Patches/"
+image_dir = "D:/PhdData/InputPatches_Hvidovre/InputImgs/"
 all_image_files = [os.path.join(image_dir, img['file_name']) for img in annotations['images']]
-random_image_files = random.sample(all_image_files, 5)
+random_image_files = random.sample(all_image_files, 5) #Set number to vizualise
 
 # Choose between 'bbox', 'seg', or 'both'
 display_type = 'bbox'

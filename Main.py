@@ -38,8 +38,6 @@ if train_ph1 == True:
     from Phase1.PH1_PurulentArea import PH1_PurulentArea
 
 
-
-
     PH1_PurulentArea()
 
 ########################## Phase 2: Quality Assessment ##########################
@@ -49,14 +47,12 @@ if train_ph2 == True:
     loadImages()
 
 
-
     PH2_QualityAssessment()
 
 ########################## Phase 3: Species Determination ##########################
 
 if train_ph3 == True:
     from Phase3.PH3_SpeciesDetermination import PH3_SpeciesDetermination
-
 
 
     PH3_SpeciesDetermination()
