@@ -1,11 +1,7 @@
 """ The purpose of this code is to take large original images and convert them to patches manageable for processing in the following NN (and saving them to a specified folder
  This code is independent of the main and should not be run each time a new training is done. Instead, use the DataLoader to load patches directly"""
 import numpy as np
-from numpy import savez_compressed
 
-from DataHandling.DataLoader import loadImages
-from numpy import savez_compressed
-from numpy import asarray
 #### Function for patch making ####
 from itertools import product
 import os
@@ -13,12 +9,12 @@ import os
 
 def patchNsave(images, d, e, overlapPercent, savePath, savePNGPatchs):
 
+    patches_nd = []
     overlapPix = int(overlapPercent/100 * d)
 
     #Making patchs
     for image in images:
         patches = []
-        patches_nd = []
         w, h = image.size
         grid = list(product(range(0, h - h % d, overlapPix), range(0, w - w % e, overlapPix)))
         for i, j in grid:

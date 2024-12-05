@@ -11,6 +11,7 @@ def setup_mlflow_experiment(experiment_name):
     if experiment is None:
         experiment_id = mlflow.create_experiment(experiment_name)
     else:
+        print("Experiment already exists, new runs is placed onto the existing experiment")
         experiment_id = experiment.experiment_id
 
     return experiment_id
