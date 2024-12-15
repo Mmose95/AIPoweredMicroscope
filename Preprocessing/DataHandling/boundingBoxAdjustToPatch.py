@@ -12,7 +12,7 @@ _, _, originalPatchedImages_path, full_image_annotations_path, cocoFormat_patche
 
 # Patch size
 PATCH_SIZE = 256
-OVERLAP_SIZE = 128  # Step size for patching (stride)
+OVERLAP_SIZE = 128  # Step size for patching (stride)½2
 
 # Load full image annotations
 with open(full_image_annotations_path, "r") as f:
