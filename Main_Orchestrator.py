@@ -29,3 +29,5 @@ stop = 1
 
 if train_SpeciesDetermination == True:
  bob = 1
+
+ ''' "C:\Users\mose_>code2flow X:\AAU\Sundhedstek\PhD\AIPoweredMicroscope_development -o diagram.png '''
