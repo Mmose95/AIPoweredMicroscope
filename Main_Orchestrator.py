@@ -21,7 +21,7 @@ if train_QualityAssessment == True:
     dataset = preprocessing_QA(CreateOrLoadPatches='Load', vizLabels=True)
 
     '''training process'''
-    qualityAssessment(trackExperiment = True, dataset)
+    qualityAssessment(trackExperiment=True, dataset=dataset)
 
 stop = 1
 
