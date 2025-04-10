@@ -16,7 +16,7 @@ def load_settings():
 
     # Define mappings between hostnames and environments
     hostname_to_env = {
-        "Work-PC-Name": "work",
+        "W11-LPT-MAMO": "work",
         "DESKTOP-5D7QE86": "home"
     }
 
