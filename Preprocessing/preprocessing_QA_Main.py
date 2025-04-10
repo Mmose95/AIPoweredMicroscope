@@ -2,8 +2,8 @@
 import json
 import os
 
-from Preprocessing.DataHandling.DataLoader import loadImages
-from Preprocessing.DataHandling.PatchAndSave import patchNsave
+from Helpers_General.LoadImages import load_images_from_folder
+from Helpers_General.PatchAndSave import patchNsave
 from Preprocessing.DataHandling.VizCocoBbox import display_images_with_coco_annotations
 from configSetting import load_settings
 
@@ -13,7 +13,7 @@ def preprocessing_QA(CreateOrLoadPatches, vizLabels = False):
 
     if CreateOrLoadPatches in ['Create']:
         ### Loading Data ###
-        originalFullSizeImages = loadImages(originalFullSizeImages_path)
+        originalFullSizeImages = load_images_from_folder(originalFullSizeImages_path)
         patches = patchNsave(originalFullSizeImages, 256, 256, 50, savePatches_path, savePNGPatchs=True)  # UNI = "D:/PhdData/Bbox/Patches/"
 
     if CreateOrLoadPatches in ['Load']:

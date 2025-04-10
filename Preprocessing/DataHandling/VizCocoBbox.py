@@ -1,7 +1,8 @@
+""" Function of the script:
+Visualization of individual patches/tiles and their respective bounding boxes (annotations)
+"""
 
 import os
-import random
-import json
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import cv2

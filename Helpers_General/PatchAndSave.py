@@ -1,5 +1,5 @@
 """ The purpose of this code is to take large original images and convert them to patches manageable for processing in the following NN (and saving them to a specified folder
- This code is independent of the main and should not be run each time a new training is done. Instead, use the DataLoader to load patches directly"""
+ This code is independent of the main and should not be run each time a new training is done. Instead, use the DataLoader to load patches directly. Note: "Dataloader" is implemented directly into each individual training loop"""
 import numpy as np
 
 #### Function for patch making ####
@@ -10,7 +10,10 @@ import os
 def patchNsave(images, d, e, overlapPercent, savePath, savePNGPatchs):
 
     patches_nd = []
-    overlapPix = int(overlapPercent/100 * d)
+    if overlapPercent > 0:
+        overlapPix = int(overlapPercent/100 * d)
+    else :
+        overlapPix = d
 
     #Making patchs
     for image in images:

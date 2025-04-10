@@ -1,10 +1,6 @@
-import subprocess
-
-from Preprocessing.DataHandling.DataLoader import loadImages
-from numpy import load
-from Preprocessing.dataAugmentation import dataAugmentation
+from Helpers_General.LoadImages import loadImages
+from Helpers_General.PatchAndSave import patchNsave
 from MainPhase_QualityAssessment.MainPhase_QualityAssessment import qualityAssessment
-from Preprocessing.preprocessing_QA_Main import preprocessing_QA
 
 ##Switches/Modes for training different networks.
 train_QualityAssessment = True
@@ -13,21 +9,29 @@ train_SpeciesDetermination = False
 
 """Initialize MLflow server for capturing experiments (remember to set "track experiment = true)"""
 
-subprocess.Popen(["StartMLflowServer.cmd"], shell=True)
+#subprocess.Popen(["StartMLflowServer.cmd"], shell=True)
 
-########################## Phase 2: Quality Assessment ##########################
+########################## Phase 1: Quality Assessment ##########################
 if train_QualityAssessment == True:
-    '''preprocessing'''
-    dataset = preprocessing_QA(CreateOrLoadPatches='Load', vizLabels=True)
+
+    '''Preparation functions for QualityAssessment'''
+
+    ### Creating patches for SSL ###
+    originalFullSizeImages_path = "D:\PHD\PhdData\FullSizeSamples/113331239355/113331239355_patches" #This path should point to a folder with all the individual tiles/sub-images generated from the microscope (hence pointing to a "_patches" folder is intended)
+    savePatches_path = "D:/PHD/PhdData/SSL_DATA_PATCHES/" #Whereever we want the copious amount of small patches that constitute the sub-images
+
+    originalFullSizeImages = loadImages(originalFullSizeImages_path)
+    patches = patchNsave(originalFullSizeImages, 512, 512, 0, savePatches_path, savePNGPatchs=True)
+
+    ### Convert labeled patches to match input patches ###
+
 
     '''training process'''
-    qualityAssessment(trackExperiment=True, dataset=dataset)
+    qualityAssessment(trackExperiment_SSL=True)
 
 stop = 1
 
-########################## Phase 3: Species Determination ##########################
+########################## Phase 2: Species Determination ##########################
 
 if train_SpeciesDetermination == True:
  bob = 1
-
- ''' "C:\Users\mose_>code2flow X:\AAU\Sundhedstek\PhD\AIPoweredMicroscope_development -o diagram.png '''
