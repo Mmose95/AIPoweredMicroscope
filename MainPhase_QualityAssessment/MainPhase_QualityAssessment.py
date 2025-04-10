@@ -10,18 +10,17 @@ from Helpers_General.Self_Supervised_learning_Helpers.SSL_functions import PILIm
     ssl_transform
 from MainPhase_QualityAssessment.Main_Pretext_SSL_DINOYOLO_Training import DINO_training_loop
 from Utils_MLFLOW import setup_mlflow_experiment
+from ultralytics import YOLO
 
-def qualityAssessment(trackExperiment_QualityAssessment_SSL, trackExperiment_QualityAssessment_Supervised):
+def qualityAssessment_SSL(trackExperiment_QualityAssessment_SSL, trackExperiment_QualityAssessment_Supervised):
 
+    #Setting up mlflow experimentation
     experiment_id = setup_mlflow_experiment("Main Phase: Quality Assessment (SelfSupervised)")
-
-    ''' ACUTAL CODE GODES HERE'''
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     ''''''''''''''''''''''''''''''''''''''' SSL Pretext '''''''''''''''''''''''''''''''''''
     ''' The starting point of this SSL pretext training is an already pretrained model: using the dino model'''
-
 
     #SSL parameters
     ssl_data_path = "D:\PHD\PhdData\SSL_DATA_PATCHESTest"
@@ -50,13 +49,35 @@ def qualityAssessment(trackExperiment_QualityAssessment_SSL, trackExperiment_Qua
             mlflow.log_param("SSL_METRIC_TEST", metricSSL)
 
 
-    ''''''''''''''''''''''''' Downstream task (Bounding box Classification'''''''''''''''''''''''''''''''''
+    ''''''''''''''''''''''''' Downstream task (Bounding box Classification)'''''''''''''''''''''''''''''''''
 
-    experiment_id = setup_mlflow_experiment("Main Phase: Quality Assessment (SelfSupervised)")
+    ### Setting up mlflow experimentation
+    experiment_id = setup_mlflow_experiment("Main Phase: Quality Assessment (Supervised)")
 
-    metricSuervised = "PH1_Supervised"
+    ### Full model architecture configuration.
+
+    # Load a YOLOv8 model
+    yolo_model = YOLO("yolov8s.pt")  # Load YOLOv8 Small for faster training
+
+    # Load pretrained DINOv2
+    dinov2_model = timm.create_model("vit_small_patch14_dinov2.lvd142m", pretrained=False)
+    dinov2_model.load_state_dict(torch.load("dinov2_pretrained_microscopy.pth"))
+
+    # Remove DINOv2's classification head and use it as a feature extractor
+    dinov2_model.head = torch.nn.Identity()
+
+    # Assign DINOv2 as YOLO’s new backbone
+    yolo_model.model.model[0] = dinov2_model
+
+    # Save new model config
+    yolo_model.save("yolov8_with_dino.pt") #This is the actual full model architechture (YoloV8 model with (pretrained) DINOV2 backbone)
+
+    ### Fine-tuning of full model architecture (using labeled data)
+
+
+    metricSupervised = "PH1_Supervised"
 
     if trackExperiment_QualityAssessment_Supervised == True:
         with mlflow.start_run(experiment_id=experiment_id) as run:
             # Log parameters and metrics
-            mlflow.log_param("SUPERVISED_METRIC_TEST", metricSuervised)
+            mlflow.log_param("SUPERVISED_METRIC_TEST", metricSupervised)
