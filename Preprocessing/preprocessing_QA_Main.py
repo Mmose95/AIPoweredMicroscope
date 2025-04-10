@@ -7,7 +7,7 @@ from Preprocessing.DataHandling.PatchAndSave import patchNsave
 from Preprocessing.DataHandling.VizCocoBbox import display_images_with_coco_annotations
 from configSetting import load_settings
 
-def preprocessing_QA(CreateOrLoadPatches, vizLabels = False):
+def preprocessing_QA_Supervised(CreateOrLoadPatches, vizLabels = False):
 
     originalFullSizeImages_path, savePatches_path, originalPatchedImages_path, _, cocoFormat_patched_labels_path = load_settings()
 
@@ -45,7 +45,11 @@ def preprocessing_QA(CreateOrLoadPatches, vizLabels = False):
 
     return dataset
 
+def preprocessing_QA_SSL():
 
+    ### Loading Data ###
+    originalFullSizeImages = loadImages(originalFullSizeImages_path)
+    patches = patchNsave(originalFullSizeImages, 256, 256, 50, savePatches_path,
+                         savePNGPatchs=True)  # UNI = "D:/PhdData/Bbox/Patches/"
 
-
-
+    return dataset
