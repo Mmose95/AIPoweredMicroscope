@@ -1,0 +1,6 @@
+[submodule "external/dinov2'"]
+	path = external/dinov2'
+	url = https://github.com/facebookresearch/dinov2.git
+[submodule "external/dinov2"]
+	path = external/dinov2
+	url = https://github.com/facebookresearch/dinov2.git
