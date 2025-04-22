@@ -39,6 +39,10 @@ def qualityAssessment_SSL(trackExperiment_QualityAssessment_SSL, ssl_data_path):
     ''''''''''''''''''''''''''''''''''''''' SSL Pretext '''''''''''''''''''''''''''''''''''
     ''' The starting point of this SSL pretext training is an already pretrained model: using the dino model'''
 
+    ''' Broad explainer: To use the DINOV2 repro: https://github.com/facebookresearch/dinov2/tree/main - I had to bypass the distributed training setup (i.e. convert to a single gpu setup).
+    Also a pretrained model was used (based on copious image datasets), and a custom dataloader was created.'''
+
+
     # ---------------------- Config -----------------------
     DATA_PATH = ssl_data_path  # Change this
     BATCH_SIZE = 128
@@ -123,39 +127,6 @@ def qualityAssessment_SSL(trackExperiment_QualityAssessment_SSL, ssl_data_path):
 
     print("✅ Training completed. Final model saved at:", SAVE_PATH)
 
-    '''# Define paths
-    DATASET_PATH = "ImageFolder=" + ssl_data_path  # Change this!
-    OUTPUT_DIR = "./ssl_output"
-    CONFIG_PATH = "dinov2/configs/train/SSL_QA_config.yaml"
-
-    # Make sure output directory exists
-    Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
-
-    parser = get_args_parser()
-
-    ssl_data_path = ssl_data_path.replace("\\", "/")
-    dataset_arg = f"train.dataset_path=Unlabeled={ssl_data_path}"
-
-    args_list = [
-        "--config-file", CONFIG_PATH,
-        "--output-dir", OUTPUT_DIR,
-        dataset_arg,
-        "train.batch_size=16",
-        "distributed.enabled=false",
-        "distributed.backend=null"
-    ]
-
-    print("\n🚀 Launching DINOv2 training with these args:")
-    for a in args_list:
-        print(" -", a)
-
-    args = parser.parse_args(args_list)
-
-    os.environ["DINO_SINGLE_PROCESS"] = "1"
-
-
-    train_main(args)
-
 
     metricSSL = "PH1_SSL"
 
@@ -164,7 +135,7 @@ def qualityAssessment_SSL(trackExperiment_QualityAssessment_SSL, ssl_data_path):
         with mlflow.start_run(experiment_id=experiment_id) as run:
 
             # Log parameters and metrics
-            mlflow.log_param("SSL_METRIC_TEST", metricSSL)'''
+            mlflow.log_param("SSL_METRIC_TEST", metricSSL)
 
 
     ''''''''''''''''''''''''' Downstream task (Bounding box Classification)'''''''''''''''''''''''''''''''''

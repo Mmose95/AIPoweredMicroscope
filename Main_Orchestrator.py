@@ -1,3 +1,4 @@
+import subprocess
 import warnings
 import logging
 
@@ -23,23 +24,13 @@ train_SpeciesDetermination = False
 
 """Initialize MLflow server for capturing experiments (remember to set "track experiment = true)"""
 
-#subprocess.Popen(["StartMLflowServer.cmd"], shell=True)
+subprocess.Popen(["StartMLflowServer.cmd"], shell=True)
 
 ########################## Phase 1: Quality Assessment ##########################
 
 sys.path.append("dinov2")
 
 if train_QualityAssessment_SSL == True:
-
-    '''Preparation functions for QualityAssessment'''
-
-    ### Creating patches for SSL ###
-    originalFullSizeImages_path = "D:\PHD\PhdData\FullSizeSamples/113331239355/113331239355_patches" #This path should point to a folder with all the individual tiles/sub-images generated from the microscope (hence pointing to a "_patches" folder is intended)
-    savePatches_path = "D:/PHD/PhdData/SSL_DATA_PATCHES/" #Whereever we want the copious amount of small patches that constitute the sub-images
-
-    if CreatePatchesFromFullSizeImages == True:
-        originalFullSizeImages = load_images_from_folder(originalFullSizeImages_path) #Just Loading the full size images
-        patches = patchNsave(originalFullSizeImages, 512, 512, 0, savePatches_path, savePNGPatchs=True) #Converts the full size images into a desired size and saves at "savePathces_path".
 
     '''training process'''
     if __name__ == "__main__":
