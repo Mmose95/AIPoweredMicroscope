@@ -7,7 +7,10 @@ class SSLImageDataset(Dataset):
     def __init__(self, root_dir, transform=None):
         self.image_paths = []
         for ext in ("*.jpg", "*.png", "*.jpeg", "*.tif"):
-            self.image_paths.extend(glob.glob(os.path.join(root_dir, "**", ext), recursive=True))
+            all_matches = glob.glob(os.path.join(root_dir, "**", ext), recursive=True)
+            # ❌ Exclude any path that contains a "_rejected" folder
+            filtered = [p for p in all_matches if "_rejected" not in p]
+            self.image_paths.extend(filtered)
 
         if len(self.image_paths) == 0:
             raise RuntimeError(f"No images found in: {root_dir}")

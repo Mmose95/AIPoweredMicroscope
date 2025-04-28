@@ -1,42 +1,47 @@
 import subprocess
 import warnings
 import logging
+import multiprocessing
+from MainPhase_QualityAssessment.MainPhase_QualityAssessment import qualityAssessment_SSL
+import os
 
-# Suppress warnings before any other import triggers them
+# Suppress irrelevant warnings
 warnings.filterwarnings("ignore", message=".*xFormers is available.*")
 warnings.filterwarnings("ignore", message=".*No module named 'triton'.*")
 warnings.filterwarnings("ignore", message=".*TypedStorage is deprecated.*")
 logging.getLogger().setLevel(logging.ERROR)
 
-from Helpers_General.LoadImages import load_images_from_folder
-from Helpers_General.PatchAndSave import patchNsave
-from MainPhase_QualityAssessment.MainPhase_QualityAssessment import qualityAssessment_SSL
-import sys
+# Suppress all warnings (recommended for production-like runs)
+warnings.filterwarnings("ignore")
+
+# Hide Python warnings emitted from imported libraries
+os.environ["PYTHONWARNINGS"] = "ignore"
+
+# Reduce logging from other packages (like timm or xFormers)
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("xformers").setLevel(logging.ERROR)
+logging.getLogger("dinov2").setLevel(logging.ERROR)
+logging.getLogger().setLevel(logging.ERROR)
 
 ##Switches/Modes for training different networks.
 train_QualityAssessment_SSL = True
 CreatePatchesFromFullSizeImages = False
-
 train_QualityAssessment_Supervised = False
-
 train_SpeciesDetermination = False
 
 
 """Initialize MLflow server for capturing experiments (remember to set "track experiment = true)"""
-
-subprocess.Popen(["StartMLflowServer.cmd"], shell=True)
+if __name__ == "__main__":
+    subprocess.Popen(["StartMLflowServer.cmd"], shell=True)
 
 ########################## Phase 1: Quality Assessment ##########################
-
-sys.path.append("dinov2")
 
 if train_QualityAssessment_SSL == True:
 
     '''training process'''
     if __name__ == "__main__":
-        import multiprocessing
         multiprocessing.freeze_support()  # Optional, safe to add
-        qualityAssessment_SSL(False, "D:/PHD/PhdData/SSL_DATA_PATCHESTest")
+        qualityAssessment_SSL(True, "C:/Users/SH37YE/Desktop/FullSizeSamples/SSL_Training/TrainingPatches")
 
 if train_QualityAssessment_Supervised == True:
 

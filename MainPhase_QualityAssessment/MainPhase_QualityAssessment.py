@@ -1,40 +1,41 @@
-
+import os
 import sys
-from pathlib import Path
-#from dinov2.train.train import main as train_main, get_args_parser
-import mlflow
-import torch
-from torch.utils.data import DataLoader
-import torch.optim as optim
-import torch.nn as nn
-import timm
-from PIL import Image
-from Helpers_General.Self_Supervised_learning_Helpers.SSL_functions import PILImageDataset, MicroscopyDataset, \
-    ssl_transform
-from MainPhase_QualityAssessment.SSL_DINO_TrainingLoop import DINO_training_loop
-from Utils_MLFLOW import setup_mlflow_experiment
-import os
-import os
-import torch
-import torch.nn as nn
-from torchvision import datasets, transforms
-from torch.utils.data import DataLoader
+from Helpers_General.warnings import suppress_stdout_stderr
+#sys.stdout = open(os.devnull, 'w')
+#sys.stderr = open(os.devnull, 'w')
 
+with suppress_stdout_stderr():
+    import torch
+    from dinov2.models.vision_transformer import vit_base
+    from dinov2.loss.dino_clstoken_loss import DINOLoss
+    import timm
+
+
+from datetime import datetime
+import time
+import mlflow
+from tqdm import tqdm
+from Utils_MLFLOW import setup_mlflow_experiment
+import torch
+from torch.utils.data import DataLoader
 from dinov2.CustomDataset import SSLImageDataset
 from dinov2.loss.CustomDINO import CustomDINOLoss
 from dinov2.models.vision_transformer import vit_base
-from dinov2.loss.dino_clstoken_loss import DINOLoss
 from dinov2.data import DataAugmentationDINO
 from torch.cuda.amp import GradScaler, autocast
 from copy import deepcopy
+import warnings
+import logging
+
+# Suppress irrelevant warnings
+warnings.filterwarnings("ignore", message=".*xFormers is available.*")
+warnings.filterwarnings("ignore", message=".*No module named 'triton'.*")
+warnings.filterwarnings("ignore", message=".*TypedStorage is deprecated.*")
+logging.getLogger().setLevel(logging.ERROR)
 
 os.environ["DINO_SINGLE_PROCESS"] = "1"
 
 def qualityAssessment_SSL(trackExperiment_QualityAssessment_SSL, ssl_data_path):
-
-    if trackExperiment_QualityAssessment_SSL:
-        #Setting up mlflow experimentation
-        experiment_id = setup_mlflow_experiment("Main Phase: Quality Assessment (SelfSupervised)")
 
     ''''''''''''''''''''''''''''''''''''''' SSL Pretext '''''''''''''''''''''''''''''''''''
     ''' The starting point of this SSL pretext training is an already pretrained model: using the dino model'''
@@ -44,14 +45,13 @@ def qualityAssessment_SSL(trackExperiment_QualityAssessment_SSL, ssl_data_path):
 
 
     # ---------------------- Config -----------------------
-    DATA_PATH = ssl_data_path  # Change this
+    DATA_PATH = ssl_data_path
     BATCH_SIZE = 128
     NUM_EPOCHS = 100
     LEARNING_RATE = 1e-4
     IMAGE_SIZE = 384
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     print("Using device:", DEVICE, "GPU: ", torch.cuda.get_device_name())
-    SAVE_PATH = "dinov2_base_selfsup_trained.pt"
     # -----------------------------------------------------
 
     # Create student and teacher models
@@ -69,7 +69,7 @@ def qualityAssessment_SSL(trackExperiment_QualityAssessment_SSL, ssl_data_path):
     teacher.to(DEVICE)
 
     # Optimizer and AMP scaler
-    optimizer = torch.optim.AdamW(student.parameters(), lr=LEARNING_RATE)
+    optimizer = torch.optim.AdamW(student.parameters(), lr=LEARNING_RATE, weight_decay=0.04)
     scaler = GradScaler()
 
     # Loss function
@@ -82,7 +82,7 @@ def qualityAssessment_SSL(trackExperiment_QualityAssessment_SSL, ssl_data_path):
         nepochs=NUM_EPOCHS,
     ).to(DEVICE)
 
-    # Transforms (you already have this part correct)
+    # Transforms
     transform = DataAugmentationDINO(
         global_crops_scale=(0.4, 1.0),
         local_crops_scale=(0.05, 0.4),
@@ -98,13 +98,54 @@ def qualityAssessment_SSL(trackExperiment_QualityAssessment_SSL, ssl_data_path):
         for student_param, teacher_param in zip(student_model.parameters(), teacher_model.parameters()):
             teacher_param.data = momentum * teacher_param.data + (1.0 - momentum) * student_param.data
 
-    # Training loop
+    if trackExperiment_QualityAssessment_SSL:
+        #Setting up mlflow experimentation
+        experiment_id = setup_mlflow_experiment("Main Phase: Quality Assessment (SelfSupervised)")
+        mlflow.start_run(run_name=f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}", experiment_id=experiment_id)
+        SAVE_PATH = "/" + experiment_id + "_dinov2_base_selfsup_trained.pt"
+        print("Experiment tracking via MLFLOW is ON!!:  ID:", experiment_id)
+
+        # ───── Hyperparameters ─────
+        mlflow.log_param("Hyp. Param - batch_size", BATCH_SIZE)
+        mlflow.log_param("Hyp. Param - num_epochs", NUM_EPOCHS)
+        mlflow.log_param("Hyp. Param - learning_rate", LEARNING_RATE)
+        mlflow.log_param("Hyp. Param - image_size", IMAGE_SIZE)
+
+        # ───── Loss Config ─────
+        mlflow.log_param("DINOLOSS_cfg - out_dim", 768)
+        mlflow.log_param("DINOLOSS_cfg - ncrops", 2)
+        mlflow.log_param("DINOLOSS_cfg - teacher_temp", 0.07)
+        mlflow.log_param("DINOLOSS_cfg - warmup_teacher_temp", 0.04)
+        mlflow.log_param("DINOLOSS_cfg - warmup_teacher_temp_epochs", 10)
+
+        # ───── Data Augmentation ─────
+        mlflow.log_param("SSL_Augmentation - global_crops_scale", str((0.4, 1.0)))
+        mlflow.log_param("SSL_Augmentation - local_crops_scale", str((0.05, 0.4)))
+        mlflow.log_param("SSL_Augmentation - local_crops_number", 0)
+
+        mlflow.set_tag("run_start_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    else:
+        print("Experiment tracking via MLFLOW is OFF!!")
+        SAVE_PATH = "dinov2_base_selfsup_trained.pt"
+
+
+    #Training setup stuff:
+    best_loss = float("inf")
+    best_model_path = f"Checkpoints/{experiment_id}_BEST_dinov2_base_selfsup_trained.pt"
+    final_model_path = f"Checkpoints/{experiment_id}_FINAL_dinov2_base_selfsup_trained.pt"
+    os.makedirs("Checkpoints", exist_ok=True)
+
+    start_time = time.time() #Lets time this sucker
+    print("LET THE TRAINING COMMENCE!!!!!")
+    # Actual training loop
+
     for epoch in range(NUM_EPOCHS):
         student.train()
         total_loss = 0.0
 
-        for images, _ in dataloader:
+        for batch_idx, (images, _) in enumerate(dataloader):
             flat_images = torch.stack([crop.to(DEVICE, non_blocking=True) for crops in images for crop in crops])
+
             with autocast():
                 student_output = student(flat_images, masks=None)
                 with torch.no_grad():
@@ -119,24 +160,37 @@ def qualityAssessment_SSL(trackExperiment_QualityAssessment_SSL, ssl_data_path):
             update_teacher(student, teacher)
             total_loss += loss.item()
 
+            if batch_idx % 1 == 0:
+                print(f"\n[Epoch {epoch + 1}/ {NUM_EPOCHS}] Batch {batch_idx}/{len(dataloader)} - Loss: {loss.item():.4f}")
+                if trackExperiment_QualityAssessment_SSL:
+                    mlflow.log_metric("gpu_memory_allocated_MB", torch.cuda.memory_allocated() / 1024 ** 2, step=epoch)
+                    mlflow.log_metric("gpu_memory_reserved_MB", torch.cuda.memory_reserved() / 1024 ** 2, step=epoch)
+                    mlflow.log_metric("Loss-Batch", loss.item(), step=epoch * len(dataloader) + batch_idx)
+
         avg_loss = total_loss / len(dataloader)
-        print(f"Epoch [{epoch + 1}/{NUM_EPOCHS}], Loss: {avg_loss:.4f}")
+        mlflow.log_metric("Average epoch loss", avg_loss, step=epoch)
 
-        if (epoch + 1) % 10 == 0:
-            torch.save(student.state_dict(), SAVE_PATH)
+        # Save best model
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            torch.save(student.state_dict(), best_model_path)
+            print(f"🔽 New best model saved at epoch {epoch + 1} with loss {best_loss:.4f}")
+            if trackExperiment_QualityAssessment_SSL:
+                mlflow.log_metric("best_model_loss", best_loss, step=epoch)
+                mlflow.log_artifact(best_model_path)
 
-    print("✅ Training completed. Final model saved at:", SAVE_PATH)
+        # Logging every epoch
+        print(f"📉 Epoch [{epoch + 1}/{NUM_EPOCHS}], Average loss for the epoch Loss: {avg_loss:.4f}")
 
+    # Final save and end
+    # Save final model
+    torch.save(student.state_dict(), final_model_path)
+    print("✅ Training completed. Final model saved at:", final_model_path)
 
-    metricSSL = "PH1_SSL"
-
-
-    if trackExperiment_QualityAssessment_SSL == True:
-        with mlflow.start_run(experiment_id=experiment_id) as run:
-
-            # Log parameters and metrics
-            mlflow.log_param("SSL_METRIC_TEST", metricSSL)
-
+    if trackExperiment_QualityAssessment_SSL:
+        mlflow.log_artifact(final_model_path)
+        mlflow.log_metric("training_time_sec", time.time() - start_time)
+        mlflow.end_run()
 
     ''''''''''''''''''''''''' Downstream task (Bounding box Classification)'''''''''''''''''''''''''''''''''
 '''
