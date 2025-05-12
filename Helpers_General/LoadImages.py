@@ -69,3 +69,4 @@ def load_images_from_folders_fast(root_folder, extensions=('.tif', '.tiff', '.pn
 
     print(f"✅ Loaded {len(images)} total images from all patch subfolders.")
     return images, filenames, paths
+

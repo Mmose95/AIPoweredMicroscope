@@ -2,8 +2,11 @@ import subprocess
 import warnings
 import logging
 import multiprocessing
-from MainPhase_QualityAssessment.MainPhase_QualityAssessment import qualityAssessment_SSL
 import os
+from MainPhase_QualityAssessment.Main_QualityAssessment_SSL_DINOV2 import qualityAssessment_SSL_DINOV2
+from MainPhase_QualityAssessment.Main_QualityAssessment_Supervised_YOLO import qualityAssessment_supervised_YOLO
+
+
 
 # Suppress irrelevant warnings
 warnings.filterwarnings("ignore", message=".*xFormers is available.*")
@@ -24,9 +27,8 @@ logging.getLogger("dinov2").setLevel(logging.ERROR)
 logging.getLogger().setLevel(logging.ERROR)
 
 ##Switches/Modes for training different networks.
-train_QualityAssessment_SSL = True
-CreatePatchesFromFullSizeImages = False
-train_QualityAssessment_Supervised = False
+train_QualityAssessment_SSL = False
+train_QualityAssessment_Supervised = True
 train_SpeciesDetermination = False
 
 
@@ -36,18 +38,38 @@ if __name__ == "__main__":
 
 ########################## Phase 1: Quality Assessment ##########################
 
+
+''' Prerequisite for SSL training:
+
+Create (unlabeled) patches for training of selfsupervised model:
+use Preprocessing > DataHandling > PatchCreationSSL.py to generate the patches needed
+'''
+
+
 if train_QualityAssessment_SSL == True:
 
-    '''training process'''
+    '''training process - Self-Supervised'''
     if __name__ == "__main__":
         multiprocessing.freeze_support()  # Optional, safe to add
-        qualityAssessment_SSL(True, "C:/Users/SH37YE/Desktop/FullSizeSamples/SSL_Training/TrainingPatches")
+        qualityAssessment_SSL_DINOV2(True, "C:/Users/SH37YE/Desktop/FullSizeSamples/SSL_Training/TrainingPatches")
+
+''' Prerequisite for supervised training:
+
+Create labeled data for training of supervised model:
+use Helpers_General > Supervised_learning_helpers > MainAreaSelection to generate candidate regions. 
+Upload these to CVAT via treat server to be labeled by Herlev (or other experts) 
+Download the labeled data from Cvat and convert the labels to fit supervised training (patching and label conversion)
+'''
 
 if train_QualityAssessment_Supervised == True:
 
-    something = 1
+    SSL_encoder_name = "./Checkpoints/" + "ExId_854681636342556727_run_20250428_154510_BEST_dinov2_selfsup_trained.pt"
 
-stop = 1
+    '''Training process - Supervised'''
+    qualityAssessment_supervised_YOLO(False, SSL_encoder_name)
+
+
+    stop = 1
 
 ########################## Phase 2: Species Determination ##########################
 

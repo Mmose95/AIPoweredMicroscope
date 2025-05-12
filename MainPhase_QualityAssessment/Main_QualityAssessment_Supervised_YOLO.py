@@ -1,0 +1,38 @@
+import math
+from datetime import datetime
+import mlflow
+import torch
+from dinov2.models.vision_transformer import vit_base, vit_small
+from Utils_MLFLOW import setup_mlflow_experiment
+
+
+def qualityAssessment_supervised_YOLO(trackExperiment_QualityAssessment_supervised, encoder_name):
+
+    if trackExperiment_QualityAssessment_supervised:
+        # Start mlflow experiment tracking
+        experiment_id = setup_mlflow_experiment("Main Phase: Quality Assessment (Supervised)")
+        runId = mlflow.start_run(run_name=f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                                     experiment_id=experiment_id)
+
+
+    # Compatibility stage: We need to add a Feature Pyramid network (FPN) to the SSL-trained DINOV2 model to make it compatible with a YOLO network.
+
+    # Isolate encoder backbone (by removing projection-head, which was saved during training).
+    ##load full (student / encoder model)
+    SSL_Encoder_full = torch.load(encoder_name)
+
+    # Initialize a clean backbone
+    backbone = vit_small(patch_size=16)
+    #backbone = vit_base(patch_size=)
+    #backbone = vit_large(...)
+
+    # Remove projection head parameters from state_dict
+    filtered_state = {k: v for k, v in SSL_Encoder_full.items() if "head" not in k}
+
+    # Load only matching weights
+    backbone.load_state_dict(filtered_state, strict=False)
+
+    # Insert '_backbone' before 'ExId'
+    backbone_encoder_name = encoder_name.replace('ExId', 'backbone_ExId')
+
+    torch.save(backbone.state_dict(), backbone_encoder_name)

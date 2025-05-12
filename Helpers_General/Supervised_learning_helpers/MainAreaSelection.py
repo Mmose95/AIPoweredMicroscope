@@ -4,15 +4,19 @@ Load all patches of a full sample and do a very broad candidate area selection e
 2) Can be used as a pre-analysis/efficiency-analysis in the final product with the purpose of not having to analyse all individual images but rather just until satisfied
 """
 
-import os
 import shutil
 import random
-import numpy as np
+import time
+
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-from PIL import Image
 import xml.etree.ElementTree as ET
 import re
+from PIL import Image
+import numpy as np
+import os
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 def natural_key(string_):
     """Helper function for natural sort"""
@@ -36,17 +40,22 @@ def calculate_adaptive_thresholds(image_array):
     dynamic_ratio = 0.20  # Default ratio, can be tuned
     return percentile_low, percentile_high, dynamic_ratio
 
-def extractCandidatePatches(source_folder, destination_folder, downscale_factor):
+def load_tile(tile_file, patch_folder):
+    tile_path = os.path.join(patch_folder, tile_file)
+    img = Image.open(tile_path)
+    tile_img = img.convert("L")
+    tile_img_color = img.convert("RGB")
+    return np.array(tile_img), np.array(tile_img_color), tile_path
+
+def extractCandidatePatches(source_folder, destination_folder, downscale_factor, tile_size):
     """
     Processes high-resolution images by stitching tiles together.
     Assumes that the files in the folder are arranged in a meander style.
     """
     sub_folders = [f.path for f in os.scandir(source_folder) if f.is_dir()]  # Get subfolders
 
-    tile_size = (2584, 1936)  # Known tile size
-
     for sub_folder in sub_folders:
-        print(f"Processing folder: {sub_folder}")
+        print(f"Processing folder: {sub_folder}: folder index: {sub_folders.index(sub_folder)+1} / {len(sub_folders)}")
 
         all_tile_arrays = []
         all_tile_arrays_RGB = []
@@ -58,17 +67,25 @@ def extractCandidatePatches(source_folder, destination_folder, downscale_factor)
         # Try using natural sort to ensure proper ordering:
         tile_files.sort(key=natural_key)
 
-        print("Tile files order:")
-        for i, f_name in enumerate(tile_files):
-            print(f"{i}: {f_name}")
+        #print("Tile files order:")
+        #for i, f_name in enumerate(tile_files):
+            #print(f"{i}: {f_name}")
 
-        for idx, tile_file in enumerate(tile_files, start=1):
-            tile_path = os.path.join(patch_folder, tile_file)
-            tile_img = Image.open(tile_path).convert("L")  # Convert to grayscale
-            tile_img_color = Image.open(tile_path)
-            print(f"Loading tile {idx} of {len(tile_files)}")
-            all_tile_arrays_RGB.append(np.array(tile_img_color))
-            all_tile_arrays.append(np.array(tile_img))
+        start_time = time.time()
+        #loading images in parallel to speed up the process! (load_tile is the loader function)
+        bound_loader = partial(load_tile, patch_folder=patch_folder)
+        with ThreadPoolExecutor() as executor:
+            results = list(executor.map(bound_loader, tile_files))
+
+        end_time = time.time()
+        elapsed = end_time - start_time
+
+        print(f"\nLoaded {len(tile_files)} images in {elapsed:.2f} seconds.")
+
+        # Unpack results
+        for tile_img, tile_img_color, tile_path in results:
+            all_tile_arrays.append(tile_img)
+            all_tile_arrays_RGB.append(tile_img_color)
             tile_paths.append(tile_path)
 
         # Extract grid dimensions from the metadata XML file
@@ -82,18 +99,18 @@ def extractCandidatePatches(source_folder, destination_folder, downscale_factor)
         print(f"Extracted Grid Size: {num_cols} x {num_rows} from {xml_path}")
         expected_tile_count = num_cols * num_rows
         actual_tile_count = len(all_tile_arrays)
-        print(f"Expected tile count: {expected_tile_count}, actual tile count: {actual_tile_count} --> Tiles match!")
         if actual_tile_count != expected_tile_count:
             print("Warning: Number of tiles does not match grid dimensions!")
+        else:
+            print(f"Expected tile count: {expected_tile_count}, actual tile count: {actual_tile_count} --> Tiles match!")
 
         # Create a blank image for stitching
         stitched_width = num_cols * tile_size[0]
         stitched_height = num_rows * tile_size[1]
         stitched_image = Image.new("RGB", (stitched_width, stitched_height))
 
-        # Choose the mapping depending on your file ordering.
+        #Map the tiles into the grid
         for k, tile_array in enumerate(all_tile_arrays_RGB):
-            # Mapping (try column-major first):
             col = k // num_rows
             row = k % num_rows
 
@@ -140,72 +157,89 @@ def extractCandidatePatches(source_folder, destination_folder, downscale_factor)
         global_low_thresh, global_high_thresh, global_ratio = calculate_adaptive_thresholds(np.array(stitched_gray))
         print(f"Computed Global Thresholds - Low: {global_low_thresh}, High: {global_high_thresh}, Ratio: {global_ratio}")
 
-        selected_patches = []
-        patch_number_saved = []
-        patch_number = 0
 
-        for x, tile_array in enumerate(all_tile_arrays):
-            saturation_status = is_saturated(tile_array, global_low_thresh, global_high_thresh, global_ratio)
-            patch_number += 1
-            if saturation_status == "balanced":
-                selected_patches.append(tile_paths[x])  # Store the corresponding file path
-                patch_number_saved.append(patch_number)
-        print(f"Total selected patches after global thresholding: {len(selected_patches)}")
+        selected_regions = []  # Store tuples of (top-left index, [4 paths])
+        for col in range(0, num_cols - 1, 2):
+            for row in range(0, num_rows - 1, 2):
+                idx_tl = row + col * num_rows
+                idx_tr = (row + 1) + col * num_rows
+                idx_bl = row + (col) * num_rows + num_rows
+                idx_br = (row + 1) + (col) * num_rows + num_rows
 
-        # **Step 4: Randomly Select and Move Patches**
-        num_to_sample = min(20, len(selected_patches))
-        selected_random_patches = random.sample(selected_patches, num_to_sample)
-        print(f"Final selected patches: {selected_random_patches}")
+                if max(idx_tl, idx_tr, idx_bl, idx_br) >= len(all_tile_arrays):
+                    continue
 
-        # Move selected files
-        for source_file in selected_random_patches:
-            file_name = os.path.basename(source_file)
-            destination_file = os.path.join(destination_folder, file_name)
-            shutil.copy(source_file, destination_file)
+                # Build 2x2 patch
+                top_row = np.hstack([all_tile_arrays[idx_tl], all_tile_arrays[idx_tr]])
+                bottom_row = np.hstack([all_tile_arrays[idx_bl], all_tile_arrays[idx_br]])
+                combined_tile = np.vstack([top_row, bottom_row])
 
+                saturation_status = is_saturated(combined_tile, global_low_thresh, global_high_thresh, global_ratio)
+                if saturation_status == "balanced":
+                    selected_regions.append((
+                        idx_tl,  # top-left index
+                        [tile_paths[idx_tl], tile_paths[idx_tr], tile_paths[idx_bl], tile_paths[idx_br]]
+                    ))
+
+        print(f"Total selected 2x2 regions: {len(selected_regions)}")
+
+        # Randomly pick from the 2x2 tile regions
+        num_to_sample = min(20, len(selected_regions))
+        sampled_regions = random.sample(selected_regions, num_to_sample)
+
+        for i, (idx_tl, paths) in enumerate(sampled_regions):
+            idx_tr = idx_tl + 1
+            idx_bl = idx_tl + num_rows
+            idx_br = idx_bl + 1
+
+            # Merge RGB tiles
+            top_row = np.hstack([all_tile_arrays_RGB[idx_tl], all_tile_arrays_RGB[idx_bl]])
+            bottom_row = np.hstack([all_tile_arrays_RGB[idx_tr], all_tile_arrays_RGB[idx_br]])
+            merged_image = np.vstack([top_row, bottom_row])
+
+            # Convert and save
+            merged_pil = Image.fromarray(merged_image)
+            sample_name = os.path.basename(tile_paths[0]).split("_")[0]
+            save_name = f"{sample_name}region_{i:02d}.png"
+            save_path = os.path.join(destination_folder, save_name)
+            merged_pil.save(save_path)
+
+        # ---- Visualization ----
         fig, ax = plt.subplots(figsize=(12, 12))
         ax.imshow(stitched_image_resized)
-
-        #compute rectangles to mark all candidate selected patches
-        for source_file in selected_patches:
-            # Find the tile index from the tile_paths list.
-            tile_idx = tile_paths.index(source_file)
-
-            # Compute column and row using the same logic.
-            col = tile_idx // num_rows
-            row = tile_idx % num_rows
-            # Compute scaled coordinates for visualization.
+        #plotting non-selected regions
+        for idx_tl, _ in selected_regions:
+            col = idx_tl // num_rows
+            row = idx_tl % num_rows
             x_scaled = int(col * tile_size[0] * downscale_factor)
             y_scaled = int(row * tile_size[1] * downscale_factor)
-            w_scaled = int(tile_size[0] * downscale_factor)
-            h_scaled = int(tile_size[1] * downscale_factor)
+            w_scaled = int(tile_size[0] * 2 * downscale_factor)
+            h_scaled = int(tile_size[1] * 2 * downscale_factor)
             rect = patches.Rectangle((x_scaled, y_scaled), w_scaled, h_scaled,
                                      linewidth=1, edgecolor="red", facecolor="none")
             ax.add_patch(rect)
-
-        #compute rectangles to mark the randomly selected candidate patches
-        for source_file in selected_random_patches:
-            # Find the tile index from the tile_paths list.
-            tile_idx = tile_paths.index(source_file)
-
-            # Compute column and row using the same logic.
-            col = tile_idx // num_rows
-            row = tile_idx % num_rows
-            # Compute scaled coordinates for visualization.
+        #plotting selected regions
+        for idx_tl, _ in sampled_regions:
+            col = idx_tl // num_rows
+            row = idx_tl % num_rows
             x_scaled = int(col * tile_size[0] * downscale_factor)
             y_scaled = int(row * tile_size[1] * downscale_factor)
-            w_scaled = int(tile_size[0] * downscale_factor)
-            h_scaled = int(tile_size[1] * downscale_factor)
+            w_scaled = int(tile_size[0] * 2 * downscale_factor)
+            h_scaled = int(tile_size[1] * 2 * downscale_factor)
             rect = patches.Rectangle((x_scaled, y_scaled), w_scaled, h_scaled,
-                                     linewidth=1, edgecolor="green", facecolor="none")
+                                     linewidth=2, edgecolor="green", facecolor="none")
             ax.add_patch(rect)
 
-
-        plt.title("Stitched Image with Debug Grid and Labels")
+        sample_name = os.path.basename(tile_paths[0]).split("_")[0]
+        plt.title(f"sample {sample_name}_Candidate Overview.png")
         plt.axis("off")
+        overview_path = os.path.join(destination_folder.split("SelectedFOVs")[0] + "/CandidateOverview/",
+                                     f"sample {sample_name}_Candidate Overview.png")
+        os.makedirs(os.path.dirname(overview_path), exist_ok=True)
+        plt.savefig(overview_path)
         plt.show()
 
 # **Execution**
-source_folder = "D:/PHD/PhdData/FullSizeSamples"
-destination_folder = "D:/PHD/PhdData/DataForAnnotation/"
-extractCandidatePatches(source_folder, destination_folder, downscale_factor=0.05)
+source_folder = "C:/Users/SH37YE/Desktop/FullSizeSamples/QA_Supervised/QA_Supervised_TestData/Original/" #Source folder should be the folder containing everything for a digitalized image i.e. should be just a path + sample number
+destination_folder = "C:/Users/SH37YE/Desktop/FullSizeSamples/QA_Supervised/QA_Supervised_TestData\SelectedFOVs/"
+extractCandidatePatches(source_folder, destination_folder, downscale_factor=0.05, tile_size = (2584, 1936))
