@@ -1,0 +1,7 @@
+path: /path/to/your/dataset
+train: images/train
+val: images/val
+
+names:
+  0: leukocyte
+  1: epithelial

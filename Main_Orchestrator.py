@@ -3,10 +3,12 @@ import warnings
 import logging
 import multiprocessing
 import os
+
+from Helpers_General.Supervised_learning_helpers.dino_backbone_for_yolo import DINOv2Backbone
 from MainPhase_QualityAssessment.Main_QualityAssessment_SSL_DINOV2 import qualityAssessment_SSL_DINOV2
 from MainPhase_QualityAssessment.Main_QualityAssessment_Supervised_YOLO import qualityAssessment_supervised_YOLO
 
-
+globals()["Helpers_General.Supervised_learning_helpers.dino_backbone_for_yolo.DINOv2Backbone"] = DINOv2Backbone
 
 # Suppress irrelevant warnings
 warnings.filterwarnings("ignore", message=".*xFormers is available.*")
@@ -45,7 +47,6 @@ Create (unlabeled) patches for training of selfsupervised model:
 use Preprocessing > DataHandling > PatchCreationSSL.py to generate the patches needed
 '''
 
-
 if train_QualityAssessment_SSL == True:
 
     '''training process - Self-Supervised'''
@@ -66,8 +67,15 @@ if train_QualityAssessment_Supervised == True:
     SSL_encoder_name = "./Checkpoints/" + "ExId_854681636342556727_run_20250428_154510_BEST_dinov2_selfsup_trained.pt"
 
     '''Training process - Supervised'''
-    qualityAssessment_supervised_YOLO(False, SSL_encoder_name)
+    import ultralytics.nn.tasks as yolo_tasks
+    from Helpers_General.Supervised_learning_helpers.dino_backbone_for_yolo import DINOv2Backbone
 
+    # 👇 Correct injection
+    yolo_tasks.__dict__[
+        "Helpers_General.Supervised_learning_helpers.dino_backbone_for_yolo.DINOv2Backbone"] = DINOv2Backbone
+
+    # Now call your training logic
+    qualityAssessment_supervised_YOLO(False, SSL_encoder_name)
 
     stop = 1
 

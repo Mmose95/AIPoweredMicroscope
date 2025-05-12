@@ -2,8 +2,12 @@ import math
 from datetime import datetime
 import mlflow
 import torch
-from dinov2.models.vision_transformer import vit_base, vit_small
+
+from Helpers_General.Supervised_learning_helpers.dino_backbone_for_yolo import DINOv2Backbone
+from dinov2.models.vision_transformer import vit_base, vit_small, vit_large
 from Utils_MLFLOW import setup_mlflow_experiment
+import torch.nn as nn
+from ultralytics import YOLO
 
 
 def qualityAssessment_supervised_YOLO(trackExperiment_QualityAssessment_supervised, encoder_name):
@@ -36,3 +40,20 @@ def qualityAssessment_supervised_YOLO(trackExperiment_QualityAssessment_supervis
     backbone_encoder_name = encoder_name.replace('ExId', 'backbone_ExId')
 
     torch.save(backbone.state_dict(), backbone_encoder_name)
+
+    with torch.cuda.device(0):
+        model = YOLO("MainPhase_QualityAssessment/dino_yoloV8.yaml")
+
+    model.train(
+        data="MainPhase_QualityAssessment/Supervised_Data_YOLO.yaml",
+        imgsz=384,
+        epochs=100,
+        batch=16,
+        device=0,  # Change to 'cpu' if needed
+        optimizer="Adam",  # Or "SGD"
+        lr0=1e-3,
+        warmup_epochs=3,
+        pretrained=False  # Very important: do NOT load YOLO pretrained weights
+    )
+
+    model.save("yolo_dino_final.pt")
