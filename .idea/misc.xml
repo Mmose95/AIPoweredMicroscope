@@ -4,4 +4,7 @@
     <option name="sdkName" value="AI_PowMic" />
   </component>
   <component name="ProjectRootManager" version="2" project-jdk-name="AI_PowMic" project-jdk-type="Python SDK" />
+  <component name="PythonCompatibilityInspectionAdvertiser">
+    <option name="version" value="3" />
+  </component>
 </project>

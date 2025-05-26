@@ -3,12 +3,13 @@ import warnings
 import logging
 import multiprocessing
 import os
+import sys
 
-from Helpers_General.Supervised_learning_helpers.dino_backbone_for_yolo import DINOv2Backbone
+from Helpers_General.Supervised_learning_helpers.Cloned_DINOV2_backbone_for_yolo import DinoV2New
+from Helpers_General.Supervised_learning_helpers.lambda_helper import TupleSelect
 from MainPhase_QualityAssessment.Main_QualityAssessment_SSL_DINOV2 import qualityAssessment_SSL_DINOV2
-from MainPhase_QualityAssessment.Main_QualityAssessment_Supervised_YOLO import qualityAssessment_supervised_YOLO
+from MainPhase_QualityAssessment.Main_QualityAssessment_Supervised_DINO import qualityAssessment_supervised_DINO
 
-globals()["Helpers_General.Supervised_learning_helpers.dino_backbone_for_yolo.DINOv2Backbone"] = DINOv2Backbone
 
 # Suppress irrelevant warnings
 warnings.filterwarnings("ignore", message=".*xFormers is available.*")
@@ -40,7 +41,6 @@ if __name__ == "__main__":
 
 ########################## Phase 1: Quality Assessment ##########################
 
-
 ''' Prerequisite for SSL training:
 
 Create (unlabeled) patches for training of selfsupervised model:
@@ -52,7 +52,7 @@ if train_QualityAssessment_SSL == True:
     '''training process - Self-Supervised'''
     if __name__ == "__main__":
         multiprocessing.freeze_support()  # Optional, safe to add
-        qualityAssessment_SSL_DINOV2(True, "C:/Users/SH37YE/Desktop/FullSizeSamples/SSL_Training/TrainingPatches")
+        qualityAssessment_SSL_DINOV2(True, "C:/Users/SH37YE/Desktop/FullSizeSamples/QA_SSL_Training/TrainingPatches")
 
 ''' Prerequisite for supervised training:
 
@@ -67,15 +67,23 @@ if train_QualityAssessment_Supervised == True:
     SSL_encoder_name = "./Checkpoints/" + "ExId_854681636342556727_run_20250428_154510_BEST_dinov2_selfsup_trained.pt"
 
     '''Training process - Supervised'''
-    import ultralytics.nn.tasks as yolo_tasks
-    from Helpers_General.Supervised_learning_helpers.dino_backbone_for_yolo import DINOv2Backbone
 
-    # 👇 Correct injection
+    '''YOLO supervised training '''
+
+    '''
+    import ultralytics.nn.tasks as yolo_tasks
+
+    #injection
     yolo_tasks.__dict__[
-        "Helpers_General.Supervised_learning_helpers.dino_backbone_for_yolo.DINOv2Backbone"] = DINOv2Backbone
+        "Helpers_General.Supervised_learning_helpers.Cloned_dino_backbone_for_yolo.DinoV2New"] = DinoV2New
+    yolo_tasks.__dict__["Helpers_General.Supervised_learning_helpers.lambda_helper.TupleSelect"] = TupleSelect
 
     # Now call your training logic
-    qualityAssessment_supervised_YOLO(False, SSL_encoder_name)
+    qualityAssessment_supervised_YOLO(False, SSL_encoder_name) '''
+
+    ''' DINO Supervised training: '''
+
+    qualityAssessment_supervised_DINO(False, SSL_encoder_name)
 
     stop = 1
 

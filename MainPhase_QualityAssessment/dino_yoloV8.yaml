@@ -1,37 +1,20 @@
+# MainPhase_QualityAssessment/dino_yoloV8.yaml
 
-#nc: 2
+# Number of classes
+nc: 2
 
-#backbone:
-  #[-1, 1, Helpers_General.Supervised_learning_helpers.dino_backbone_for_yolo.DINOv2Backbone, ["Checkpoints/backbone_ExId_854681636342556727_run_20250428_154510_BEST_dinov2_selfsup_trained.pt"]]
-
-#head:
-  #[[-1], 1, Detect, [nc]]
-
-
-
-# yolov8-custom.yaml
-
-# Parameters
-nc: 2 # Number of classes for Pascal VOC
-
-# Model scaling parameters
+# Scale (needed to satisfy YOLO's internal hooks)
 scales:
-  # [depth, width, max_channels]
-  n: [1, 1, 1024] # Adjusted to match backbone output
+  n: [1, 1, 1024]
 
-# Backbone configuration
+# Backbone with multiscale outputs
 backbone:
-  # [from, repeats, module, args]
-  - [-1, 1, DinoV2Patches, [384, 'small']] # Outputs 384 channels
+  - [null, 0, Helpers_General.Supervised_learning_helpers.Cloned_dino_backbone_for_yolo.DinoV2New,
+     [384, "small", "Checkpoints/backbone_ExId_854681636342556727_run_20250428_154510_BEST_dinov2_selfsup_trained.pt"]]
+  - [-1, 1, Helpers_General.Supervised_learning_helpers.lambda_helper.TupleSelect, [0]]  # 256x16x16
+  - [-2, 1, Helpers_General.Supervised_learning_helpers.lambda_helper.TupleSelect, [1]]  # 512x8x8
+  - [-3, 1, Helpers_General.Supervised_learning_helpers.lambda_helper.TupleSelect, [2]]  # 1024x4x4
 
-  # Other backbones available
-  # - [-1, 1, DinoV2Patches, [768, 'base']] # Outputs 768 channels
-  # - [-1, 1, DinoV2Patches, [1024, 'large']] # Outputs 1024 channels
-  # - [-1, 1, DinoV2Patches, [1536, 'giant']] # Outputs 1536 channels
-
-
-
-# Head configuration
+# Head (takes multiscale features)
 head:
-  # [from, repeats, module, args]
-  - [[-1], 1, Detect, [nc]] # 8: Detect layer
+  - [[-1, -2, -3], 1, Detect, [nc]]

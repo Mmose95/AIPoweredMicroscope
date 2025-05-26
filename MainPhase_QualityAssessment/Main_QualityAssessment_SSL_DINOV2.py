@@ -129,10 +129,10 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
         # Log model-specific configurations
         num_student_params = sum(p.numel() for p in student.parameters() if p.requires_grad)
         num_teacher_params = sum(p.numel() for p in teacher.parameters())
-        mlflow.log_param("student_num_trainable_parameters (Millions)", num_student_params/1e6)
-        mlflow.log_param("teacher_num_trainable_parameters (Millions)", num_teacher_params/1e6)
-        mlflow.log_param("student_total_parameters (Millions)", num_student_params/1e6)
-        mlflow.log_param("teacher_total_parameters (Millions)", num_teacher_params/1e6)
+        mlflow.log_param("student_num_trainable_parameters Millions", num_student_params/1e6)
+        mlflow.log_param("teacher_num_trainable_parameters Millions", num_teacher_params/1e6)
+        mlflow.log_param("student_total_parameters in millions", num_student_params/1e6)
+        mlflow.log_param("teacher_total_parameters in millions", num_teacher_params/1e6)
 
         # Log data augmentation parameters
         mlflow.log_param("augmentation_global_crops_scale", transform.global_crops_scale)

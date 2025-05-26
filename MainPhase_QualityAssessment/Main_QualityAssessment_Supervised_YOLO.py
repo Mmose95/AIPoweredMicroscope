@@ -3,7 +3,6 @@ from datetime import datetime
 import mlflow
 import torch
 
-from Helpers_General.Supervised_learning_helpers.dino_backbone_for_yolo import DINOv2Backbone
 from dinov2.models.vision_transformer import vit_base, vit_small, vit_large
 from Utils_MLFLOW import setup_mlflow_experiment
 import torch.nn as nn
@@ -14,7 +13,7 @@ def qualityAssessment_supervised_YOLO(trackExperiment_QualityAssessment_supervis
 
     if trackExperiment_QualityAssessment_supervised:
         # Start mlflow experiment tracking
-        experiment_id = setup_mlflow_experiment("Main Phase: Quality Assessment (Supervised)")
+        experiment_id = setup_mlflow_experiment("Main Phase: Quality Assessment (Supervised) YOLO")
         runId = mlflow.start_run(run_name=f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
                                      experiment_id=experiment_id)
 
@@ -41,8 +40,17 @@ def qualityAssessment_supervised_YOLO(trackExperiment_QualityAssessment_supervis
 
     torch.save(backbone.state_dict(), backbone_encoder_name)
 
-    with torch.cuda.device(0):
-        model = YOLO("MainPhase_QualityAssessment/dino_yoloV8.yaml")
+    import Helpers_General.Supervised_learning_helpers.lambda_helper as lambda_helper_module
+    globals()[
+        "Helpers_General.Supervised_learning_helpers.lambda_helper.TupleSelect"] = lambda_helper_module.TupleSelect
+
+    import pprint
+    pprint.pprint({k: v for k, v in globals().items() if "TupleSelect" in k})
+
+    model = YOLO("MainPhase_QualityAssessment/dino_yoloV8.yaml")
+
+    # Optionally, print model summary
+    model.info()
 
     model.train(
         data="MainPhase_QualityAssessment/Supervised_Data_YOLO.yaml",

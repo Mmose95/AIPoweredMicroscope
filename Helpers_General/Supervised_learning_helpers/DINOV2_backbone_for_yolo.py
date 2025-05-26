@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from dinov2.models.vision_transformer import vit_small
 
-class DINOv2Backbone(nn.Module):
+class DINOv2Backbone_YOLO(nn.Module):
     def __init__(self, checkpoint_path):
         super().__init__()
 
