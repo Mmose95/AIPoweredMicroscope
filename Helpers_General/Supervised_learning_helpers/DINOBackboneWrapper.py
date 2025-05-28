@@ -15,15 +15,21 @@ class DINOBackboneWrapper(nn.Module):
         if not isinstance(x, NestedTensor):
             x = NestedTensor(x, torch.zeros(x.shape[0], x.shape[2], x.shape[3], dtype=torch.bool, device=x.device))
 
-        features = self.backbone(x.tensors)  # feature maps as list of tensors
+        features, _ = self.backbone(x.tensors)  # feature maps as list of tensors
 
-        B, _, H, W = features[0].shape
-        mask = torch.zeros((B, H, W), dtype=torch.bool, device=features[0].device)
+        masks = x.mask
 
-        nested_features = NestedTensor(features[0], mask)  # only one feature level for now
+        # Wrap each output as a NestedTensor
+        nested_features = [NestedTensor(tensor, masks) for tensor in features]
         pos = self.position_embedding(x)
 
-        return features, pos
+        #B, _, H, W = features[0].shape
+        #mask = torch.zeros((B, H, W), dtype=torch.bool, device=features[0].device)
+
+        #nested_features = NestedTensor(features[0], mask)  # only one feature level for now
+        #pos = self.position_embedding(x)
+
+        return nested_features, pos
 
 
 

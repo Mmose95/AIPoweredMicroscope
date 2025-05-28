@@ -75,9 +75,8 @@ def qualityAssessment_supervised_DINO(trackExperiment, encoder_name, train_datas
                                   std=[0.229, 0.224, 0.225])
     ])
 
-    # Wrap the paths with actual dataset classes
-    train_dataset = DetectionDataset(images_dir=os.path.join(train_dataset, "Images"), labels_dir=os.path.join(train_dataset, "Labels"), transform=transform)
-    val_dataset = DetectionDataset(images_dir=os.path.join(val_dataset, "Images"), labels_dir=os.path.join(val_dataset, "Labels"),transform=transform)
+    train_dataset = DetectionDataset(images_dir=os.path.join(train_dataset, "Images"),labels_dir=os.path.join(train_dataset, "Labels"),transform=transform)
+    val_dataset = DetectionDataset(images_dir=os.path.join(val_dataset, "Images"),labels_dir=os.path.join(val_dataset, "Labels"),transform=transform)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True, drop_last=True, collate_fn=detection_collate_fn)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True, collate_fn=detection_collate_fn)
