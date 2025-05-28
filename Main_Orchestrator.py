@@ -1,93 +1,84 @@
-import subprocess
 import warnings
 import logging
+import subprocess
 import multiprocessing
 import os
-import sys
+from types import SimpleNamespace
 
+from Helpers_General.FolderSelection_input import select_training_folder
+from Helpers_General.FullDataSplits import fullDataSplits
 from Helpers_General.Supervised_learning_helpers.Cloned_DINOV2_backbone_for_yolo import DinoV2New
 from Helpers_General.Supervised_learning_helpers.lambda_helper import TupleSelect
 from MainPhase_QualityAssessment.Main_QualityAssessment_SSL_DINOV2 import qualityAssessment_SSL_DINOV2
 from MainPhase_QualityAssessment.Main_QualityAssessment_Supervised_DINO import qualityAssessment_supervised_DINO
-
 
 # Suppress irrelevant warnings
 warnings.filterwarnings("ignore", message=".*xFormers is available.*")
 warnings.filterwarnings("ignore", message=".*No module named 'triton'.*")
 warnings.filterwarnings("ignore", message=".*TypedStorage is deprecated.*")
 logging.getLogger().setLevel(logging.ERROR)
-
-# Suppress all warnings (recommended for production-like runs)
-warnings.filterwarnings("ignore")
-
-# Hide Python warnings emitted from imported libraries
-os.environ["PYTHONWARNINGS"] = "ignore"
-
-# Reduce logging from other packages (like timm or xFormers)
 logging.getLogger("transformers").setLevel(logging.ERROR)
 logging.getLogger("xformers").setLevel(logging.ERROR)
 logging.getLogger("dinov2").setLevel(logging.ERROR)
-logging.getLogger().setLevel(logging.ERROR)
 
-##Switches/Modes for training different networks.
+# Top-level switches
+generate_overall_dataSplits = False
 train_QualityAssessment_SSL = False
 train_QualityAssessment_Supervised = True
 train_SpeciesDetermination = False
 
-
-"""Initialize MLflow server for capturing experiments (remember to set "track experiment = true)"""
-if __name__ == "__main__":
+# Wrap the full program in main()
+def main():
+    # Start MLflow server
     subprocess.Popen(["StartMLflowServer.cmd"], shell=True)
 
-########################## Phase 1: Quality Assessment ##########################
+    SSL_Training_Data_Path = None
+    Supervised_Training_Data_Path = None
+    Supervised_Validation_Data_Path = None
 
-''' Prerequisite for SSL training:
+    # Prompt for data
+    if train_QualityAssessment_SSL:
+        print("Select the folder containing the training data for the SSL phase.")
+        SSL_Training_Data_Path = select_training_folder()
 
-Create (unlabeled) patches for training of selfsupervised model:
-use Preprocessing > DataHandling > PatchCreationSSL.py to generate the patches needed
-'''
+    if train_QualityAssessment_Supervised:
+        print("Select the folder containing the training data for the Supervised phase.")
+        Supervised_Training_Data_Path = select_training_folder()
+        print("Select the folder containing the validation data for the Supervised phase.")
+        Supervised_Validation_Data_Path = select_training_folder()
 
-if train_QualityAssessment_SSL == True:
+    # Generate data splits
+    if generate_overall_dataSplits:
+        fullDataSplits(
+            r"C:\Users\SH37YE\Desktop\Clinical Bacteria DataSet\DetectionDataSet\images",
+            r"C:\Users\SH37YE\Desktop\Clinical Bacteria DataSet\DetectionDataSet\labels",
+            r"C:\Users\SH37YE\Desktop\Clinical Bacteria DataSet\DetectionDataSet"
+        )
 
-    '''training process - Self-Supervised'''
-    if __name__ == "__main__":
-        multiprocessing.freeze_support()  # Optional, safe to add
-        qualityAssessment_SSL_DINOV2(True, "C:/Users/SH37YE/Desktop/FullSizeSamples/QA_SSL_Training/TrainingPatches")
+    # Phase 1: SSL
+    if train_QualityAssessment_SSL:
+        if SSL_Training_Data_Path:
+            qualityAssessment_SSL_DINOV2(True, SSL_Training_Data_Path)
+        else:
+            print("❌ No SSL data folder selected. Aborting.")
 
-''' Prerequisite for supervised training:
+    # Phase 2: Supervised
+    if train_QualityAssessment_Supervised:
+        SSL_encoder_name = "./Checkpoints/ExId_854681636342556727_run_20250428_154510_BEST_dinov2_selfsup_trained.pt"
+        if Supervised_Training_Data_Path:
+            qualityAssessment_supervised_DINO(
+                trackExperiment=False,
+                encoder_name=SSL_encoder_name,
+                train_dataset=Supervised_Training_Data_Path,
+                val_dataset=Supervised_Validation_Data_Path,
+            )
+        else:
+            print("❌ No Supervised training folder selected. Aborting.")
 
-Create labeled data for training of supervised model:
-use Helpers_General > Supervised_learning_helpers > MainAreaSelection to generate candidate regions. 
-Upload these to CVAT via treat server to be labeled by Herlev (or other experts) 
-Download the labeled data from Cvat and convert the labels to fit supervised training (patching and label conversion)
-'''
+    if train_SpeciesDetermination:
+        print("Phase 3 logic not implemented yet.")
 
-if train_QualityAssessment_Supervised == True:
-
-    SSL_encoder_name = "./Checkpoints/" + "ExId_854681636342556727_run_20250428_154510_BEST_dinov2_selfsup_trained.pt"
-
-    '''Training process - Supervised'''
-
-    '''YOLO supervised training '''
-
-    '''
-    import ultralytics.nn.tasks as yolo_tasks
-
-    #injection
-    yolo_tasks.__dict__[
-        "Helpers_General.Supervised_learning_helpers.Cloned_dino_backbone_for_yolo.DinoV2New"] = DinoV2New
-    yolo_tasks.__dict__["Helpers_General.Supervised_learning_helpers.lambda_helper.TupleSelect"] = TupleSelect
-
-    # Now call your training logic
-    qualityAssessment_supervised_YOLO(False, SSL_encoder_name) '''
-
-    ''' DINO Supervised training: '''
-
-    qualityAssessment_supervised_DINO(False, SSL_encoder_name)
-
-    stop = 1
-
-########################## Phase 2: Species Determination ##########################
-
-if train_SpeciesDetermination == True:
- bob = 1
+# Required to prevent multiprocessing issues on Windows
+if __name__ == '__main__':
+    multiprocessing.set_start_method('spawn', force=True)
+    main()

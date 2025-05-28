@@ -59,6 +59,7 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
 
     # Create student and teacher models
     student = vit_small(patch_size=16, img_size=IMAGE_SIZE)
+    student.num_channels = student.embed_dim
     teacher = deepcopy(student)
     for param in teacher.parameters():
         param.requires_grad = False
@@ -138,6 +139,9 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
         mlflow.log_param("augmentation_global_crops_scale", transform.global_crops_scale)
         mlflow.log_param("augmentation_local_crops_scale", transform.local_crops_scale)
         mlflow.log_param("augmentation_local_crops_number", transform.local_crops_number)
+
+        # Log data path(s)
+        mlflow.log_param("Training_data_path", ssl_data_path)
 
         # Start time
         mlflow.set_tag("run_start_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
