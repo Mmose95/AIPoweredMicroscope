@@ -17,19 +17,10 @@ class DINOBackboneWrapper(nn.Module):
 
         features, _ = self.backbone(x.tensors)  # feature maps as list of tensors
 
-        masks = x.mask
 
-        # Wrap each output as a NestedTensor
-        nested_features = [NestedTensor(tensor, masks) for tensor in features]
-        pos = self.position_embedding(x)
+        pos = [self.position_embedding(nf).to(dtype=nf.tensors.dtype) for nf in features]
 
-        #B, _, H, W = features[0].shape
-        #mask = torch.zeros((B, H, W), dtype=torch.bool, device=features[0].device)
-
-        #nested_features = NestedTensor(features[0], mask)  # only one feature level for now
-        #pos = self.position_embedding(x)
-
-        return nested_features, pos
+        return features, pos
 
 
 

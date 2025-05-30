@@ -41,6 +41,7 @@ with torch.no_grad():
 ''' print(f"Predicted class: {predicted_class}")
 
 
+
 import matplotlib.pyplot as plt
 
 # Visualize the image with segmentation
