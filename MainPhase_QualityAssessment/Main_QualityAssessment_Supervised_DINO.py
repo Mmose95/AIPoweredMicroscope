@@ -7,7 +7,7 @@ import mlflow
 from datetime import datetime
 from torch.utils.data import DataLoader
 
-from DINO.config.DINO.DINO_5Scale_Custom import get_default_dino_args
+from DINO.config.DINO.DINO_5Scale_Custom import Custom_args
 from DINO.datasets import transforms as dino_transforms
 from DINO.models import build_dino
 from DINO.engine import train_one_epoch, evaluate
@@ -36,17 +36,19 @@ def qualityAssessment_supervised_DINO(trackExperiment, encoder_name, train_datas
 
     from dinov2.models.vision_transformer import vit_small
 
-    args = get_default_dino_args()
+    args = Custom_args()
     args.device = device
 
     # ---------------- Model Setup ----------------
     # Load pretrained DINOv2 encoder (ViT)
-    state_dict = torch.load(encoder_name, map_location="cpu")
-    vit_model = vit_small(patch_size=16)
-    vit_model.load_state_dict({k: v for k, v in state_dict.items() if "head" not in k}, strict=False)
+    Pretrained_DINOV2_State_dict = torch.load(encoder_name, map_location="cpu")
+    vit_model_architechture = vit_small(patch_size=16)
+
+
+    vit_model_architechture.load_state_dict({k: v for k, v in Pretrained_DINOV2_State_dict.items() if "head" not in k}, strict=False)
 
     # Wrap into your custom projection model
-    dinov2_extractor = DinoV2ForDINONEW(vit_model).to(device)
+    dinov2_extractor = DinoV2ForDINONEW(vit_model_architechture).to(device)
 
     # Create positional encoding
     positional_encoder = PositionEmbeddingSine(num_pos_feats=128, normalize=True)
