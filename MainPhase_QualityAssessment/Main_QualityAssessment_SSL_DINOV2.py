@@ -5,6 +5,10 @@ import sys
 from pathlib import Path
 
 from Helpers_General.Self_Supervised_learning_Helpers.Linear_probing_for_SSL_Model_Selection import run_linear_probe_all
+from Helpers_General.Self_Supervised_learning_Helpers.Linear_probing_for_SSL_Model_SelectionV2 import \
+    run_linear_probe_all_RFDETR
+from Helpers_General.Self_Supervised_learning_Helpers.Linear_probing_for_SSL_Model_SelectionV3 import \
+    run_linear_probe_all_with_rfdetr
 from Helpers_General.Self_Supervised_learning_Helpers.generate_balanced_patch_subset_for_probing import generate_dataset_for_linear_probing
 from Helpers_General.warnings import suppress_stdout_stderr
 #sys.stdout = open(os.devnull, 'w')
@@ -185,7 +189,7 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
     os.makedirs("Checkpoints", exist_ok=True)
 
     start_time = time.time() #Lets time this sucker
-    print("LET THE TRAINING COMMENCE!!!!!")
+    print("Self-supervised training started...")
     # Actual training loop
 
     for epoch in range(NUM_EPOCHS):
@@ -296,7 +300,7 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
     on all models saved during SSL training'''
 
     generate_dataset_for_linear_probing(ssl_data_path, save_folder)
-    best_model_path = run_linear_probe_all(ssl_data_path, save_folder, id_only)
+    best_model_path = run_linear_probe_all_with_rfdetr(ssl_data_path, save_folder, id_only)
 
 
     return best_model_path
