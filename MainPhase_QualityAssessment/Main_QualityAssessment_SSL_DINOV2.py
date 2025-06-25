@@ -61,7 +61,7 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
     # ---------------------- Config -----------------------
     DATA_PATH = ssl_data_path
     BATCH_SIZE = 128
-    NUM_EPOCHS = 1 #300
+    NUM_EPOCHS = 300
     LEARNING_RATE = 2e-4
     IMAGE_SIZE = 224
     save_model_at_every_n = 50 #how often we save the student and teacher model (used in linear probing to select the best model for downstream task)
@@ -185,7 +185,7 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
     #Training setup stuff:
     best_loss = float("inf")
     best_model_path = f"{save_folder}/ExId_{experiment_id}_{runId.info.run_name}_BEST_dinov2_selfsup_trained.pt"
-    #final_model_path = f"{save_folder}/ExId_{experiment_id}_{runId.info.run_name}_FINAL_dinov2_selfsup_trained.pt"
+    final_model_path = f"{save_folder}/ExId_{experiment_id}_{runId.info.run_name}_FINAL_dinov2_selfsup_trained.pt"
     os.makedirs("Checkpoints", exist_ok=True)
 
     start_time = time.time() #Lets time this sucker
@@ -276,31 +276,32 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
         # Save best model
         if avg_loss < best_loss:
             best_loss = avg_loss
-            #torch.save({'model': student.state_dict()}, best_model_path)
+            torch.save({'model': student.state_dict()}, best_model_path)
             print(f"🔽 New best model saved at epoch {epoch + 1} with loss {best_loss:.4f}")
-            #if trackExperiment_QualityAssessment_SSL:
-                #mlflow.log_metric("best_model_loss", best_loss, step=epoch)
-                #mlflow.log_artifact(best_model_path)
+            if trackExperiment_QualityAssessment_SSL:
+                mlflow.log_metric("best_model_loss", best_loss, step=epoch)
+                mlflow.log_artifact(best_model_path)
 
         # Logging every epoch
         print(f"📉 Epoch [{epoch + 1}/{NUM_EPOCHS}], Average loss for the epoch Loss: {avg_loss:.4f}")
 
     # Final save and end
     # Save final model
-    #torch.save({'model': student.state_dict()}, final_model_path)
-    #print("✅ Training completed. Final model saved at:", final_model_path)
+    torch.save({'model': student.state_dict()}, final_model_path)
+    print("✅ Training completed. Final model saved at:", final_model_path)
 
     if trackExperiment_QualityAssessment_SSL:
-        #mlflow.log_artifact(final_model_path)
+        mlflow.log_artifact(final_model_path)
         mlflow.log_metric("training_time_sec", time.time() - start_time)
         mlflow.end_run()
 
-    '''To select the best model for the downstram task we do a linear probing on a purified subset of our data: 
+    ''' THIS HAVE BEEN PAUSED FOR NOW DUE TO CONCERNS OF NOT BEING EFFICIENT WHEN WE NEED OBJECT DETECTION PROBING AND NOT LINEAR PROBING (WHICH MIGHT BE A TOO TOUGH TASK) 
+    ----- BUT ITS ALMOST WORKING ----- To select the best model for the downstram task we do a linear probing on a purified subset of our data: 
     We check all our supervised data for patches that only contain one class. These are selected and split into test, val and train to train a small linear classifier
     on all models saved during SSL training'''
 
-    generate_dataset_for_linear_probing(ssl_data_path, save_folder)
-    best_model_path = run_linear_probe_all_with_rfdetr(ssl_data_path, save_folder, id_only)
+    #generate_dataset_for_linear_probing(ssl_data_path, save_folder)
+    #best_model_path = run_linear_probe_all_with_rfdetr(ssl_data_path, save_folder, id_only)
 
 
     return best_model_path

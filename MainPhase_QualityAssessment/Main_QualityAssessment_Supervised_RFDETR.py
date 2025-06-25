@@ -97,6 +97,22 @@ def qualityAssessment_supervised_RFDETR(trackExperiment, encoder_name, supervise
         trackExperiment=trackExperiment,
         amp=True,
         max_dets=[1, 30],
-        early_stopping=True,
+        early_stopping=False,
         onecyclelr=True,
     )
+
+    '''#Debug run.
+    model.train(
+        dataset_dir=supervised_data_path,
+        epochs=3,                      # 🔽 Minimal epoch
+        batch_size=2,                 # 🔽 Tiny batch for quick data load
+        grad_accum_steps=1,          # 🔽 No accumulation
+        lr=1e-4,                      # 🔁 Leave default or reduce slightly
+        num_queries=100,              # 🔽 Lower if model allows
+        num_workers=8,                # 🔽 For reproducibility & simplicity
+        trackExperiment=trackExperiment,
+        amp=False,                    # 🔽 Disable AMP to avoid extra overhead
+        max_dets=[1, 10],             # 🔽 Fewer detections = faster COCO eval
+        early_stopping=False,         # 🔽 Not needed for 1 epoch
+        onecyclelr=False,             # 🔽 Skip scheduler for fast test
+    )'''
