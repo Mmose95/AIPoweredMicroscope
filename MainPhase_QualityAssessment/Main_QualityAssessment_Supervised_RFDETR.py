@@ -89,16 +89,17 @@ def qualityAssessment_supervised_RFDETR(trackExperiment, encoder_name, supervise
     model.train(
         dataset_dir=supervised_data_path,
         epochs=60,
-        batch_size=16, #16
-        grad_accum_steps=2,
+        batch_size=8, #16
+        grad_accum_steps=4,
         lr=2e-4,
-        num_queries=300,
-        num_workers=8,
+        num_queries=100,
+        num_workers=12,
         trackExperiment=trackExperiment,
         amp=True,
         max_dets=[1, 30],
         early_stopping=False,
         onecyclelr=True,
+        persistent_workers=True,
     )
 
     '''#Debug run.

@@ -161,13 +161,11 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
         n_labels = len(list(label_dir.glob("*.txt"))) #This just counts the original label folder since it has 1 txt file pr label.
         mlflow.log_param("number of images used in training", str(n_labels))
 
-
         # Log hyperparameters dynamically
         mlflow.log_param("batch_size", BATCH_SIZE)
         mlflow.log_param("num_epochs", NUM_EPOCHS)
         mlflow.log_param("learning_rate", LEARNING_RATE)
         mlflow.log_param("image_size", IMAGE_SIZE)
-
 
         # Log dynamic loss configuration
         mlflow.log_param("dino_loss_out_dim", dino_loss.out_dim)
@@ -282,7 +280,7 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
                     mlflow.log_metric("entropy_student", student_entropy.item(), step=epoch * len(dataloader) + batch_idx)
                     mlflow.log_metric("entropy_teacher", teacher_entropy.item(), step=epoch * len(dataloader) + batch_idx)
 
-        avg_loss = total_loss / max(1, (batch_idx + 1) // accumulation_steps)
+        avg_loss = total_loss / max(1, (batch_idx + 1) // accumulation_steps) #Average epoch loss
         mlflow.log_metric("Loss-Epoch", avg_loss, step=epoch)
 
         student_path = f"{save_folder}/epoch_{epoch + 1}_student.pt"
@@ -335,7 +333,7 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
                 mlflow.log_artifact(teacher_path)
         # ────────────────────────────────────────────────────────────
 
-        # keep global best_loss_seen for tolerance test - this is already saved elsewhere, but lets keep it clean.
+        # keep global best_loss_seen for tolerance test - this is already saved elsewhere, but keep it clean.
         best_loss_seen = min(best_loss_seen, avg_loss)
 
         # Saving models just based on number of epochs
