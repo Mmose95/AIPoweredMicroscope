@@ -20,7 +20,7 @@ with suppress_stdout_stderr():
     from dinov2.loss.dino_clstoken_loss import DINOLoss
     import timm
 
-
+import torch.nn.functional as F
 from datetime import datetime
 import time
 import mlflow
@@ -58,13 +58,27 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
     '''
 
 
-    # ---------------------- Config -----------------------
+    # ---------------------- Configs -----------------------
     DATA_PATH = ssl_data_path
+
+    #training cfgs
     BATCH_SIZE = 128
     NUM_EPOCHS = 300
-    LEARNING_RATE = 2e-4
+    LEARNING_RATE = 4e-4
     IMAGE_SIZE = 224
+    accumulation_steps = 4  # to reach 4x batch size
+
+    #model selection
+    CHECKPOINT_FREQ = 1  # evaluate every N epochs (not expensive to check)
+    WARMUP_EPOCHS = 5  # ignore very early epochs to get over the fluctuating start
+    #ENTROPY_GAP_THRESHOLD = 0.4  # |H_s − H_t| (diff. student and teacher)
+    LOSS_TOLERANCE = 1.2  # ≤ 120 % of best loss so far
+    TOP_K = 5  # keep at most K checkpoints
+    EPOCH_DISTANCE_MIN = 10  # diversify epochs in Top-K
+    top_checkpoints = []
+    best_loss_seen = float("inf")
     save_model_at_every_n = 50 #how often we save the student and teacher model (used in linear probing to select the best model for downstream task)
+
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     print("Using device:", DEVICE, "GPU: ", torch.cuda.get_device_name())
     # -----------------------------------------------------
@@ -103,7 +117,7 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
 
     # Transforms
     transform = DataAugmentationDINO(
-        global_crops_scale=(0.4, 1.0),
+        global_crops_scale=(0.3, 1.0),
         local_crops_scale=(0.05, 0.4),
         local_crops_number=8
     )
@@ -117,6 +131,10 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
         for student_param, teacher_param in zip(student_model.parameters(), teacher_model.parameters()):
             teacher_param.data = momentum * teacher_param.data + (1.0 - momentum) * student_param.data
     #####END OF UPDATE_TEACHER(): You have confused this enough times....
+
+    def compute_entropy(p):
+        # p: (B, C) probabilities
+        return -(p * (p + 1e-6).log()).sum(dim=-1).mean()
 
     if trackExperiment_QualityAssessment_SSL:
         # Start mlflow experiment tracking
@@ -195,57 +213,65 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
     for epoch in range(NUM_EPOCHS):
         student.train()
         total_loss = 0.0
+        num_accumulated_steps = 0
+        optimizer.zero_grad()
 
         for batch_idx, (images, _) in enumerate(dataloader):
-            num_global_crops = dino_loss.ncrops - transform.local_crops_number
-            num_local_crops = transform.local_crops_number
-            total_crops = num_global_crops + num_local_crops
-
-            batch_size = len(images)
-
             with autocast():
-                # Student processes ALL crops (global + local):
-                # First stack all global crops, then local crops separately
+                # --- MOVE ALL FORWARD CODE INSIDE HERE ---
+                num_global_crops = dino_loss.ncrops - transform.local_crops_number
+                num_local_crops = transform.local_crops_number
+                total_crops = num_global_crops + num_local_crops
+
+                batch_size = len(images)
+
+                # Prepare global and local crops
                 global_crops = torch.cat([torch.stack([crops[i].to(DEVICE, non_blocking=True)
                                                        for i in range(num_global_crops)])
-                                          for crops in images])  # (batch_size*num_global_crops, C, H, W)
-
+                                          for crops in images])
                 local_crops = torch.cat([torch.stack([crops[i].to(DEVICE, non_blocking=True)
                                                       for i in range(num_global_crops, total_crops)])
-                                         for crops in images])  # (batch_size*num_local_crops, C, H, W)
+                                         for crops in images])
+                all_crops = torch.cat([global_crops, local_crops])
 
-                # Concatenate global + local explicitly
-                all_crops = torch.cat([global_crops, local_crops])  # (batch_size*(global+local), C, H, W)
-
-                # Pass through student
                 student_output = student(all_crops)
 
-                # Teacher ONLY sees global crops
                 with torch.no_grad():
                     teacher_output = teacher(global_crops)
 
-                # Now explicitly chunk student output:
+                # Extract just the global part from student_output
+                student_global_output = student_output[:batch_size * num_global_crops]
+
+                # Compute entropy
+                student_probs = F.softmax(student_global_output, dim=-1)
+                teacher_probs = F.softmax(teacher_output, dim=-1)
+
+                student_entropy = compute_entropy(student_probs)
+                teacher_entropy = compute_entropy(teacher_probs)
+
+                # Chunk outputs
                 student_global_chunks = student_output[:batch_size * num_global_crops].chunk(num_global_crops)
                 student_local_chunks = student_output[batch_size * num_global_crops:].chunk(num_local_crops)
                 student_chunks = student_global_chunks + student_local_chunks
-
-                # Teacher outputs are straightforward:
                 teacher_chunks = teacher_output.chunk(num_global_crops)
 
-                # Compute loss with explicitly structured chunks:
-                loss = dino_loss(student_chunks, teacher_chunks)
-                total_loss += loss.item()
+                # Compute loss
+                loss = dino_loss(student_chunks, teacher_chunks) / accumulation_steps
 
             scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad()
+
+            if (batch_idx + 1) % accumulation_steps == 0:
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+                total_loss += loss.item() * accumulation_steps
+                num_accumulated_steps += 1
 
             momentum = get_dinov2_teacher_momentum(epoch, NUM_EPOCHS)
             update_teacher(student, teacher, momentum)
 
             if batch_idx % 1 == 0:
-                print(f"\n[Epoch {epoch + 1}/ {NUM_EPOCHS}] Batch {batch_idx}/{len(dataloader)} - Loss: {loss.item():.4f}")
+                print(f"\n[Epoch {epoch + 1}/ {NUM_EPOCHS}] Batch {batch_idx + 1}/{len(dataloader)} - Loss: {loss.item():.4f}")
                 if trackExperiment_QualityAssessment_SSL:
                     mlflow.log_metric("gpu_memory_allocated_MB", torch.cuda.memory_allocated() / 1024 ** 2, step=epoch)
                     mlflow.log_metric("gpu_memory_reserved_MB", torch.cuda.memory_reserved() / 1024 ** 2, step=epoch)
@@ -253,12 +279,70 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
                     #mlflow.log_metric("student_param_norm", student.backbone[0].encoder.patch_embed.proj.weight.norm().item(), step=epoch)
                     #mlflow.log_metric("teacher_param_norm", teacher.backbone[0].encoder.patch_embed.proj.weight.norm().item(), step=epoch)
                     mlflow.log_metric("learning_rate", scheduler.get_last_lr()[0], step=epoch)
+                    mlflow.log_metric("entropy_student", student_entropy.item(), step=epoch * len(dataloader) + batch_idx)
+                    mlflow.log_metric("entropy_teacher", teacher_entropy.item(), step=epoch * len(dataloader) + batch_idx)
 
-        avg_loss = total_loss / len(dataloader)
+        avg_loss = total_loss / max(1, (batch_idx + 1) // accumulation_steps)
+        mlflow.log_metric("Loss-Epoch", avg_loss, step=epoch)
 
+        student_path = f"{save_folder}/epoch_{epoch + 1}_student.pt"
+        teacher_path = f"{save_folder}/epoch_{epoch + 1}_teacher.pt"
+
+        # ── smart-checkpoint logic ──────────────────────────────────────────
+        entropy_gap = abs(student_entropy.item() - teacher_entropy.item())
+
+        should_consider = (
+                epoch >= WARMUP_EPOCHS and
+                (epoch + 1) % CHECKPOINT_FREQ == 0 and
+                #entropy_gap < ENTROPY_GAP_THRESHOLD and
+                avg_loss <= best_loss_seen * LOSS_TOLERANCE
+        )
+
+        if should_consider:
+            student_path = f"{save_folder}/epoch_{epoch + 1}_student.pt"
+            teacher_path = f"{save_folder}/epoch_{epoch + 1}_teacher.pt"
+
+            # ---------- maintain Top-K -------------
+            if len(top_checkpoints) < TOP_K:
+                torch.save({'model': student.state_dict()}, student_path)
+                torch.save({'model': teacher.state_dict()}, teacher_path)
+                top_checkpoints.append((epoch + 1, avg_loss, student_path, teacher_path))
+                top_checkpoints.sort(key=lambda x: x[1])  # by loss
+            else:
+                # worst currently stored
+                worst_idx = max(range(TOP_K), key=lambda i: top_checkpoints[i][1])
+                worst_loss = top_checkpoints[worst_idx][1]
+
+                # keep diversity: distance in epochs ≥ EPOCH_DISTANCE_MIN
+                epoch_diffs = [abs((epoch + 1) - ep) for ep, *_ in top_checkpoints]
+
+                if avg_loss < worst_loss and all(d >= EPOCH_DISTANCE_MIN for d in epoch_diffs):
+                    # delete worst checkpoint files
+                    _, _, w_stu, w_tea = top_checkpoints[worst_idx]
+                    for p in [w_stu, w_tea]:
+                        if os.path.exists(p): os.remove(p)
+
+                    # save new better one
+                    torch.save({'model': student.state_dict()}, student_path)
+                    torch.save({'model': teacher.state_dict()}, teacher_path)
+                    top_checkpoints[worst_idx] = (epoch + 1, avg_loss, student_path, teacher_path)
+                    top_checkpoints.sort(key=lambda x: x[1])
+
+            if trackExperiment_QualityAssessment_SSL:
+                mlflow.log_metric("entropy_gap", entropy_gap, step=epoch)
+                mlflow.log_metric("ckpt_avg_loss", avg_loss, step=epoch)
+                mlflow.log_artifact(student_path)
+                mlflow.log_artifact(teacher_path)
+        # ────────────────────────────────────────────────────────────
+
+        # keep global best_loss_seen for tolerance test - this is already saved elsewhere, but lets keep it clean.
+        best_loss_seen = min(best_loss_seen, avg_loss)
+
+        # Saving models just based on number of epochs
         if (epoch + 1) % save_model_at_every_n == 0:
             student_path = f"{save_folder}/epoch_{epoch + 1}_student.pt"
             teacher_path = f"{save_folder}/epoch_{epoch + 1}_teacher.pt"
+
 
             torch.save({'model': student.state_dict()}, student_path)
             torch.save({'model': teacher.state_dict()}, teacher_path)
@@ -270,6 +354,7 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
                 mlflow.log_artifact(teacher_path)
                 mlflow.log_metric("Average epoch loss", avg_loss, step=epoch)
                 mlflow.log_metric("teacher_momentum", momentum, step=epoch)
+
         # Step the scheduler
         scheduler.step()
 

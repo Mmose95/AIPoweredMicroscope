@@ -75,14 +75,14 @@ def main():
             r"C:\Users\SH37YE\Desktop\Clinical_Bacteria_DataSet\DetectionDataSet"
         )
 
-    # Phase 1: SSL
+    ####################################### Phase 1: SSL #######################################
     if train_QualityAssessment_SSL:
         if SSL_Training_Data_Path:
             SSL_encoder_name = qualityAssessment_SSL_DINOV2(True, SSL_Training_Data_Path)
         else:
             print("❌ No SSL data folder selected. Aborting.")
 
-    # Phase 2: Supervised
+    ####################################### Phase 2: Supervised #######################################
     if train_QualityAssessment_Supervised:
 
         qualityAssessment_supervised_RFDETR(
