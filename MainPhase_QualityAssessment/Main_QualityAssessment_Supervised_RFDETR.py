@@ -117,3 +117,6 @@ def qualityAssessment_supervised_RFDETR(trackExperiment, encoder_name, supervise
         early_stopping=False,         # 🔽 Not needed for 1 epoch
         onecyclelr=False,             # 🔽 Skip scheduler for fast test
     )'''
+
+
+    #NUMBER TO BEAT IN TEST: . For both validation and test sets, the mAP 0.5 score exceeds 0.73
