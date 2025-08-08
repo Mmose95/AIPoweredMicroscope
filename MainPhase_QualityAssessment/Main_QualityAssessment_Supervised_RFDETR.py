@@ -98,7 +98,7 @@ def qualityAssessment_supervised_RFDETR(trackExperiment, encoder_name, supervise
         amp=True,
         max_dets=[1, 30],
         early_stopping=False,
-        onecyclelr=True,
+        onecyclelr=False,
         persistent_workers=True,
     )
 
