@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from util.misc import NestedTensor
+from util import NestedTensor
 
 class DetectionCollateFn:
     def __init__(self, model):

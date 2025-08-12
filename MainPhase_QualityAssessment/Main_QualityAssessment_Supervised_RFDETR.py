@@ -1,31 +1,10 @@
 import os
 import shutil
-import time
-from os import mkdir
 from pathlib import Path
-from types import SimpleNamespace
 import re
 import torch
-import mlflow
-from datetime import datetime
-from torch.utils.data import DataLoader
-
-from DINO.config.DINO.DINO_4scale import num_queries
-from DINO.config.DINO.DINO_5Scale_Custom import Custom_args
-from DINO.datasets import transforms as dino_transforms
-from DINO.models import build_dino
-from DINO.engine import train_one_epoch, evaluate
-from DINO.models.dino.position_encoding import PositionEmbeddingSine
-from Helpers_General.Supervised_learning_helpers.DINOBackboneWrapper import DINOBackboneWrapper
-from Helpers_General.collate_fn import detection_collate_fn
-from Utils_MLFLOW import setup_mlflow_experiment
-from Helpers_General.Supervised_learning_helpers.DINOV2Backbone_DINONEW import DinoV2ForDINONEW
-from Helpers_General.Supervised_learning_helpers.DetectionDataset import DetectionDataset
-import torch.nn as nn
 
 from detr import RFDETRBase
-from dinov2.models.vision_transformer import vit_small
-import copy
 
 
 def qualityAssessment_supervised_RFDETR(trackExperiment, encoder_name, supervised_data_path):

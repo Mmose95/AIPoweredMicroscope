@@ -2,8 +2,6 @@ from pathlib import Path
 from datetime import datetime
 import shutil
 import tempfile
-import json
-from collections import defaultdict
 import torch
 import mlflow
 import pandas as pd
