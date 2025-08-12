@@ -22,9 +22,26 @@ from MainPhase_QualityAssessment.Main_QualityAssessment_Supervised_RFDETR import
 # You can also override any of these via environment variables of the same name.
 # =========================
 
+#Determine basedir
+import os, glob, os.path as op
+
+def _detect_user_base():
+    aau = glob.glob("/work/Member Files:*")
+    if aau:
+        return op.basename(aau[0])        # e.g. "Member Files: MatiasMose#8097"
+    sdu = [d for d in glob.glob("/work/*#*") if op.isdir(d)]
+    return op.basename(sdu[0]) if sdu else None
+
+USER_BASE_DIR = os.environ.get("USER_BASE_DIR") or _detect_user_base()
+if not USER_BASE_DIR:
+    raise RuntimeError("Could not determine USER_BASE_DIR")
+os.environ["USER_BASE_DIR"] = USER_BASE_DIR  # make it available to child processes too
+
+print("USER_BASE_DIR =", USER_BASE_DIR)
+
 # If you set SSL_TRAINING_DATA to a folder path => Phase 1 (SSL) will run and produce an encoder.
 # If you leave SSL_TRAINING_DATA empty/None => we assume SSL already trained and you must set SSL_ENCODER_PATH.
-SSL_TRAINING_DATA = os.getenv("SSL_TRAINING_DATA", "/work/Member Files: MatiasMose#8097/Clinical Bacteria Dataset/DetectionDataSet/SSL").strip() or None
+SSL_TRAINING_DATA = os.getenv("SSL_TRAINING_DATA", "/work/" + USER_BASE_DIR + "/Clinical Bacteria Dataset/DetectionDataSet/SSL").strip() or None
 
 # Supervised data path (required if you run supervised training)
 SUPERVISED_TRAINING_DATA = os.getenv("SUPERVISED_TRAINING_DATA", "").strip() or None
@@ -82,7 +99,8 @@ def main() -> None:
             )
         print(f"[SSL] Starting SSL training with data: {SSL_TRAINING_DATA}")
         # Your SSL function returns the encoder identifier/name/path you need later
-        encoder_name_or_path = qualityAssessment_SSL_DINOV2(True, SSL_TRAINING_DATA)
+
+        encoder_name_or_path = qualityAssessment_SSL_DINOV2(True, SSL_TRAINING_DATA, USER_BASE_DIR)
         print(f"[SSL] Finished. Encoder produced: {encoder_name_or_path}")
 
     # ---------------------------------

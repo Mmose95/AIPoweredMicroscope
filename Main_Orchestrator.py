@@ -78,7 +78,8 @@ def main():
     ####################################### Phase 1: SSL #######################################
     if train_QualityAssessment_SSL:
         if SSL_Training_Data_Path:
-            SSL_encoder_name = qualityAssessment_SSL_DINOV2(True, SSL_Training_Data_Path)
+            pretrained_model_path = "./Checkpoints/Pretrained_Models/VIT_BASE_DINOV2.bin"
+            SSL_encoder_name = qualityAssessment_SSL_DINOV2(True, SSL_Training_Data_Path, pretrained_model_path)
         else:
             print("❌ No SSL data folder selected. Aborting.")
 
