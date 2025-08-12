@@ -1,0 +1,3 @@
+%cd /work/projects/myproj
+# If your UCloud paths are hardcoded in the file, just run it:
+%run -i Main_Orchestrator_UCloud.py
