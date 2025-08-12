@@ -91,8 +91,7 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
         param.requires_grad = False
 
     # Load weights
-    state_dict = torch.load("./Checkpoints/Pretrained_Models/VIT_BASE_DINOV2.bin", map_location="cpu") #VIT BASE MODEL
-    #state_dict = torch.load("./Checkpoints/Pretrained_Models/VIT_SMALL_DINOV2.bin", map_location="cpu") #VIT SMALL MODEL
+    state_dict = torch.load("/work/Member Files: MatiasMose#8097/Checkpoints/Pretrained_Models/VIT_BASE_DINOV2.bin", map_location="cpu") #VIT BASE MODEL
     student.load_state_dict(state_dict, strict=False)
     teacher.load_state_dict(state_dict, strict=False)
 

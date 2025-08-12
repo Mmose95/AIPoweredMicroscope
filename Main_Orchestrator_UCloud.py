@@ -24,7 +24,7 @@ from MainPhase_QualityAssessment.Main_QualityAssessment_Supervised_RFDETR import
 
 # If you set SSL_TRAINING_DATA to a folder path => Phase 1 (SSL) will run and produce an encoder.
 # If you leave SSL_TRAINING_DATA empty/None => we assume SSL already trained and you must set SSL_ENCODER_PATH.
-SSL_TRAINING_DATA = os.getenv("SSL_TRAINING_DATA", "C:/Users/SH37YE\Desktop\Clinical_Bacteria_DataSet\DetectionDataSet\SSL").strip() or None
+SSL_TRAINING_DATA = os.getenv("SSL_TRAINING_DATA", "/work/Member Files: MatiasMose#8097/Clinical Bacteria Dataset/DetectionDataSet/SSL").strip() or None
 
 # Supervised data path (required if you run supervised training)
 SUPERVISED_TRAINING_DATA = os.getenv("SUPERVISED_TRAINING_DATA", "").strip() or None
