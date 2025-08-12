@@ -23,7 +23,7 @@ import mlflow
 import torch
 import rfdetr.util.misc as utils
 from rfdetr.datasets.coco_eval import CocoEvaluator
-from util.misc import NestedTensor
+from rfdetr.util.misc import NestedTensor
 
 try:
     from torch.amp import autocast, GradScaler
@@ -208,7 +208,7 @@ import rfdetr.util.misc as utils
 from rfdetr.datasets.coco_eval import CocoEvaluator
 from sympy import false
 
-from util.misc import NestedTensor
+from rfdetr.util.misc import NestedTensor
 
 try:
     from torch.amp import autocast, GradScaler

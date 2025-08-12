@@ -4,7 +4,7 @@ from pathlib import Path
 import re
 import torch
 
-from detr import RFDETRBase
+from rfdetr import RFDETRBase
 
 
 def qualityAssessment_supervised_RFDETR(trackExperiment, encoder_name, supervised_data_path):
