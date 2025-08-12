@@ -6,7 +6,7 @@ import torch
 import mlflow
 import pandas as pd
 
-from detr import RFDETRBase
+from rfdetr import RFDETRBase
 from Utils_MLFLOW import setup_mlflow_experiment
 
 
