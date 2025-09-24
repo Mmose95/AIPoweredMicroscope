@@ -41,7 +41,7 @@ logging.getLogger().setLevel(logging.ERROR)
 os.environ["DINO_SINGLE_PROCESS"] = "1"
 
 
-def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data_path):
+def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data_path, USER_BASE_DIR):
     ''''''''''''''''''''''''''''''''''''''' SSL Pretext '''''''''''''''''''''''''''''''''''
     ''' The starting point of this SSL pretext training is an already pretrained model: using the dino model'''
 
@@ -85,7 +85,9 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
 
     # Load weights
     # Use on ucloud
-    state_dict = torch.load("/work + /Checkpoints/Pretrained_Models/VIT_BASE_DINOV2.bin", map_location="cpu")  # VIT BASE MODEL
+    state_dict = torch.load("/work + /Checkpoints/Pretrained_Models/VIT_BASE_DINOV2.bin",
+                            map_location="cpu")  # VIT BASE MODEL
+
     # Use on Local
     # state_dict = torch.load("./Checkpoints/Pretrained_Models/VIT_BASE_DINOV2.bin", map_location="cpu")  # VIT BASE MODEL
 
