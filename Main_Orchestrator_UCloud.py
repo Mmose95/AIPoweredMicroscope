@@ -46,7 +46,9 @@ print("USER_BASE_DIR =", USER_BASE_DIR)
 #SSL_TRAINING_DATA = os.getenv("SSL_TRAINING_DATA", "/work/" + USER_BASE_DIR + "/Clinical Bacteria Dataset/DetectionDataSet/SSL").strip() or None
 
 #Own Dataset
-SSL_TRAINING_DATA = os.getenv("SSL_TRAINING_DATA", "/work/" + USER_BASE_DIR + "/CellScanData/Zoom10x - Quality Assessment/Self-supervised/").strip() or None
+#SSL_TRAINING_DATA = os.getenv("SSL_TRAINING_DATA", "/work/" + USER_BASE_DIR + "/CellScanData/Zoom10x - Quality Assessment/Self-supervised/").strip() or None
+SSL_TRAINING_DATA = os.getenv("SSL_TRAINING_DATA", "/work/" + "/CellScanData/Zoom10x - Quality Assessment/Self-supervised/").strip() or None
+
 
 # Supervised data path (required if you run supervised training)
 SUPERVISED_TRAINING_DATA = os.getenv("SUPERVISED_TRAINING_DATA", "").strip() or None
