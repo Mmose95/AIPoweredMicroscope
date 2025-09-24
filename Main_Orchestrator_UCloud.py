@@ -25,20 +25,6 @@ from MainPhase_QualityAssessment.Main_QualityAssessment_Supervised_RFDETR import
 #Determine basedir
 import os, glob, os.path as op
 
-def _detect_user_base():
-    aau = glob.glob("/work/Member Files:*")
-    if aau:
-        return op.basename(aau[0])        # e.g. "Member Files: MatiasMose#8097"
-    sdu = [d for d in glob.glob("/work/*#*") if op.isdir(d)]
-    return op.basename(sdu[0]) if sdu else None
-
-USER_BASE_DIR = os.environ.get("USER_BASE_DIR") or _detect_user_base()
-if not USER_BASE_DIR:
-    raise RuntimeError("Could not determine USER_BASE_DIR")
-os.environ["USER_BASE_DIR"] = USER_BASE_DIR  # make it available to child processes too
-
-print("USER_BASE_DIR =", USER_BASE_DIR)
-
 # If you set SSL_TRAINING_DATA to a folder path => Phase 1 (SSL) will run and produce an encoder.
 # If you leave SSL_TRAINING_DATA empty/None => we assume SSL already trained and you must set SSL_ENCODER_PATH.
 
@@ -107,7 +93,7 @@ def main() -> None:
         print(f"[SSL] Starting SSL training with data: {SSL_TRAINING_DATA}")
         # Your SSL function returns the encoder identifier/name/path you need later
 
-        encoder_name_or_path = qualityAssessment_SSL_DINOV2(True, SSL_TRAINING_DATA, USER_BASE_DIR)
+        encoder_name_or_path = qualityAssessment_SSL_DINOV2(True, SSL_TRAINING_DATA)
         print(f"[SSL] Finished. Encoder produced: {encoder_name_or_path}")
 
     # ---------------------------------
