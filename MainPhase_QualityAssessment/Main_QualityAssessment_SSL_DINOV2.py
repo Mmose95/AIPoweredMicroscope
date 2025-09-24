@@ -9,12 +9,11 @@ from Helpers_General.Self_Supervised_learning_Helpers.Linear_probing_for_SSL_Mod
     run_linear_probe_all_RFDETR
 from Helpers_General.Self_Supervised_learning_Helpers.Linear_probing_for_SSL_Model_SelectionV3 import \
     run_linear_probe_all_with_rfdetr
-from Helpers_General.Self_Supervised_learning_Helpers.generate_balanced_patch_subset_for_probing import generate_dataset_for_linear_probing
-#sys.stdout = open(os.devnull, 'w')
-#sys.stderr = open(os.devnull, 'w')
+from Helpers_General.Self_Supervised_learning_Helpers.generate_balanced_patch_subset_for_probing import \
+    generate_dataset_for_linear_probing
 
 import torch.nn.functional as F
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 import mlflow
 from tqdm import tqdm
@@ -39,41 +38,46 @@ logging.getLogger().setLevel(logging.ERROR)
 
 os.environ["DINO_SINGLE_PROCESS"] = "1"
 
-def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data_path, USER_BASE_DIR):
 
+# ---- time formatting helper ----
+def _fmt_secs(s: float) -> str:
+    m, s = divmod(int(s), 60)
+    h, m = divmod(m, 60)
+    return f"{h:d}h {m:02d}m {s:02d}s"
+
+
+def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data_path, USER_BASE_DIR):
     ''''''''''''''''''''''''''''''''''''''' SSL Pretext '''''''''''''''''''''''''''''''''''
     ''' The starting point of this SSL pretext training is an already pretrained model: using the dino model'''
 
     ''' Broad explainer: To use the DINOV2 repro: https://github.com/facebookresearch/dinov2/tree/main - I had to bypass the distributed training setup (i.e. convert to a single gpu setup).
     Also a pretrained model was used (based on copious image datasets), and a custom dataloader was created.
-    
+
     https://huggingface.co/facebook/dinov2-base/tree/main
     '''
-
 
     # ---------------------- Configs -----------------------
     DATA_PATH = ssl_data_path
 
-    #training cfgs
+    # training cfgs
     BATCH_SIZE = 128
     NUM_EPOCHS = 300
     LEARNING_RATE = 4e-4
     IMAGE_SIZE = 224
     accumulation_steps = 4  # to reach 4x batch size
 
-    #model selection
-    CHECKPOINT_FREQ = 1  # evaluate every N epochs (not expensive to check)
-    WARMUP_EPOCHS = 5  # ignore very early epochs to get over the fluctuating start
-    #ENTROPY_GAP_THRESHOLD = 0.4  # |H_s − H_t| (diff. student and teacher)
+    # model selection
+    CHECKPOINT_FREQ = 1  # evaluate every N epochs
+    WARMUP_EPOCHS = 5  # ignore very early epochs
     LOSS_TOLERANCE = 1.2  # ≤ 120 % of best loss so far
     TOP_K = 5  # keep at most K checkpoints
-    EPOCH_DISTANCE_MIN = 10  # diversify epochs in Top-K
+    EPOCH_DISTANCE_MIN = 10
     top_checkpoints = []
     best_loss_seen = float("inf")
-    save_model_at_every_n = 50 #how often we save the student and teacher model (used in linear probing to select the best model for downstream task)
+    save_model_at_every_n = 50
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    print("Using device:", DEVICE, "GPU: ", torch.cuda.get_device_name())
+    print("Using device:", DEVICE, "GPU: ", torch.cuda.get_device_name() if torch.cuda.is_available() else "CPU")
     # -----------------------------------------------------
 
     # Create student and teacher models
@@ -84,11 +88,11 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
         param.requires_grad = False
 
     # Load weights
-    #Use on ucloud
-    state_dict = torch.load("/work/" + USER_BASE_DIR + "/Checkpoints/Pretrained_Models/VIT_BASE_DINOV2.bin", map_location="cpu") #VIT BASE MODEL
-
-    #Use on Local
-    #state_dict = torch.load("./Checkpoints/Pretrained_Models/VIT_BASE_DINOV2.bin", map_location="cpu")  # VIT BASE MODEL
+    # Use on ucloud
+    state_dict = torch.load("/work/" + USER_BASE_DIR + "/Checkpoints/Pretrained_Models/VIT_BASE_DINOV2.bin",
+                            map_location="cpu")  # VIT BASE MODEL
+    # Use on Local
+    # state_dict = torch.load("./Checkpoints/Pretrained_Models/VIT_BASE_DINOV2.bin", map_location="cpu")  # VIT BASE MODEL
 
     student.load_state_dict(state_dict, strict=False)
     teacher.load_state_dict(state_dict, strict=False)
@@ -108,7 +112,7 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
         ncrops=10,
         warmup_teacher_temp=0.04,
         teacher_temp=0.07,
-        warmup_teacher_temp_epochs=round(NUM_EPOCHS*0.3),
+        warmup_teacher_temp_epochs=round(NUM_EPOCHS * 0.3),
         nepochs=NUM_EPOCHS,
     ).to(DEVICE)
 
@@ -119,7 +123,7 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
         local_crops_number=8
     )
 
-    # Use your new dataset class
+    # Dataset / loader
     dataset = SSLImageDataset(DATA_PATH, transform=transform)
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=8, pin_memory=True)
 
@@ -127,7 +131,8 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
     def update_teacher(student_model, teacher_model, momentum):
         for student_param, teacher_param in zip(student_model.parameters(), teacher_model.parameters()):
             teacher_param.data = momentum * teacher_param.data + (1.0 - momentum) * student_param.data
-    #####END OF UPDATE_TEACHER(): You have confused this enough times....
+
+    ##### END OF UPDATE_TEACHER()
 
     def compute_entropy(p):
         # p: (B, C) probabilities
@@ -136,27 +141,28 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
     if trackExperiment_QualityAssessment_SSL:
         # Start mlflow experiment tracking
         experiment_id = setup_mlflow_experiment("Main Phase: Quality Assessment (SelfSupervised)")
-        runId = mlflow.start_run(run_name=f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}", experiment_id=experiment_id)
+        runId = mlflow.start_run(run_name=f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                                 experiment_id=experiment_id)
 
         save_folder = "./Checkpoints/" + runId.info.run_name
         id_only = runId.info.run_name
         os.makedirs(save_folder, exist_ok=True)
 
-        #logging the data:
+        # logging the data:
         image_folder = Path(save_folder + "/SSL")
         os.makedirs(image_folder, exist_ok=True)
         output_json = image_folder / "SSLdata_filenames.json"
 
-        jpg_files = sorted([f.name for f in Path(ssl_data_path + "/images").glob("*.jpg")])
+        jpg_files = sorted([f.name for f in Path(ssl_data_path + "/images").glob("*") if f.is_file() and f.suffix.lower() in {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}])
         with open(output_json, "w") as f:
             json.dump(jpg_files, f, indent=2)
 
         print("Experiment tracking via MLFLOW is ON!!:  ID:", experiment_id)
 
-        #to save the number of images used in this training we just count the number of labels/images
+        # to save the number of images used in this training we just count the number of labels/images
         label_dir = Path(ssl_data_path) / "labels"
-        n_labels = len(list(label_dir.glob("*.txt"))) #This just counts the original label folder since it has 1 txt file pr label.
-        mlflow.log_param("number of images used in training", str(n_labels))
+        n_labels = len(list(label_dir.glob("*.txt")))  # number of label files
+        mlflow.log_param("number_of_images_used_in_training", str(n_labels))
 
         # Log hyperparameters dynamically
         mlflow.log_param("batch_size", BATCH_SIZE)
@@ -174,10 +180,10 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
         # Log model-specific configurations
         num_student_params = sum(p.numel() for p in student.parameters() if p.requires_grad)
         num_teacher_params = sum(p.numel() for p in teacher.parameters())
-        mlflow.log_param("student_num_trainable_parameters Millions", num_student_params/1e6)
-        mlflow.log_param("teacher_num_trainable_parameters Millions", num_teacher_params/1e6)
-        mlflow.log_param("student_total_parameters in millions", num_student_params/1e6)
-        mlflow.log_param("teacher_total_parameters in millions", num_teacher_params/1e6)
+        mlflow.log_param("student_num_trainable_parameters_M", num_student_params / 1e6)
+        mlflow.log_param("teacher_num_trainable_parameters_M", num_teacher_params / 1e6)
+        mlflow.log_param("student_total_parameters_M", num_student_params / 1e6)
+        mlflow.log_param("teacher_total_parameters_M", num_teacher_params / 1e6)
 
         # Log data augmentation parameters
         mlflow.log_param("augmentation_global_crops_scale", transform.global_crops_scale)
@@ -193,23 +199,28 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
         print("Experiment tracking via MLFLOW is OFF!!")
         SAVE_PATH = "dinov2_base_selfsup_trained.pt"
 
-
-
-    #Training setup stuff:
+    # Training setup stuff:
     best_loss = float("inf")
     best_model_path = f"{save_folder}/ExId_{experiment_id}_{runId.info.run_name}_BEST_dinov2_selfsup_trained.pt"
     final_model_path = f"{save_folder}/ExId_{experiment_id}_{runId.info.run_name}_FINAL_dinov2_selfsup_trained.pt"
     os.makedirs("Checkpoints", exist_ok=True)
 
-    start_time = time.time() #Lets time this sucker
-    print("Self-supervised training started...")
-    # Actual training loop
+    # ---- timing/ETA bookkeeping ----
+    train_t0 = time.perf_counter()
+    epoch_times = []
+    ema_epoch_time = None
+    ALPHA = 0.3  # EMA smoothing
 
+    print("Self-supervised training started...")
+
+    # Actual training loop
     for epoch in range(NUM_EPOCHS):
+        epoch_t0 = time.perf_counter()
         student.train()
         total_loss = 0.0
         num_accumulated_steps = 0
         optimizer.zero_grad()
+        samples_this_epoch = 0
 
         for batch_idx, (images, _) in enumerate(dataloader):
             with autocast():
@@ -219,6 +230,7 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
                 total_crops = num_global_crops + num_local_crops
 
                 batch_size = len(images)
+                samples_this_epoch += batch_size
 
                 # Prepare global and local crops
                 global_crops = torch.cat([torch.stack([crops[i].to(DEVICE, non_blocking=True)
@@ -266,19 +278,44 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
             update_teacher(student, teacher, momentum)
 
             if batch_idx % 1 == 0:
-                print(f"\n[Epoch {epoch + 1}/ {NUM_EPOCHS}] Batch {batch_idx + 1}/{len(dataloader)} - Loss: {loss.item():.4f}")
+                print(
+                    f"\n[Epoch {epoch + 1}/ {NUM_EPOCHS}] Batch {batch_idx + 1}/{len(dataloader)} - Loss: {loss.item():.4f}")
                 if trackExperiment_QualityAssessment_SSL:
                     mlflow.log_metric("gpu_memory_allocated_MB", torch.cuda.memory_allocated() / 1024 ** 2, step=epoch)
                     mlflow.log_metric("gpu_memory_reserved_MB", torch.cuda.memory_reserved() / 1024 ** 2, step=epoch)
                     mlflow.log_metric("Loss-Batch", loss.item(), step=epoch * len(dataloader) + batch_idx)
-                    #mlflow.log_metric("student_param_norm", student.backbone[0].encoder.patch_embed.proj.weight.norm().item(), step=epoch)
-                    #mlflow.log_metric("teacher_param_norm", teacher.backbone[0].encoder.patch_embed.proj.weight.norm().item(), step=epoch)
                     mlflow.log_metric("learning_rate", scheduler.get_last_lr()[0], step=epoch)
-                    mlflow.log_metric("entropy_student", student_entropy.item(), step=epoch * len(dataloader) + batch_idx)
-                    mlflow.log_metric("entropy_teacher", teacher_entropy.item(), step=epoch * len(dataloader) + batch_idx)
+                    mlflow.log_metric("entropy_student", student_entropy.item(),
+                                      step=epoch * len(dataloader) + batch_idx)
+                    mlflow.log_metric("entropy_teacher", teacher_entropy.item(),
+                                      step=epoch * len(dataloader) + batch_idx)
 
-        avg_loss = total_loss / max(1, (batch_idx + 1) // accumulation_steps) #Average epoch loss
-        mlflow.log_metric("Loss-Epoch", avg_loss, step=epoch)
+        avg_loss = total_loss / max(1, (batch_idx + 1) // accumulation_steps)  # Average epoch loss
+        if trackExperiment_QualityAssessment_SSL:
+            mlflow.log_metric("Loss-Epoch", avg_loss, step=epoch)
+
+        # ---- per-epoch timing + ETA ----
+        epoch_sec = time.perf_counter() - epoch_t0
+        epoch_times.append(epoch_sec)
+        ema_epoch_time = epoch_sec if ema_epoch_time is None else (ALPHA * epoch_sec + (1 - ALPHA) * ema_epoch_time)
+
+        elapsed_sec = time.perf_counter() - train_t0
+        remaining_epochs = NUM_EPOCHS - (epoch + 1)
+        eta_sec = ema_epoch_time * remaining_epochs
+        eta_finish = datetime.now() + timedelta(seconds=eta_sec)
+        img_per_sec = samples_this_epoch / epoch_sec if epoch_sec > 0 else 0.0
+
+        if trackExperiment_QualityAssessment_SSL:
+            mlflow.log_metric("epoch_time_sec", epoch_sec, step=epoch + 1)
+            mlflow.log_metric("elapsed_time_sec", elapsed_sec, step=epoch + 1)
+            mlflow.log_metric("eta_sec", eta_sec, step=epoch + 1)
+            mlflow.log_metric("images_per_sec_epoch", img_per_sec, step=epoch + 1)
+            mlflow.set_tag("eta_finish_localtime", eta_finish.strftime("%Y-%m-%d %H:%M:%S"))
+
+        print(
+            f"⏱ Epoch {epoch + 1}/{NUM_EPOCHS} | time {_fmt_secs(epoch_sec)} | "
+            f"elapsed {_fmt_secs(elapsed_sec)} | ETA {_fmt_secs(eta_sec)} (~{eta_finish:%Y-%m-%d %H:%M})"
+        )
 
         student_path = f"{save_folder}/epoch_{epoch + 1}_student.pt"
         teacher_path = f"{save_folder}/epoch_{epoch + 1}_teacher.pt"
@@ -289,14 +326,10 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
         should_consider = (
                 epoch >= WARMUP_EPOCHS and
                 (epoch + 1) % CHECKPOINT_FREQ == 0 and
-                #entropy_gap < ENTROPY_GAP_THRESHOLD and
                 avg_loss <= best_loss_seen * LOSS_TOLERANCE
         )
 
         if should_consider:
-            student_path = f"{save_folder}/epoch_{epoch + 1}_student.pt"
-            teacher_path = f"{save_folder}/epoch_{epoch + 1}_teacher.pt"
-
             # ---------- maintain Top-K -------------
             if len(top_checkpoints) < TOP_K:
                 torch.save({'model': student.state_dict()}, student_path)
@@ -304,20 +337,15 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
                 top_checkpoints.append((epoch + 1, avg_loss, student_path, teacher_path))
                 top_checkpoints.sort(key=lambda x: x[1])  # by loss
             else:
-                # worst currently stored
                 worst_idx = max(range(TOP_K), key=lambda i: top_checkpoints[i][1])
                 worst_loss = top_checkpoints[worst_idx][1]
-
-                # keep diversity: distance in epochs ≥ EPOCH_DISTANCE_MIN
                 epoch_diffs = [abs((epoch + 1) - ep) for ep, *_ in top_checkpoints]
 
                 if avg_loss < worst_loss and all(d >= EPOCH_DISTANCE_MIN for d in epoch_diffs):
-                    # delete worst checkpoint files
                     _, _, w_stu, w_tea = top_checkpoints[worst_idx]
                     for p in [w_stu, w_tea]:
                         if os.path.exists(p): os.remove(p)
 
-                    # save new better one
                     torch.save({'model': student.state_dict()}, student_path)
                     torch.save({'model': teacher.state_dict()}, teacher_path)
                     top_checkpoints[worst_idx] = (epoch + 1, avg_loss, student_path, teacher_path)
@@ -330,18 +358,15 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
                 mlflow.log_artifact(teacher_path)
         # ────────────────────────────────────────────────────────────
 
-        # keep global best_loss_seen for tolerance test - this is already saved elsewhere, but keep it clean.
+        # keep global best_loss_seen for tolerance test
         best_loss_seen = min(best_loss_seen, avg_loss)
 
-        # Saving models just based on number of epochs
+        # Saving models at a fixed cadence
         if (epoch + 1) % save_model_at_every_n == 0:
             student_path = f"{save_folder}/epoch_{epoch + 1}_student.pt"
             teacher_path = f"{save_folder}/epoch_{epoch + 1}_teacher.pt"
-
-
             torch.save({'model': student.state_dict()}, student_path)
             torch.save({'model': teacher.state_dict()}, teacher_path)
-
             print(f"💾 Saved checkpoint at epoch {epoch + 1}: student + teacher")
 
             if trackExperiment_QualityAssessment_SSL:
@@ -363,25 +388,20 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
                 mlflow.log_artifact(best_model_path)
 
         # Logging every epoch
-        print(f"📉 Epoch [{epoch + 1}/{NUM_EPOCHS}], Average loss for the epoch Loss: {avg_loss:.4f}")
+        print(f"📉 Epoch [{epoch + 1}/{NUM_EPOCHS}], Average loss for the epoch: {avg_loss:.4f}")
 
     # Final save and end
-    # Save final model
     torch.save({'model': student.state_dict()}, final_model_path)
     print("✅ Training completed. Final model saved at:", final_model_path)
 
+    total_time_sec = time.perf_counter() - train_t0
     if trackExperiment_QualityAssessment_SSL:
         mlflow.log_artifact(final_model_path)
-        mlflow.log_metric("training_time_sec", time.time() - start_time)
+        mlflow.log_metric("training_time_sec", total_time_sec)
         mlflow.end_run()
 
-    ''' THIS HAVE BEEN PAUSED FOR NOW DUE TO CONCERNS OF NOT BEING EFFICIENT WHEN WE NEED OBJECT DETECTION PROBING AND NOT LINEAR PROBING (WHICH MIGHT BE A TOO TOUGH TASK) 
-    ----- BUT ITS ALMOST WORKING ----- To select the best model for the downstram task we do a linear probing on a purified subset of our data: 
-    We check all our supervised data for patches that only contain one class. These are selected and split into test, val and train to train a small linear classifier
-    on all models saved during SSL training'''
-
-    #generate_dataset_for_linear_probing(ssl_data_path, save_folder)
-    #best_model_path = run_linear_probe_all_with_rfdetr(ssl_data_path, save_folder, id_only)
-
+    # (Probing currently paused)
+    # generate_dataset_for_linear_probing(ssl_data_path, save_folder)
+    # best_model_path = run_linear_probe_all_with_rfdetr(ssl_data_path, save_folder, id_only)
 
     return best_model_path
