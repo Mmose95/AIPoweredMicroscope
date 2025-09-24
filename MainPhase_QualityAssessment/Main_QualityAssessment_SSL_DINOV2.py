@@ -10,15 +10,8 @@ from Helpers_General.Self_Supervised_learning_Helpers.Linear_probing_for_SSL_Mod
 from Helpers_General.Self_Supervised_learning_Helpers.Linear_probing_for_SSL_Model_SelectionV3 import \
     run_linear_probe_all_with_rfdetr
 from Helpers_General.Self_Supervised_learning_Helpers.generate_balanced_patch_subset_for_probing import generate_dataset_for_linear_probing
-from Helpers_General.warnings import suppress_stdout_stderr
 #sys.stdout = open(os.devnull, 'w')
 #sys.stderr = open(os.devnull, 'w')
-
-with suppress_stdout_stderr():
-    import torch
-    from dinov2.models.vision_transformer import vit_base
-    from dinov2.loss.dino_clstoken_loss import DINOLoss
-    import timm
 
 import torch.nn.functional as F
 from datetime import datetime
@@ -91,7 +84,12 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
         param.requires_grad = False
 
     # Load weights
+    #Use on ucloud
     state_dict = torch.load("/work/" + USER_BASE_DIR + "/Checkpoints/Pretrained_Models/VIT_BASE_DINOV2.bin", map_location="cpu") #VIT BASE MODEL
+
+    #Use on Local
+    #state_dict = torch.load("./Checkpoints/Pretrained_Models/VIT_BASE_DINOV2.bin", map_location="cpu")  # VIT BASE MODEL
+
     student.load_state_dict(state_dict, strict=False)
     teacher.load_state_dict(state_dict, strict=False)
 
