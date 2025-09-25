@@ -282,7 +282,6 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
 
         for batch_idx, (images, _) in enumerate(dataloader):
             with autocast():
-                # --- MOVE ALL FORWARD CODE INSIDE HERE ---
                 num_global_crops = dino_loss.ncrops - transform.local_crops_number
                 num_local_crops = transform.local_crops_number
                 total_crops = num_global_crops + num_local_crops
