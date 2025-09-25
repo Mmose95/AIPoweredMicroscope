@@ -54,7 +54,7 @@ if __name__ == "__main__":
         # --- multi-GPU ---
         accelerator="gpu",
         devices=8,
-        strategy="ddp_find_unused_parameters_false",
+        strategy="auto",
 
         # --- memory/perf ---
         precision="bf16-mixed",
