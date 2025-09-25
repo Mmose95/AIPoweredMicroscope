@@ -452,7 +452,8 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
         # Save best model
         if avg_loss < best_loss:
             best_loss = avg_loss
-            save_safely({'model': student.state_dict()}, best_model_path)
+            save_safely({'model': teacher.state_dict()}, save_folder / "BEST_TEACHER_by_trainloss.pt")
+
             print(f"🔽 New best model saved at epoch {epoch + 1} with loss {best_loss:.4f}")
             if trackExperiment_QualityAssessment_SSL:
                 mlflow.log_metric("best_model_loss", best_loss, step=epoch)
