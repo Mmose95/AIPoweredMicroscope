@@ -1,5 +1,6 @@
 import json
 import os
+import csv
 import shutil
 import sys
 from pathlib import Path
@@ -46,6 +47,17 @@ def _fmt_secs(s: float) -> str:
     return f"{h:d}h {m:02d}m {s:02d}s"
 
 
+# ---- robust, atomic save for model files ----
+def save_safely(obj, path: Path):
+    path = Path(path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    torch.save(obj, tmp.as_posix())
+    # ensure bytes are flushed to disk before rename
+    with open(tmp, "rb") as fh:
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)  # atomic on POSIX
+
+
 def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data_path, USER_BASE_DIR):
     ''''''''''''''''''''''''''''''''''''''' SSL Pretext '''''''''''''''''''''''''''''''''''
     ''' The starting point of this SSL pretext training is an already pretrained model: using the dino model'''
@@ -55,6 +67,18 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
 
     https://huggingface.co/facebook/dinov2-base/tree/main
     '''
+
+    # ---------------------- Persistent dirs on UCloud -----------------------
+    PROJECT_DIR = Path("/work/projects/myproj")
+    CHECKPOINTS = PROJECT_DIR / "Checkpoints"
+    MLRUNS_DIR = PROJECT_DIR / "mlruns"
+    CHECKPOINTS.mkdir(parents=True, exist_ok=True)
+    MLRUNS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Ensure MLflow writes to a persistent file store BEFORE creating/starting runs
+    os.environ["MLFLOW_TRACKING_URI"] = f"file:{MLRUNS_DIR.as_posix()}"
+    mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
+    # -----------------------------------------------------------------------
 
     # ---------------------- Configs -----------------------
     DATA_PATH = ssl_data_path
@@ -138,27 +162,53 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
         # p: (B, C) probabilities
         return -(p * (p + 1e-6).log()).sum(dim=-1).mean()
 
+    # ---------------------- Run + folders -----------------------
     if trackExperiment_QualityAssessment_SSL:
-        # Start mlflow experiment tracking
+        # Start mlflow experiment tracking (uses file store set above)
         experiment_id = setup_mlflow_experiment("Main Phase: Quality Assessment (SelfSupervised)")
         runId = mlflow.start_run(run_name=f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
                                  experiment_id=experiment_id)
+        run_name = runId.info.run_name
+        print("Experiment tracking via MLFLOW is ON!!:  ID:", experiment_id, "| run:", run_name)
+    else:
+        runId = None
+        experiment_id = "no-mlflow"
+        run_name = f"local_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        print("Experiment tracking via MLFLOW is OFF!!")
 
-        save_folder = "./Checkpoints/" + runId.info.run_name
-        id_only = runId.info.run_name
-        os.makedirs(save_folder, exist_ok=True)
+    save_folder = CHECKPOINTS / run_name
+    save_folder.mkdir(parents=True, exist_ok=True)
 
-        # logging the data:
-        image_folder = Path(save_folder + "/SSL")
-        os.makedirs(image_folder, exist_ok=True)
-        output_json = image_folder / "SSLdata_filenames.json"
+    # Small manifest to capture context
+    manifest = {
+        "when": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU",
+        "data_path": DATA_PATH,
+        "project_dir": PROJECT_DIR.as_posix(),
+        "mlflow_store": MLRUNS_DIR.as_posix(),
+        "save_folder": save_folder.as_posix(),
+        "experiment_id": experiment_id,
+        "run_name": run_name,
+        "batch_size": BATCH_SIZE,
+        "num_epochs": NUM_EPOCHS,
+        "image_size": IMAGE_SIZE,
+        "learning_rate": LEARNING_RATE,
+        "accumulation_steps": accumulation_steps,
+    }
+    with open(save_folder / "run_manifest.json", "w") as f:
+        json.dump(manifest, f, indent=2)
+    # ------------------------------------------------------------
 
-        jpg_files = sorted([f.name for f in Path(ssl_data_path + "/images").glob("*") if f.is_file() and f.suffix.lower() in {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}])
-        with open(output_json, "w") as f:
-            json.dump(jpg_files, f, indent=2)
+    # logging the data list (accept common image types)
+    image_folder = save_folder / "SSL"
+    image_folder.mkdir(parents=True, exist_ok=True)
+    output_json = image_folder / "SSLdata_filenames.json"
+    jpg_files = sorted([f.name for f in Path(ssl_data_path + "/images").glob("*")
+                        if f.is_file() and f.suffix.lower() in {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}])
+    with open(output_json, "w") as f:
+        json.dump(jpg_files, f, indent=2)
 
-        print("Experiment tracking via MLFLOW is ON!!:  ID:", experiment_id)
-
+    if trackExperiment_QualityAssessment_SSL:
         # to save the number of images used in this training we just count the number of labels/images
         label_dir = Path(ssl_data_path) / "labels"
         n_labels = len(list(label_dir.glob("*.txt")))  # number of label files
@@ -195,15 +245,23 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
 
         # Start time
         mlflow.set_tag("run_start_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    else:
-        print("Experiment tracking via MLFLOW is OFF!!")
-        SAVE_PATH = "dinov2_base_selfsup_trained.pt"
 
     # Training setup stuff:
     best_loss = float("inf")
-    best_model_path = f"{save_folder}/ExId_{experiment_id}_{runId.info.run_name}_BEST_dinov2_selfsup_trained.pt"
-    final_model_path = f"{save_folder}/ExId_{experiment_id}_{runId.info.run_name}_FINAL_dinov2_selfsup_trained.pt"
-    os.makedirs("Checkpoints", exist_ok=True)
+    best_model_path = save_folder / "BEST_dinov2_selfsup_trained.pt"
+    final_model_path = save_folder / "FINAL_dinov2_selfsup_trained.pt"
+
+    # Epoch CSV for quick inspection without MLflow UI
+    epoch_csv = save_folder / "epoch_metrics.csv"
+    if not epoch_csv.exists():
+        with open(epoch_csv, "w", newline="") as fcsv:
+            csv.writer(fcsv).writerow([
+                "epoch", "avg_loss", "epoch_time_sec", "elapsed_time_sec", "eta_sec",
+                "images_per_sec_epoch", "learning_rate",
+                "gpu_mem_alloc_MB", "gpu_mem_reserved_MB"
+            ])
+
+    os.makedirs("Checkpoints", exist_ok=True)  # backward-compat folder (not used for saves now)
 
     # ---- timing/ETA bookkeeping ----
     train_t0 = time.perf_counter()
@@ -280,7 +338,7 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
             if batch_idx % 1 == 0:
                 print(
                     f"\n[Epoch {epoch + 1}/ {NUM_EPOCHS}] Batch {batch_idx + 1}/{len(dataloader)} - Loss: {loss.item():.4f}")
-                if trackExperiment_QualityAssessment_SSL:
+                if trackExperiment_QualityAssessment_SSL and torch.cuda.is_available():
                     mlflow.log_metric("gpu_memory_allocated_MB", torch.cuda.memory_allocated() / 1024 ** 2, step=epoch)
                     mlflow.log_metric("gpu_memory_reserved_MB", torch.cuda.memory_reserved() / 1024 ** 2, step=epoch)
                     mlflow.log_metric("Loss-Batch", loss.item(), step=epoch * len(dataloader) + batch_idx)
@@ -305,11 +363,25 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
         eta_finish = datetime.now() + timedelta(seconds=eta_sec)
         img_per_sec = samples_this_epoch / epoch_sec if epoch_sec > 0 else 0.0
 
+        # ---- per-epoch CSV append + MLflow metrics ----
+        lr_now = scheduler.get_last_lr()[0]
+        gpu_alloc = torch.cuda.memory_allocated() / 1024 ** 2 if torch.cuda.is_available() else 0.0
+        gpu_resv = torch.cuda.memory_reserved() / 1024 ** 2 if torch.cuda.is_available() else 0.0
+
+        with open(epoch_csv, "a", newline="") as fcsv:
+            csv.writer(fcsv).writerow([
+                epoch + 1, avg_loss, epoch_sec, elapsed_sec, eta_sec,
+                img_per_sec, lr_now, gpu_alloc, gpu_resv
+            ])
+
         if trackExperiment_QualityAssessment_SSL:
             mlflow.log_metric("epoch_time_sec", epoch_sec, step=epoch + 1)
             mlflow.log_metric("elapsed_time_sec", elapsed_sec, step=epoch + 1)
             mlflow.log_metric("eta_sec", eta_sec, step=epoch + 1)
             mlflow.log_metric("images_per_sec_epoch", img_per_sec, step=epoch + 1)
+            mlflow.log_metric("learning_rate_epoch", lr_now, step=epoch + 1)
+            mlflow.log_metric("gpu_memory_allocated_MB_epoch", gpu_alloc, step=epoch + 1)
+            mlflow.log_metric("gpu_memory_reserved_MB_epoch", gpu_resv, step=epoch + 1)
             mlflow.set_tag("eta_finish_localtime", eta_finish.strftime("%Y-%m-%d %H:%M:%S"))
 
         print(
@@ -317,8 +389,8 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
             f"elapsed {_fmt_secs(elapsed_sec)} | ETA {_fmt_secs(eta_sec)} (~{eta_finish:%Y-%m-%d %H:%M})"
         )
 
-        student_path = f"{save_folder}/epoch_{epoch + 1}_student.pt"
-        teacher_path = f"{save_folder}/epoch_{epoch + 1}_teacher.pt"
+        student_path = save_folder / f"epoch_{epoch + 1}_student.pt"
+        teacher_path = save_folder / f"epoch_{epoch + 1}_teacher.pt"
 
         # ── smart-checkpoint logic ──────────────────────────────────────────
         entropy_gap = abs(student_entropy.item() - teacher_entropy.item())
@@ -332,9 +404,9 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
         if should_consider:
             # ---------- maintain Top-K -------------
             if len(top_checkpoints) < TOP_K:
-                torch.save({'model': student.state_dict()}, student_path)
-                torch.save({'model': teacher.state_dict()}, teacher_path)
-                top_checkpoints.append((epoch + 1, avg_loss, student_path, teacher_path))
+                save_safely({'model': student.state_dict()}, student_path)
+                save_safely({'model': teacher.state_dict()}, teacher_path)
+                top_checkpoints.append((epoch + 1, avg_loss, student_path.as_posix(), teacher_path.as_posix()))
                 top_checkpoints.sort(key=lambda x: x[1])  # by loss
             else:
                 worst_idx = max(range(TOP_K), key=lambda i: top_checkpoints[i][1])
@@ -346,16 +418,16 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
                     for p in [w_stu, w_tea]:
                         if os.path.exists(p): os.remove(p)
 
-                    torch.save({'model': student.state_dict()}, student_path)
-                    torch.save({'model': teacher.state_dict()}, teacher_path)
-                    top_checkpoints[worst_idx] = (epoch + 1, avg_loss, student_path, teacher_path)
+                    save_safely({'model': student.state_dict()}, student_path)
+                    save_safely({'model': teacher.state_dict()}, teacher_path)
+                    top_checkpoints[worst_idx] = (epoch + 1, avg_loss, student_path.as_posix(), teacher_path.as_posix())
                     top_checkpoints.sort(key=lambda x: x[1])
 
             if trackExperiment_QualityAssessment_SSL:
                 mlflow.log_metric("entropy_gap", entropy_gap, step=epoch)
                 mlflow.log_metric("ckpt_avg_loss", avg_loss, step=epoch)
-                mlflow.log_artifact(student_path)
-                mlflow.log_artifact(teacher_path)
+                mlflow.log_artifact(student_path.as_posix())
+                mlflow.log_artifact(teacher_path.as_posix())
         # ────────────────────────────────────────────────────────────
 
         # keep global best_loss_seen for tolerance test
@@ -363,15 +435,13 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
 
         # Saving models at a fixed cadence
         if (epoch + 1) % save_model_at_every_n == 0:
-            student_path = f"{save_folder}/epoch_{epoch + 1}_student.pt"
-            teacher_path = f"{save_folder}/epoch_{epoch + 1}_teacher.pt"
-            torch.save({'model': student.state_dict()}, student_path)
-            torch.save({'model': teacher.state_dict()}, teacher_path)
+            save_safely({'model': student.state_dict()}, student_path)
+            save_safely({'model': teacher.state_dict()}, teacher_path)
             print(f"💾 Saved checkpoint at epoch {epoch + 1}: student + teacher")
 
             if trackExperiment_QualityAssessment_SSL:
-                mlflow.log_artifact(student_path)
-                mlflow.log_artifact(teacher_path)
+                mlflow.log_artifact(student_path.as_posix())
+                mlflow.log_artifact(teacher_path.as_posix())
                 mlflow.log_metric("Average epoch loss", avg_loss, step=epoch)
                 mlflow.log_metric("teacher_momentum", momentum, step=epoch)
 
@@ -381,27 +451,29 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
         # Save best model
         if avg_loss < best_loss:
             best_loss = avg_loss
-            torch.save({'model': student.state_dict()}, best_model_path)
+            save_safely({'model': student.state_dict()}, best_model_path)
             print(f"🔽 New best model saved at epoch {epoch + 1} with loss {best_loss:.4f}")
             if trackExperiment_QualityAssessment_SSL:
                 mlflow.log_metric("best_model_loss", best_loss, step=epoch)
-                mlflow.log_artifact(best_model_path)
+                mlflow.log_artifact(best_model_path.as_posix())
 
         # Logging every epoch
         print(f"📉 Epoch [{epoch + 1}/{NUM_EPOCHS}], Average loss for the epoch: {avg_loss:.4f}")
 
     # Final save and end
-    torch.save({'model': student.state_dict()}, final_model_path)
+    save_safely({'model': student.state_dict()}, final_model_path)
     print("✅ Training completed. Final model saved at:", final_model_path)
 
     total_time_sec = time.perf_counter() - train_t0
     if trackExperiment_QualityAssessment_SSL:
-        mlflow.log_artifact(final_model_path)
+        mlflow.log_artifact(final_model_path.as_posix())
         mlflow.log_metric("training_time_sec", total_time_sec)
+        # also log the epoch CSV
+        mlflow.log_artifact(epoch_csv.as_posix())
         mlflow.end_run()
 
     # (Probing currently paused)
     # generate_dataset_for_linear_probing(ssl_data_path, save_folder)
     # best_model_path = run_linear_probe_all_with_rfdetr(ssl_data_path, save_folder, id_only)
 
-    return best_model_path
+    return best_model_path.as_posix()
