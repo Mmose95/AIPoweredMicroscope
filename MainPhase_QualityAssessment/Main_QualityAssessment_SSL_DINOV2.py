@@ -85,7 +85,7 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
 
     # training cfgs
     BATCH_SIZE = 128
-    NUM_EPOCHS = 300
+    NUM_EPOCHS = 200
     LEARNING_RATE = 4e-4
     IMAGE_SIZE = 224
     accumulation_steps = 4  # to reach 4x batch size
@@ -105,7 +105,7 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
     # -----------------------------------------------------
 
     # Create student and teacher models
-    student = vit_base(patch_size=16, img_size=IMAGE_SIZE)
+    student = vit_base(patch_size=14, img_size=IMAGE_SIZE)
     student.num_channels = student.embed_dim
     teacher = deepcopy(student)
     for param in teacher.parameters():
@@ -125,7 +125,7 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
     teacher.to(DEVICE)
 
     # Optimizer and AMP scaler
-    optimizer = torch.optim.AdamW(student.parameters(), lr=LEARNING_RATE, weight_decay=0.1)
+    optimizer = torch.optim.AdamW(student.parameters(), lr=LEARNING_RATE, weight_decay=0.05)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS)
 
     scaler = GradScaler()
@@ -142,8 +142,8 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
 
     # Transforms
     transform = DataAugmentationDINO(
-        global_crops_scale=(0.3, 1.0),
-        local_crops_scale=(0.05, 0.4),
+        global_crops_scale=(0.2, 1.0),
+        local_crops_scale=(0.05, 0.35),
         local_crops_number=8
     )
 
@@ -326,6 +326,7 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
             scaler.scale(loss).backward()
 
             if (batch_idx + 1) % accumulation_steps == 0:
+                torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()

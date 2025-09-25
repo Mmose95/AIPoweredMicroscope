@@ -47,6 +47,7 @@ class DataAugmentationDINO(object):
                     global_crops_size, scale=global_crops_scale, interpolation=transforms.InterpolationMode.BICUBIC
                 ),
                 transforms.RandomHorizontalFlip(p=0.5),
+                transforms.RandomVerticalFlip(p=0.5),
             ]
         )
 
@@ -56,6 +57,7 @@ class DataAugmentationDINO(object):
                     local_crops_size, scale=local_crops_scale, interpolation=transforms.InterpolationMode.BICUBIC
                 ),
                 transforms.RandomHorizontalFlip(p=0.5),
+                transforms.RandomVerticalFlip(p=0.5),
             ]
         )
 
@@ -66,7 +68,7 @@ class DataAugmentationDINO(object):
                     [transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)],
                     p=0.8,
                 ),
-                transforms.RandomGrayscale(p=0.2),
+                transforms.RandomGrayscale(p=0.0),
             ]
         )
 
@@ -75,7 +77,7 @@ class DataAugmentationDINO(object):
         global_transfo2_extra = transforms.Compose(
             [
                 GaussianBlur(p=0.1),
-                transforms.RandomSolarize(threshold=128, p=0.2),
+                transforms.RandomSolarize(threshold=128, p=0.0),
             ]
         )
 
