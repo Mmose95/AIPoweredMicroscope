@@ -28,10 +28,6 @@ import torch
 from lightly_train import train as lightly_train
 
 if __name__ == "__main__":
-    # Optional: use SDP attention (works without Triton)
-    torch.backends.cuda.enable_flash_sdp(True)
-    torch.backends.cuda.enable_mem_efficient_sdp(True)
-    torch.backends.cuda.enable_math_sdp(False)
 
     lightly_train(
         out="outputLightly",
