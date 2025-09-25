@@ -1,10 +1,7 @@
 import os, glob, os.path as op
 
 import lightly_train
-
-from Lightly_helpers.eta_callback import ETACallback
-
-
+'''
 def _detect_user_base():
     aau = glob.glob("/work/Member Files:*")
     if aau:
@@ -27,73 +24,37 @@ print("USER_BASE_DIR =", USER_BASE_DIR)
 
 #Own Dataset
 SSL_TRAINING_DATA = os.getenv("SSL_TRAINING_DATA", "/work/" + USER_BASE_DIR + "/CellScanData/Zoom10x - Quality Assessment/Self-Supervised").strip() or None
+'''
 
-
-# LightlyTrainSSL_ucloud.py
+import torch
 from lightly_train import train as lightly_train
-import torch, os
 
 if __name__ == "__main__":
-    # Use PyTorch's scaled-dot-product attention (fast; no Triton needed)
+    # Optional: use SDP attention (works without Triton)
     torch.backends.cuda.enable_flash_sdp(True)
     torch.backends.cuda.enable_mem_efficient_sdp(True)
     torch.backends.cuda.enable_math_sdp(False)
 
-    # Be polite to NCCL on clusters
-    os.environ.setdefault("NCCL_ASYNC_ERROR_HANDLING", "1")
-    os.environ.setdefault("NCCL_DEBUG", "WARN")
-    # Optional: prevent too-large host allocs
-    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-
     lightly_train(
-        out="./outputLightly",          # TIP: node-local NVMe on UCloud
-        data=SSL_TRAINING_DATA,               # rsync your data here in the job prolog
+        out="outputLightly",
+        data=r"D:\PHD\PhdData\CellScanData\Zoom10x - Quality Assessment\Sample 55",
         model="dinov2_vit/vitb14",
         method="dinov2",
-
-        # --- multi-GPU ---
-        accelerator="gpu",
-        devices=8,
-        strategy="auto",
-
-        # --- memory/perf ---
         precision="bf16-mixed",
-        batch_size=16,                               # per GPU; try 32 if it fits
-        num_workers=6,                               # per process; 4–8 is usually good
-        loader_args=dict(
-            persistent_workers=True,
-            pin_memory=True,
-            prefetch_factor=2
-        ),
-
-        # --- transforms (multiples of 14 for vitb14) ---
+        batch_size=32,
+        accelerator="gpu",
+        devices=8,  # must match the node’s GPUs
+        strategy="ddp_notebook",  # ← notebook-safe
+        num_workers=6,
+        loader_args=dict(persistent_workers=True, pin_memory=True, prefetch_factor=2),
         transform_args=dict(
-            image_size=[224, 224],                   # 224 is 16×14
+            image_size=[224, 224],      # 224 is OK for /14
             local_view=dict(
                 num_views=2,
-                view_size=[98, 98],                  # 7×14
+                view_size=[98, 98],     # ← multiple of 14 (NOT 96)
                 random_resize=dict(min_scale=0.05, max_scale=0.32),
                 gaussian_blur=dict(prob=0.5, blur_limit=0, sigmas=[0.1, 2.0]),
             ),
         ),
-
-        # --- checkpoints & exports ---
-        callbacks=dict(
-            model_checkpoint=dict(
-                monitor="train_loss", mode="min",
-                save_top_k=5, save_last=True,
-                every_n_train_steps=2500,            # periodic snapshots
-                filename="step{step:06d}-loss{train_loss:.4f}",
-            ),
-            model_export=dict(every_n_epochs=10),    # periodic clean student backbone exports
-        ),
-
-        # Optional: force exact budget instead of "auto"
-        # trainer_args=dict(max_steps=125000),
-        # epochs=2273,
-
         overwrite=True,
-        seed=0,
     )
-
-
