@@ -1,7 +1,6 @@
 import os, glob, os.path as op
 
 import lightly_train
-'''
 def _detect_user_base():
     aau = glob.glob("/work/Member Files:*")
     if aau:
@@ -24,7 +23,6 @@ print("USER_BASE_DIR =", USER_BASE_DIR)
 
 #Own Dataset
 SSL_TRAINING_DATA = os.getenv("SSL_TRAINING_DATA", "/work/" + USER_BASE_DIR + "/CellScanData/Zoom10x - Quality Assessment/Self-Supervised").strip() or None
-'''
 
 import torch
 from lightly_train import train as lightly_train
@@ -37,7 +35,7 @@ if __name__ == "__main__":
 
     lightly_train(
         out="outputLightly",
-        data=r"D:\PHD\PhdData\CellScanData\Zoom10x - Quality Assessment\Sample 55",
+        data=SSL_TRAINING_DATA,
         model="dinov2_vit/vitb14",
         method="dinov2",
         precision="bf16-mixed",
