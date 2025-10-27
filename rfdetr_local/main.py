@@ -335,7 +335,7 @@ class Model:
         try:
             from rfdetr.deploy.export import export_onnx, onnx_simplify, make_infer_image
         except ImportError:
-            print("It seems some dependencies for ONNX export are missing. Please run `pip install rfdetr[onnxexport]` and try again.")
+            print("It seems some dependencies for ONNX export are missing. Please run `pip install rfdetr_local[onnxexport]` and try again.")
             raise
 
 
