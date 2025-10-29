@@ -9,9 +9,64 @@ import os
 from rfdetr import RFDETRSmall, RFDETRLarge, RFDETRMedium
 
 # ====== YOUR PATHS ======
-ALL_COCO_JSON = Path(r"D:\PHD\PhdData\CellScanData\Annotation_Backups\Quality Assessment Backups\27-10-2025\annotations\instances_default.json")
-IMAGES_DIR    = Path(r"D:\PHD\PhdData\CellScanData\Zoom10x - Quality Assessment_Cleaned")
-OUT_ROOT      = Path(r"RFDETR_SOLO_OUTPUT")
+import os, glob, os.path as op
+from pathlib import Path
+
+# -------- UCloud user base detection (AAU/SDU layouts) --------
+def _detect_user_base() -> str | None:
+    # AAU style: /work/Member Files: <User#id>
+    aau = glob.glob("/work/Member Files:*")
+    if aau:
+        return op.basename(aau[0])
+    # SDU style: /work/<User#id>
+    sdu = [d for d in glob.glob("/work/*#*") if op.isdir(d)]
+    return op.basename(sdu[0]) if sdu else None
+
+USER_BASE_DIR = os.environ.get("USER_BASE_DIR") or _detect_user_base()
+if not USER_BASE_DIR:
+    raise RuntimeError("Could not determine USER_BASE_DIR on UCloud.")
+os.environ["USER_BASE_DIR"] = USER_BASE_DIR  # make it visible to subprocesses
+print("USER_BASE_DIR =", USER_BASE_DIR)
+
+# Root of your workspace on UCloud
+WORK_ROOT = Path("/work") / USER_BASE_DIR
+
+# -------- Helpers for clean env overrides --------
+def env_path(name: str, default: Path) -> Path:
+    v = os.getenv(name, "").strip()
+    return Path(v) if v else default
+
+# Adjust the date folder once per run (or override via env)
+ANNOT_DATE = os.getenv("ANNOT_DATE", "28-10-2025")
+
+# -------- Final resolved paths (with sensible defaults) --------
+ALL_COCO_JSON = env_path(
+    "ALL_COCO_JSON",
+    WORK_ROOT / "CellScanData" / "Annotation_Backups" / "Quality Assessment Backups" / ANNOT_DATE / "annotations" / "instances_default.json",
+)
+
+IMAGES_DIR = env_path(
+    "IMAGES_DIR",
+    WORK_ROOT / "CellScanData" / "Zoom10x - Quality Assessment_Cleaned",
+)
+
+OUT_ROOT = env_path(
+    "OUT_ROOT",
+    WORK_ROOT / "RFDETR_SOLO_OUTPUT"
+)
+
+# -------- Sanity checks / setup --------
+if not ALL_COCO_JSON.exists():
+    raise FileNotFoundError(f"COCO file not found: {ALL_COCO_JSON}")
+if not IMAGES_DIR.exists():
+    raise FileNotFoundError(f"Images dir not found: {IMAGES_DIR}")
+OUT_ROOT.mkdir(parents=True, exist_ok=True)
+
+print("[PATHS]")
+print("  COCO:", ALL_COCO_JSON)
+print("  IMGS:", IMAGES_DIR)
+print("  OUT :", OUT_ROOT)
+
 # ========================
 
 # Split targets
@@ -21,8 +76,8 @@ KEEP_EMPTY = False
 VALID_EXTS = {".tif", ".tiff", ".jpg", ".jpeg", ".png"}
 
 # Balancing weights
-ALPHA_SIZE = 0.30   # image-count deviation
-BETA_CLASS = 0.70   # class-count deviation
+ALPHA_SIZE = 0.70   # image-count deviation
+BETA_CLASS = 0.30   # class-count deviation
 EPS = 1e-9
 
 # Exclude classes by NAME (e.g., zero-annotation class or classes you don't want balanced)
@@ -448,8 +503,8 @@ def main():
         return
 
     # Choose model class & resolution (Large needs 56-divisible → 672)
-    MODEL_CLS = RFDETRMedium
-    RESOLUTION = 640  # keep 672 for RFDETRLarge (divisible by 56). Use 640 for Medium/Small.
+    MODEL_CLS = RFDETRLarge
+    RESOLUTION = 672  # keep 672 for RFDETRLarge (divisible by 56). Use 640 for Medium/Small.
 
     for spec in active_targets:
         target_name = spec["name"]
@@ -469,29 +524,40 @@ def main():
         model = MODEL_CLS()
         sig = signature(model.train)
         can = set(sig.parameters.keys())
+
         ws = world_size()
+        # Start conservatively; bump to 6–8/GPU if memory allows
+        per_gpu_batch = 4
+
+        TARGET_EFF_BATCH = 32
+
+        # Compute grad accumulation to reach target effective batch
+        eff_per_step = per_gpu_batch * max(ws, 1)
+        grad_accum = max(1, (TARGET_EFF_BATCH + eff_per_step - 1) // eff_per_step)
+
+        base_lr_ref = 1e-4
+        lr = base_lr_ref * (per_gpu_batch * ws * grad_accum) / 32.0
+        lr_encoder = 0.15 * lr  # slower backbone
 
         train_kwargs = dict(
             dataset_dir=str(derived_dir),
             output_dir=str(out_train),
 
-            # core
             resolution=RESOLUTION,
-            batch_size=8,
-            grad_accum_steps=8,
-            epochs=140,
-            lr=1e-4,
+            batch_size=per_gpu_batch,
+            grad_accum_steps=grad_accum,
+            epochs=180,
+
+            lr=lr,
             weight_decay=5e-4,
             dropout=0.1,
 
-            class_names=class_names,
-
-            multi_scale=False,
-            num_queries=300,   # as requested
+            class_names=[target_name],
+            num_queries=300,
+            multi_scale=True,  # if your build supports it
             gradient_checkpointing=True,
-
             amp=True,
-            num_workers=12,
+            num_workers=12,  # per process; tune 8–12
             early_stopping=True,
             tensorboard=True,
 
@@ -522,6 +588,14 @@ def main():
         # DETR-specific
         maybe("do_random_resize_via_padding", False)
         maybe("square_resize_div_64", True)
+        maybe("lr_encoder", lr_encoder)
+        maybe("pin_memory", True)
+        maybe("persistent_workers", True)
+        maybe("do_random_resize_via_padding", False)
+        maybe("square_resize_div_64", True)
+        # optional schedule if available:
+        maybe("lr_schedule", "cosine")
+        maybe("warmup_steps", 1500)
 
         # ---- Log hyperparameters & model name for THIS run
         meta_dir = out_train / "run_meta"
