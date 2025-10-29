@@ -28,7 +28,7 @@ from pycocotools.cocoeval import COCOeval
 from rfdetr import RFDETRSmall, RFDETRMedium, RFDETRLarge
 
 # ====== USER INPUTS ======
-RunName = "dataset_coco_splits_20251024-210452"
+RunName = "dataset_coco_splits_20251028-104905_Leucocyte"
 CHECKPOINT = "./RFDETR_SOLO_OUTPUT/" + RunName + "/rfdetr_run/checkpoint_best_regular.pth"
 TEST_JSON  = Path(r"./RFDETR_SOLO_OUTPUT/" + RunName + "/test/_annotations.coco.json")
 OUT_DIR    = Path("./rfdeval_out") / RunName
@@ -298,7 +298,7 @@ def main():
 
     # Load model
 
-    model = RFDETRLarge(pretrain_weights=CHECKPOINT)
+    model = RFDETRMedium(pretrain_weights=CHECKPOINT)
     #if hasattr(model, "optimize_for_inference"):
         #model.optimize_for_inference()
 

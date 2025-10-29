@@ -3,12 +3,13 @@ from pathlib import Path
 from datetime import datetime
 from collections import defaultdict, Counter
 import json, random, sys, re, csv
+from inspect import signature
+import os
+
 from rfdetr import RFDETRSmall, RFDETRLarge, RFDETRMedium
 
-from inspect import signature
-
 # ====== YOUR PATHS ======
-ALL_COCO_JSON = Path(r"D:\PHD\PhdData\CellScanData\Annotation_Backups\Quality Assessment Backups\27-10-2025\annotations/instances_default.json")
+ALL_COCO_JSON = Path(r"D:\PHD\PhdData\CellScanData\Annotation_Backups\Quality Assessment Backups\27-10-2025\annotations\instances_default.json")
 IMAGES_DIR    = Path(r"D:\PHD\PhdData\CellScanData\Zoom10x - Quality Assessment_Cleaned")
 OUT_ROOT      = Path(r"RFDETR_SOLO_OUTPUT")
 # ========================
@@ -27,12 +28,28 @@ EPS = 1e-9
 # Exclude classes by NAME (e.g., zero-annotation class or classes you don't want balanced)
 EXCLUDE_CLASS_NAMES = {"Cylindrical Epithelial Cell"}
 
+# One-vs-rest targets (auto-pruned to only those present in data)
+TARGET_SPECS = [
+    {"name": "Squamous Epithelial Cell", "suffix": "Epithelial"},
+    {"name": "Leucocyte",                "suffix": "Leucocyte"},
+]
+
 # ---------- small utils ----------
-def safe_out_dir(root: Path, prefix="dataset_coco_splits"):
+def world_size():
+    # torchrun sets these
+    try:
+        return int(os.environ.get("WORLD_SIZE", "1"))
+    except Exception:
+        return 1
+
+def nowstamp(): return datetime.now().strftime('%Y%m%d-%H%M%S')
+
+def safe_out_dir(root: Path, prefix="dataset_coco_splits", suffix="Base_AllClasses"):
     root.mkdir(parents=True, exist_ok=True)
-    out = root / f"{prefix}_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    out = root / f"{prefix}_{datetime.now().strftime('%Y%m%d-%H%M%S')}_{suffix}"
     out.mkdir(parents=True, exist_ok=False)
     return out
+
 
 def load_coco(p: Path):
     with p.open("r", encoding="utf-8") as f:
@@ -106,7 +123,6 @@ def preseed_min_per_class(sample_stats, required_cls, seed=42):
     """
     Pick a minimal set of samples for VALID and TEST to ensure each required class appears >=1,
     preferring small samples that contain the missing class.
-    Returns dict 'locked' with samples -> fixed split ('valid' or 'test').
     """
     rnd = random.Random(seed)
     samples = list(sample_stats.keys())
@@ -119,7 +135,6 @@ def preseed_min_per_class(sample_stats, required_cls, seed=42):
             missing = [c for c in required_cls if have[c] == 0]
             if not missing:
                 break
-            # candidates that provide ANY missing class and are not assigned yet
             cands = []
             for s in samples:
                 if s in locked:
@@ -129,9 +144,7 @@ def preseed_min_per_class(sample_stats, required_cls, seed=42):
                 if contributes:
                     cands.append(s)
             if not cands:
-                # not feasible to cover all required classes in this split
                 break
-            # choose smallest candidate (fewer images) that contributes
             cands.sort(key=lambda s: (sample_stats[s]["n_img"], -sum(sample_stats[s]["class_counts"][c] for c in missing)))
             pick = cands[0]
             locked[pick] = split_name
@@ -212,7 +225,6 @@ def split_by_sample_balanced(sample_stats, included_cat_ids, split, seed=42, loc
     # ensure no split empty
     for sp in ("valid","test"):
         if not out[sp]:
-            # move smallest train sample
             train_samples = [(s, sample_stats[s]["n_img"]) for s, spx in assign.items() if spx == "train"]
             if train_samples:
                 smallest, _ = min(train_samples, key=lambda kv: kv[1])
@@ -245,13 +257,13 @@ def write_subset_json(name, ids, coco, images_by_id, anns_by_image,
             if a["category_id"] in old2new:
                 aa = dict(a)
                 aa["category_id"] = old2new[a["category_id"]]
-                # (optional) clamp bbox to image and ensure w/h >= 1px
+                # clamp bbox to ≥1 px
                 x, y, w, h = aa["bbox"]
                 w = max(1.0, float(w)); h = max(1.0, float(h))
                 aa["bbox"] = [float(x), float(y), w, h]
                 remapped_anns.append(aa)
 
-        # drop images that ended up empty (prevents matcher headaches)
+        # drop images that ended up empty in the BASE (multi-class) split
         if not remapped_anns:
             continue
 
@@ -267,7 +279,6 @@ def write_subset_json(name, ids, coco, images_by_id, anns_by_image,
                    "annotations": annotations,
                    "categories": new_categories},
                   f, ensure_ascii=False)
-
 
 def write_logs(out_dir: Path, assign: dict, sample_stats: dict,
                categories: list, included_cat_ids, tgt_imgs: dict, tgt_class: dict,
@@ -299,17 +310,55 @@ def write_logs(out_dir: Path, assign: dict, sample_stats: dict,
     }
     (out_dir / "split_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
-    # CSV per-sample
-    with (out_dir / "sample_assignments.csv").open("w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        header = ["sample", "split", "n_images"] + [f"class:{c['name']}" for c in categories if c["id"] in included_cat_ids]
-        w.writerow(header)
-        for s, dst in sorted(assign.items()):
-            row = [s, dst, sample_stats[s]["n_img"]]
-            for c in categories:
-                if c["id"] in included_cat_ids:
-                    row.append(sample_stats[s]["class_counts"][c["id"]])
-            w.writerow(row)
+# ---- NEW: derive per-class filtered datasets (keep negatives) ----
+def derive_one_vs_rest(base_split_dir: Path, target_name: str) -> Path:
+    """
+    Create a sibling folder with suffix, keeping all images but only target-class annotations (id=0).
+    """
+    # infer suffix
+    suffix = None
+    for spec in TARGET_SPECS:
+        if spec["name"] == target_name:
+            suffix = spec["suffix"]
+            break
+    if suffix is None:
+        suffix = re.sub(r"\s+", "", target_name)
+
+    derived_dir = base_split_dir.parent / (base_split_dir.name + f"_{suffix}")
+    derived_dir.mkdir(parents=True, exist_ok=False)
+
+    # read any split file to discover original target id
+    probe = json.loads((base_split_dir / "train" / "_annotations.coco.json").read_text(encoding="utf-8"))
+    name2id = {c["name"]: c["id"] for c in probe["categories"]}
+    if target_name not in name2id:
+        print(f"[WARN] Target '{target_name}' not in base categories; skipping.")
+        return derived_dir
+    target_old_id = name2id[target_name]
+
+    new_categories = [{"id": 0, "name": target_name, "supercategory": "none"}]
+
+    def filter_split(part: str):
+        src = base_split_dir / part / "_annotations.coco.json"
+        coco = json.loads(src.read_text(encoding="utf-8"))
+        images = coco["images"]
+        out_anns = []
+        for a in coco["annotations"]:
+            if a["category_id"] == target_old_id:
+                aa = dict(a); aa["category_id"] = 0
+                x,y,w,h = aa["bbox"]
+                aa["bbox"] = [float(x), float(y), float(max(1.0,w)), float(max(1.0,h))]
+                out_anns.append(aa)
+        dst_dir = derived_dir / part
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        (dst_dir / "_annotations.coco.json").write_text(
+            json.dumps({"images": images, "annotations": out_anns, "categories": new_categories}),
+            encoding="utf-8"
+        )
+
+    for part in ("train","valid","test"):
+        filter_split(part)
+
+    return derived_dir
 
 # ---------- main ----------
 def main():
@@ -319,7 +368,7 @@ def main():
         print(f"ERROR: Images dir not found: {IMAGES_DIR}"); sys.exit(1)
 
     out_dir = safe_out_dir(OUT_ROOT)
-    print(f"[OK] Output: {out_dir}")
+    print(f"[OK] Output (base split): {out_dir}")
 
     coco = load_coco(ALL_COCO_JSON)
     images_by_id, anns_by_image, categories = build_index(coco)
@@ -350,13 +399,12 @@ def main():
 
     # Make a stable order for included classes
     included_cats = [c for c in categories if c["id"] in included_cat_ids]
-    included_cats.sort(key=lambda c: c["name"])  # or any fixed rule you prefer
+    included_cats.sort(key=lambda c: c["name"])  # fixed order
 
-    # Remap: old_id -> new contiguous id 0..K-1
     # Remap: old_id -> new contiguous id 0..K-1
     old2new = {c["id"]: i for i, c in enumerate(included_cats)}
 
-    # IMPORTANT: include "supercategory" so rfdetr doesn't KeyError
+    # include "supercategory" so rfdetr doesn't KeyError
     new_categories = [
         {"id": i, "name": c["name"], "supercategory": c.get("supercategory", "none")}
         for i, c in enumerate(included_cats)
@@ -374,7 +422,7 @@ def main():
         sample_stats, included_cat_ids, SPLIT, seed=SEED, locked=locked
     )
 
-    # Write JSONs (absolute paths)
+    # Write JSONs (absolute paths) — BASE (multi-class)
     for part in ("train", "valid", "test"):
         print(f"Writing {part} JSON ({len(splits[part])} images)…")
         write_subset_json(
@@ -387,102 +435,132 @@ def main():
     write_logs(out_dir, assign, sample_stats, categories, included_cat_ids,
                tgt_imgs, tgt_class, cur_imgs, cur_class, total_imgs, total_class, excluded_ids)
 
-    print(f"[DONE] Sample-exclusive, class-balanced, constraint-satisfied splits at: {out_dir}")
+    print(f"[DONE] Base split at: {out_dir}")
     print("  - split_summary.json")
     print("  - sample_assignments.csv")
 
+    # ===== DERIVE ONE-VS-REST DATASETS + TRAIN BOTH IN A LOOP =====
+    # Only keep target classes that actually exist in BASE categories
+    base_cats = [c["name"] for c in new_categories]
+    active_targets = [t for t in TARGET_SPECS if t["name"] in base_cats]
+    if not active_targets:
+        print("[WARN] No target classes found in base split; nothing to train.")
+        return
+
+    # Choose model class & resolution (Large needs 56-divisible → 672)
+    MODEL_CLS = RFDETRLarge
+    RESOLUTION = 672  # keep 672 for RFDETRLarge (divisible by 56). Use 640 for Medium/Small.
+
+    for spec in active_targets:
+        target_name = spec["name"]
+        suffix = spec["suffix"]
+        print(f"\n[DERIVE] Building one-vs-rest for: {target_name}")
+        derived_dir = derive_one_vs_rest(out_dir, target_name)
+        print(f"[DERIVED] {target_name} dataset at: {derived_dir}")
+
+        # Train folder
+        out_train = derived_dir / "rfdetr_run"
+        out_train.mkdir(parents=True, exist_ok=True)
+
+        # One-class names
+        class_names = [target_name]
+
+        # Build kwargs safely (only pass what this rfdetr build supports)
+        model = MODEL_CLS()
+        sig = signature(model.train)
+        can = set(sig.parameters.keys())
+
+        ws = world_size()
+        # Start conservatively; bump to 6–8/GPU if memory allows
+        per_gpu_batch = 4
+
+        TARGET_EFF_BATCH = 32
+
+        # Compute grad accumulation to reach target effective batch
+        eff_per_step = per_gpu_batch * max(ws, 1)
+        grad_accum = max(1, (TARGET_EFF_BATCH + eff_per_step - 1) // eff_per_step)
+
+        base_lr_ref = 1e-4
+        lr = base_lr_ref * (per_gpu_batch * ws * grad_accum) / 32.0
+        lr_encoder = 0.15 * lr  # slower backbone
+
+        train_kwargs = dict(
+            dataset_dir=str(derived_dir),
+            output_dir=str(out_train),
+
+            resolution=RESOLUTION,
+            batch_size=per_gpu_batch,
+            grad_accum_steps=grad_accum,
+            epochs=180,
+
+            lr=lr,
+            weight_decay=5e-4,
+            dropout=0.1,
+
+            class_names=[target_name],
+            num_queries=300,
+            multi_scale=True,  # if your build supports it
+            gradient_checkpointing=True,
+            amp=True,
+            num_workers=12,  # per process; tune 8–12
+            early_stopping=True,
+            tensorboard=True,
 
 
-    out_train = out_dir / "rfdetr_run"
-    out_train.mkdir(parents=True, exist_ok=False)
+        )
 
-    class_names = [c["name"] for c in new_categories]
+        def maybe(name, value):
+            if name in can:
+                train_kwargs[name] = value
 
-    model = RFDETRLarge()
+        # Light augmentations (same as you had)
+        maybe("hflip_prob", 0.5)            # or flip_prob
+        maybe("flip_prob", 0.5)
 
-    # ---- build kwargs safely (only pass what the installed rfdetr supports) ----
-    sig = signature(model.train)
-    can = set(sig.parameters.keys())
-    train_kwargs = dict(
-        dataset_dir=str(out_dir),
-        output_dir=str(out_train),
+        maybe("rotation_degrees", 5)        # ±5°
+        maybe("translate", 0.05)            # up to 5% shift
+        maybe("scale_range", (0.9, 1.1))    # 0.9–1.1
+        maybe("random_affine_prob", 0.5)
 
-        # core
-        resolution=672, #672 needed for "Large" model
-        batch_size=8,
-        grad_accum_steps=8,
-        epochs=140,
-        lr=1e-4,
-        weight_decay=5e-4,
-        dropout=0.1,
+        maybe("color_jitter", 0.2)          # single knob
+        maybe("brightness", 0.2)
+        maybe("contrast", 0.2)
+        maybe("saturation", 0.2)
+        maybe("hue", 0.02)
 
-        class_names=class_names,
+        maybe("gaussian_blur_prob", 0.2)
 
-        multi_scale=False,
-        num_queries=300,
-        gradient_checkpointing=True,
+        # DETR-specific
+        maybe("do_random_resize_via_padding", False)
+        maybe("square_resize_div_64", True)
+        maybe("lr_encoder", lr_encoder)
+        maybe("pin_memory", True)
+        maybe("persistent_workers", True)
+        maybe("do_random_resize_via_padding", False)
+        maybe("square_resize_div_64", True)
+        # optional schedule if available:
+        maybe("lr_schedule", "cosine")
+        maybe("warmup_steps", 1500)
 
-        amp=True,
-        num_workers=12,
-        early_stopping=True,
-    )
+        # ---- Log hyperparameters & model name for THIS run
+        meta_dir = out_train / "run_meta"
+        meta_dir.mkdir(parents=True, exist_ok=True)
 
-    # ---- light augmentations (only set if available) ----
-    def maybe(name, value):
-        if name in can:
-            train_kwargs[name] = value
+        (meta_dir / "train_kwargs.json").write_text(json.dumps(train_kwargs, indent=2), encoding="utf-8")
+        model_summary = {"model_name": model.__class__.__name__, "target_class": target_name,
+                         "base_split_dir": str(out_dir), "derived_dir": str(derived_dir)}
+        (meta_dir / "model_architecture.json").write_text(json.dumps(model_summary, indent=2), encoding="utf-8")
 
-    # Save hyperparameters before training
-    meta_dir = out_dir / "rfdetr_run" / "run_meta"
-    meta_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[LOGGED] Saved train_kwargs and model name for {target_name}")
 
-    (train_kwargs_path := meta_dir / "train_kwargs.json").write_text(
-        json.dumps(train_kwargs, indent=2), encoding="utf-8"
-    )
-
-    # --- save model name only ---
-    model_summary = {
-        "model_name": model.__class__.__name__
-    }
-
-    (meta_dir / "model_architecture.json").write_text(
-        json.dumps(model_summary, indent=2), encoding="utf-8"
-    )
-
-    print(f"[LOGGED] Saved train_kwargs → {train_kwargs_path}")
-    print(f"[LOGGED] Saved model name → {model.__class__.__name__}")
-
-    # horizontal flip probability
-    maybe("hflip_prob", 0.5)  # common name
-    maybe("flip_prob", 0.5)  # alternative
-
-    # slight geometric jitter (safe for boxes)
-    maybe("rotation_degrees", 5)  # ±5°
-    maybe("translate", 0.05)  # up to 5% shift
-    maybe("scale_range", (0.9, 1.1))  # 0.9–1.1
-    maybe("random_affine_prob", 0.5)
-
-    # mild color jitter
-    maybe("color_jitter", 0.2)  # single knob
-    maybe("brightness", 0.2);
-    maybe("contrast", 0.2)
-    maybe("saturation", 0.2);
-    maybe("hue", 0.02)
-
-    # tiny gaussian blur (optional)
-    maybe("gaussian_blur_prob", 0.2)
-
-    # DETR-specific resizing toggles (if present)
-    maybe("do_random_resize_via_padding", False)
-    maybe("square_resize_div_64", True)
-
-    print("[TRAIN] Starting RF-DETR …")
-    model.train(**train_kwargs)
-    print(f"[TRAIN DONE] Outputs in: {out_train}")
+        # ---- Train
+        print(f"[TRAIN] {model.__class__.__name__} — {target_name}")
+        model.train(**train_kwargs)
+        print(f"[TRAIN DONE] Outputs in: {out_train}")
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n[INTERRUPTED] Exiting.");
+        print("\n[INTERRUPTED] Exiting.")
         sys.exit(1)
