@@ -4,8 +4,11 @@ from datetime import datetime
 from collections import defaultdict, Counter
 from inspect import signature
 import json, random, sys, re, os, glob, os.path as op
+import cv2
+import numpy as np
+import albumentations as A
 
-# ───────────────────────────────────────────────────────────────────────────────
+
 # Models
 from rfdetr import RFDETRSmall, RFDETRMedium, RFDETRLarge
 
@@ -60,7 +63,203 @@ TARGET_SPECS = [
 ]
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Utils (no torch.distributed anywhere)
+def _mk_pipeline_for(target_name: str):
+    """Microscopy-aware aug pipeline per target."""
+    is_leuco = target_name.lower().startswith("leuco")
+    if is_leuco:
+        # tiny objects: bias toward zoom-in, keep geometry modest
+        return A.Compose([
+            A.HorizontalFlip(p=0.5),
+            A.ShiftScaleRotate(
+                shift_limit=0.02,           # ≤2% shift
+                scale_limit=(0.10, 0.35),   # zoom-in up to +35% (no shrinking)
+                rotate_limit=7,             # ±7°
+                border_mode=cv2.BORDER_REFLECT_101,
+                p=0.8
+            ),
+            A.GaussNoise(var_limit=(2.0, 8.0), p=0.25),
+            A.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.15, hue=0.01, p=0.4),
+            A.GaussianBlur(blur_limit=(3, 3), p=0.10),  # *very* light blur only
+        ], bbox_params=A.BboxParams(format="coco", label_fields=["category_id"],
+                                    min_visibility=0.30))  # drop boxes that become too small
+    else:
+        # epithelial: bigger, tolerate slightly stronger photo jitter
+        return A.Compose([
+            A.HorizontalFlip(p=0.5),
+            A.ShiftScaleRotate(
+                shift_limit=0.02,
+                scale_limit=(-0.10, 0.10),  # gentle zoom in/out
+                rotate_limit=5,
+                border_mode=cv2.BORDER_REFLECT_101,
+                p=0.7
+            ),
+            A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.02, p=0.5),
+            A.GaussianBlur(blur_limit=(3, 5), p=0.15),
+            A.GaussNoise(var_limit=(2.0, 12.0), p=0.2),
+        ], bbox_params=A.BboxParams(format="coco", label_fields=["category_id"],
+                                    min_visibility=0.40))
+
+def _read_coco_json(p: Path):
+    with p.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+def _write_coco_json(p: Path, data: dict):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+
+def _safe_imread(path: Path):
+    # pillow → numpy RGB
+    from PIL import Image
+    im = Image.open(str(path)).convert("RGB")
+    return np.array(im)
+
+def _clip_coco_box(b, w, h):
+    x, y, bw, bh = b
+    x = max(0.0, min(float(x),  float(w - 1)))
+    y = max(0.0, min(float(y),  float(h - 1)))
+    bw = max(1.0, min(float(bw), float(w - x)))
+    bh = max(1.0, min(float(bh), float(h - y)))
+    return [x, y, bw, bh]
+
+def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
+                              copies_per_image: int = 1,
+                              keep_originals: bool = True,
+                              jpeg_quality: int = 92):
+    """
+    Creates dst_dir with TRAIN augmented; VALID/TEST are symlinked/copied through.
+    - copies_per_image: number of augmented variants per original train image.
+    - keep_originals: also include the original train images.
+    """
+    assert (src_dir / "train" / "_annotations.coco.json").exists(), f"Missing train json in {src_dir}"
+    print(f"[AUG] Building augmented train set for '{target_name}' → {dst_dir}")
+    if dst_dir.exists():
+        raise FileExistsError(f"{dst_dir} already exists")
+
+    # Passthrough valid/test
+    for part in ("valid", "test"):
+        (dst_dir / part).mkdir(parents=True, exist_ok=True)
+        _write_coco_json(dst_dir / part / "_annotations.coco.json",
+                         _read_coco_json(src_dir / part / "_annotations.coco.json"))
+
+    # Load train
+    src_ann = _read_coco_json(src_dir / "train" / "_annotations.coco.json")
+    cats = src_ann["categories"]
+    images = {im["id"]: im for im in src_ann["images"]}
+    anns_by_img = defaultdict(list)
+    for a in src_ann["annotations"]:
+        anns_by_img[a["image_id"]].append(a)
+
+    # Prepare out containers
+    out_images, out_anns = [], []
+    next_img_id = 1
+    next_ann_id = 1
+    id_map_img = {}  # original id -> new id (for originals, if kept)
+
+    # Pipeline
+    pipeline = _mk_pipeline_for(target_name)
+
+    # Output train dir
+    out_img_dir = dst_dir / "train" / "images"
+    out_img_dir.mkdir(parents=True, exist_ok=True)
+    out_ann_path = dst_dir / "train" / "_annotations.coco.json"
+
+    # 1) Optionally keep originals
+    if keep_originals:
+        for old_iid, im in images.items():
+            new_iid = next_img_id; next_img_id += 1
+            id_map_img[old_iid] = new_iid
+            # copy-as-absolute file_path for safety
+            src_fp = Path(im["file_name"])
+            if not src_fp.exists():
+                # also allow relative to src json
+                src_fp = (src_dir / "train" / im["file_name"]).resolve()
+            # write JPEG (or PNG) copy to keep set self-contained
+            ext = ".jpg" if src_fp.suffix.lower() not in (".png", ".tif", ".tiff") else src_fp.suffix.lower()
+            new_name = f"img_{new_iid}{ext}"
+            dst_fp = out_img_dir / new_name
+
+            img_np = _safe_imread(src_fp)
+            if ext.lower() == ".png":
+                cv2.imwrite(str(dst_fp), cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR),
+                            [cv2.IMWRITE_PNG_COMPRESSION, 3])
+            elif ext.lower() in (".tif", ".tiff"):
+                cv2.imwrite(str(dst_fp), cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR))
+            else:
+                cv2.imwrite(str(dst_fp), cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR),
+                            [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
+
+            out_images.append({
+                "id": new_iid,
+                "file_name": str(dst_fp.resolve()),
+                "width": int(im["width"]),
+                "height": int(im["height"]),
+            })
+            for a in anns_by_img.get(old_iid, []):
+                aa = dict(a)
+                aa["id"] = next_ann_id; next_ann_id += 1
+                aa["image_id"] = new_iid
+                # clip to image bounds
+                aa["bbox"] = _clip_coco_box(aa["bbox"], im["width"], im["height"])
+                out_anns.append(aa)
+
+    # 2) Augmented copies
+    for old_iid, im in images.items():
+        src_fp = Path(im["file_name"])
+        if not src_fp.exists():
+            src_fp = (src_dir / "train" / im["file_name"]).resolve()
+        img_np = _safe_imread(src_fp)
+
+        orig_bboxes = []
+        orig_labels = []
+        for a in anns_by_img.get(old_iid, []):
+            x, y, w, h = a["bbox"]
+            orig_bboxes.append([float(x), float(y), float(w), float(h)])
+            orig_labels.append(a["category_id"])
+
+        for k in range(copies_per_image):
+            transformed = pipeline(image=img_np, bboxes=orig_bboxes, category_id=orig_labels)
+            aug = transformed["image"]
+            bbs = transformed["bboxes"]
+            lbs = transformed["category_id"]
+
+            if len(bbs) == 0:
+                continue  # drop fully invisible case
+
+            new_iid = next_img_id; next_img_id += 1
+            new_name = f"img_{new_iid}_aug{k+1}.jpg"
+            dst_fp = out_img_dir / new_name
+            cv2.imwrite(str(dst_fp), cv2.cvtColor(aug, cv2.COLOR_RGB2BGR),
+                        [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
+
+            H, W = aug.shape[:2]
+            out_images.append({
+                "id": new_iid,
+                "file_name": str(dst_fp.resolve()),
+                "width": int(W),
+                "height": int(H),
+            })
+            for bb, lab in zip(bbs, lbs):
+                aa = {
+                    "id": next_ann_id,
+                    "image_id": new_iid,
+                    "category_id": int(lab),
+                    "bbox": _clip_coco_box(bb, W, H),
+                    "area": float(max(1.0, bb[2] * bb[3])),
+                    "iscrowd": 0,
+                }
+                next_ann_id += 1
+                out_anns.append(aa)
+
+    # Write out COCO train json
+    _write_coco_json(out_ann_path, {"images": out_images,
+                                    "annotations": out_anns,
+                                    "categories": cats})
+    print(f"[AUG] Train images: originals={len(images) if keep_originals else 0}, "
+          f"augmented≈{len(images)*copies_per_image}, total_out={len(out_images)}")
+    return dst_dir
+
+
 def nowstamp() -> str: return datetime.now().strftime('%Y%m%d-%H%M%S')
 
 def safe_out_dir(root: Path, prefix="dataset_coco_splits", suffix="Base_AllClasses") -> Path:
@@ -447,7 +646,8 @@ def main():
         ROT_DEG=7,
         CJ=0.25,
         GAUSS_BLUR=0.1,  # less blur (don’t erase tiny details)
-        EARLY_STOP_PATIENCE=35
+        EARLY_STOP_PATIENCE=35,
+        EXPAND_SCALES=False,
     )
 
     def target_profile(name: str):
@@ -469,11 +669,20 @@ def main():
         warmup_steps = int(os.getenv("WARMUP_STEPS", str(prof["WARMUP_STEPS"])))
         early_stop_pat = int(os.getenv("EARLY_STOP_PATIENCE", str(prof["EARLY_STOP_PATIENCE"])))
 
+
+        ### Directories - with augmentations for training ###
         derived_dir = derive_one_vs_rest(out_dir, target_name)
         print(f"[DERIVED] {target_name} dataset at: {derived_dir}")
 
-        out_train = derived_dir / "rfdetr_run"
+        # Build an augmented dataset (TRAIN only)
+        aug_dir = derived_dir.parent / (derived_dir.name + "_AUG")
+        copies = 1 if target_name.lower().startswith("squamous") else 2  # 1x for epithelial, 2x for leucocytes
+        aug_ds_dir = build_augmented_train_set(derived_dir, aug_dir, target_name, copies_per_image=copies,
+                                               keep_originals=True)
+
+        out_train = aug_ds_dir / "rfdetr_run"
         out_train.mkdir(parents=True, exist_ok=True)
+        ######################################################
 
         # Build model + safe kwargs (single GPU)
         model = MODEL_CLS()
@@ -481,7 +690,7 @@ def main():
         can = set(sig.parameters.keys())
 
         train_kwargs = dict(
-            dataset_dir=str(derived_dir),
+            dataset_dir=str(aug_ds_dir),
             output_dir=str(out_train),
             resolution=RESOLUTION,
             batch_size=per_gpu_batch,
@@ -522,7 +731,7 @@ def main():
         maybe("rotation_degrees", prof["ROT_DEG"])
         maybe("color_jitter", prof["CJ"])
         maybe("gaussian_blur_prob", prof["GAUSS_BLUR"])
-        maybe("hflip_prob", 0.5);
+        maybe("hflip_prob", 0.5)
         maybe("flip_prob", 0.5)
         # small-obj friendly crops/padding if available in your API:
         maybe("random_resize_via_padding", True)  # keep objects from being cut off
