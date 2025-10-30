@@ -500,6 +500,7 @@ def main():
             tensorboard=True,
             pin_memory=True,
             persistent_workers=True,
+            early_stop_patience=early_stop_pat
         )
 
         def maybe(name, value):
@@ -513,6 +514,7 @@ def main():
         maybe("warmup_steps", warmup_steps)
         maybe("clip_grad_norm", 0.1)  # if supported: stabilizes long runs
         maybe("ema", True)  # if supported: helps small-obj recall
+
 
         # augmentation tailored per target
         scale_min, scale_max = prof["SCALE_RANGE"]
@@ -531,6 +533,13 @@ def main():
         maybe("early_stopping_patience", early_stop_pat)
         # and make the metric used consistent (if supported)
         maybe("early_stopping_metric", "map_50_95")
+        # make early stopping check every epoch
+        maybe("checkpoint_interval", 1)
+        # turn on ES, use EMA for the early-stop metric, and set your patience + min_delta
+        maybe("early_stopping_use_ema", True)  # your logs show max(regular, EMA); be explicit
+        maybe("early_stopping_patience", 20)  # your desired patience
+        maybe("early_stopping_min_delta", 0.001)  # your threshold for “improvement”
+        maybe("run_test", True)  # ensure a val/test pass each epoch
 
         # save run meta
         meta_dir = out_train / "run_meta"
