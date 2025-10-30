@@ -51,7 +51,7 @@ SEED = 42
 KEEP_EMPTY = False
 VALID_EXTS = {".tif", ".tiff", ".jpg", ".jpeg", ".png"}
 
-ALPHA_SIZE = 50
+ALPHA_SIZE = 0.50
 BETA_CLASS  = 0.50
 EPS = 1e-9
 
