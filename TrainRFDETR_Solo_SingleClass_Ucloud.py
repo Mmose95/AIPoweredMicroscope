@@ -8,7 +8,6 @@ import os
 
 from rfdetr import RFDETRSmall, RFDETRLarge, RFDETRMedium
 
-# ====== YOUR PATHS ======
 import glob, os.path as op
 
 # -------- UCloud user base detection (AAU/SDU layouts) --------
@@ -92,6 +91,9 @@ TARGET_SPECS = [
 import torch
 import torch.distributed as dist
 
+# --- replace your DDP helpers with this minimal version ----
+import torch, os
+
 def ddp_active() -> bool:
     try:
         return int(os.environ.get("WORLD_SIZE", "1")) > 1
@@ -104,18 +106,25 @@ def world_size() -> int:
     except Exception:
         return 1
 
-def ddp_setup():
-    if ddp_active():
-        if not dist.is_initialized():
-            dist.init_process_group(backend="nccl")
-        torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", "0")))
-
-def ddp_barrier():
-    if ddp_active():
-        dist.barrier()
-
 def is_main() -> bool:
     return int(os.environ.get("RANK", "0")) == 0
+
+def ddp_setup():
+    """
+    IMPORTANT: Do NOT init the process group here.
+    RFDETR will call torch.distributed.init_process_group() internally.
+    We only set the CUDA device so DataLoader pinning etc. is correct.
+    """
+    if "LOCAL_RANK" in os.environ:
+        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+
+def ddp_barrier():
+    # defer to RFDETR's process group after it initializes; but we can safely
+    # use torch.distributed.barrier() only if it's already initialized.
+    import torch.distributed as dist
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
+
 
 def ddp_broadcast_str(val: str | None) -> str:
     """Broadcast a short string (e.g., timestamp) from rank-0 to all ranks."""
@@ -574,6 +583,35 @@ def main():
         else:
             out_train = base_run / f"_tmp_rank{int(os.environ.get('RANK','0'))}"
             out_train.mkdir(parents=True, exist_ok=True)
+
+        # ensure all ranks share the same Torch hub cache (so others reuse the file)
+        os.environ.setdefault("TORCH_HOME", str(WORK_ROOT / ".torch_cache"))
+
+        # ----- rank-0 warmup to avoid N-way download races -----
+        from inspect import signature
+        if is_main():
+            # create a tiny, throwaway instance that triggers the download once
+            _tmp = MODEL_CLS()
+            # if download happens inside .train(), do a quick dry-run that only loads weights:
+            # many impls accept something like 'epochs=0' or 'max_steps=1'; if not, skip.
+            try:
+                can = set(signature(_tmp.train).parameters.keys())
+                kwargs = {}
+                if "epochs" in can: kwargs["epochs"] = 0
+                if "dataset_dir" in can: kwargs["dataset_dir"] = str(derived_dir)  # harmless
+                _tmp.train(**kwargs)
+            except Exception:
+                pass
+            del _tmp
+            # leave a simple marker so non-rank-0 can proceed confidently
+            (derived_dir / ".WEIGHTS_READY").write_text("ok", encoding="utf-8")
+
+        # all ranks wait for the weights to exist in TORCH_HOME
+        import time
+        if not is_main():
+            marker = derived_dir / ".WEIGHTS_READY"
+            while not marker.exists():
+                time.sleep(0.5)
 
         # Build kwargs safely (only pass what this rfdetr build supports)
         model = MODEL_CLS()
