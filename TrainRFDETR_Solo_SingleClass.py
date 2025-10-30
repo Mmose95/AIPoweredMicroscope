@@ -449,6 +449,7 @@ def main():
 
     # Choose model class & resolution (Large needs 56-divisible → 672)
     MODEL_CLS = RFDETRMedium
+
     RESOLUTION = 640  # keep 672 for RFDETRLarge (divisible by 56). Use 640 for Medium/Small.
 
     for spec in active_targets:

@@ -28,8 +28,8 @@ from pycocotools.cocoeval import COCOeval
 from rfdetr import RFDETRSmall, RFDETRMedium, RFDETRLarge
 
 # ====== USER INPUTS ======
-RunName = "dataset_coco_splits_20251028-104905_Leucocyte"
-CHECKPOINT = "./RFDETR_SOLO_OUTPUT/" + RunName + "/rfdetr_run/checkpoint_best_regular.pth"
+RunName = "dataset_coco_splits_20251030-103504_Base_AllClasses_Leucocyte"
+CHECKPOINT = "./RFDETR_SOLO_OUTPUT/" + RunName + "/rfdetr_run/checkpoint_best_total.pth"
 TEST_JSON  = Path(r"./RFDETR_SOLO_OUTPUT/" + RunName + "/test/_annotations.coco.json")
 OUT_DIR    = Path("./rfdeval_out") / RunName
 SCORE_THRESH = 0.30     # confidence threshold for predictions & confusion/overlays
@@ -43,7 +43,33 @@ SEED = 42
 # ---------- RF-DETR inference shim ----------
 
 @torch.no_grad()
-@torch.no_grad()
+
+# ───────────────────────────────────────────────────────────────
+# Helper: normalize file paths (UCloud → local Windows)
+def fix_ucloud_path(path_str: str) -> str:
+    """
+    If the COCO JSON image paths contain UCloud prefixes like:
+        /work/MatiasMose#8097/CellScanData/...
+    then automatically replace with your local Windows base path.
+    """
+    if not path_str:
+        return path_str
+
+    ucloud_prefix = "/work/MatiasMose#8097/"
+    local_prefix  = r"D:/PHD/PhdData/"
+
+    # Replace forward slashes and prefix if necessary
+    if path_str.startswith(ucloud_prefix):
+        path_str = path_str.replace(ucloud_prefix, local_prefix)
+    elif path_str.startswith("\\work\\MatiasMose#8097\\"):
+        path_str = path_str.replace("\\work\\MatiasMose#8097\\", local_prefix)
+
+    # Always normalize to Windows-style separators
+    path_str = os.path.normpath(path_str)
+    return path_str
+# ───────────────────────────────────────────────────────────────
+
+
 def predict_one_image(model, img_pil: Image.Image, score_thresh: float):
     """
     Returns: boxes_xyxy [N,4], scores [N], class_idx [N]
@@ -298,7 +324,7 @@ def main():
 
     # Load model
 
-    model = RFDETRMedium(pretrain_weights=CHECKPOINT)
+    model = RFDETRLarge(pretrain_weights=CHECKPOINT)
     #if hasattr(model, "optimize_for_inference"):
         #model.optimize_for_inference()
 
@@ -312,7 +338,7 @@ def main():
     overlay_samples = []
     for i, img_id in enumerate(tqdm(img_ids, desc="Infer")):
         im_meta = coco.loadImgs(img_id)[0]
-        img_path = Path(im_meta["file_name"])
+        img_path = Path(fix_ucloud_path(im_meta["file_name"]))
         if not img_path.exists():
             # If file_name wasn’t absolute, interpret relative to JSON parent
             img_path = TEST_JSON.parent / im_meta["file_name"]
@@ -450,7 +476,7 @@ def main():
 
         # --- Predictions ---
         im_meta = coco.loadImgs(img_id)[0]
-        img_path = Path(im_meta["file_name"])
+        img_path = Path(fix_ucloud_path(im_meta["file_name"]))
         if not img_path.exists():
             img_path = TEST_JSON.parent / im_meta["file_name"]
         im = Image.open(img_path).convert("RGB")

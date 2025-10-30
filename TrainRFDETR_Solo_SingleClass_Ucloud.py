@@ -417,12 +417,58 @@ def main():
         print("[WARN] No target classes found in base split; nothing to train.")
         return
 
-    MODEL_CLS = RFDETRLarge
-    RESOLUTION = 672  # 56-divisible for Large
+    #Deviding hyperparameter into a set for each object
+    Epithelial_Hyperparameters = dict(
+        MODEL_CLS=RFDETRLarge,
+        RESOLUTION=672,  # epithelial scale
+        EPOCHS=220,
+        LR=1e-4,
+        LR_ENCODER_MULT=0.15,
+        BATCH=8,
+        NUM_QUERIES=300,
+        WARMUP_STEPS=1500,
+        SCALE_RANGE=(0.9, 1.1),  # gentle zoom
+        ROT_DEG=5,
+        CJ=0.2,  # color jitter
+        GAUSS_BLUR=0.2,
+        EARLY_STOP_PATIENCE=20
+    )
+
+    Leucocyte_Hyperparameters = dict(
+        MODEL_CLS=RFDETRLarge,
+        RESOLUTION=672,  # make leucocytes bigger in pixels
+        EPOCHS=320,  # train longer; small objs converge slower
+        LR=8e-5,  # a tad lower when upscaling & training longer
+        LR_ENCODER_MULT=0.10,  # keep encoder a bit more stable
+        BATCH=6,  # larger images ⇒ smaller batch to avoid OOM
+        NUM_QUERIES=600,  # more slots helps recall on many tiny objs
+        WARMUP_STEPS=3000,
+        SCALE_RANGE=(1.0, 1.6),  # bias to zoom-in (critical for tiny objs)
+        ROT_DEG=7,
+        CJ=0.25,
+        GAUSS_BLUR=0.1,  # less blur (don’t erase tiny details)
+        EARLY_STOP_PATIENCE=35
+    )
+
+    def target_profile(name: str):
+        return Leucocyte_Hyperparameters if name.lower().startswith("leuco") else Epithelial_Hyperparameters
 
     for spec in active_targets:
         target_name = spec["name"]
         print(f"\n[DERIVE] Building one-vs-rest for: {target_name}")
+
+        prof = target_profile(target_name)
+
+        MODEL_CLS = prof["MODEL_CLS"]
+        RESOLUTION = prof["RESOLUTION"]
+        EPOCHS = prof["EPOCHS"]
+        base_lr = float(os.getenv("LR", str(prof["LR"])))
+        lr_encoder = prof["LR_ENCODER_MULT"] * base_lr
+        per_gpu_batch = int(os.getenv("BATCH_SIZE", str(prof["BATCH"])))
+        num_queries = int(os.getenv("NUM_QUERIES", str(prof["NUM_QUERIES"])))
+        warmup_steps = int(os.getenv("WARMUP_STEPS", str(prof["WARMUP_STEPS"])))
+        early_stop_pat = int(os.getenv("EARLY_STOP_PATIENCE", str(prof["EARLY_STOP_PATIENCE"])))
+
         derived_dir = derive_one_vs_rest(out_dir, target_name)
         print(f"[DERIVED] {target_name} dataset at: {derived_dir}")
 
@@ -434,24 +480,18 @@ def main():
         sig = signature(model.train)
         can = set(sig.parameters.keys())
 
-        per_gpu_batch = int(os.getenv("BATCH_SIZE", "8"))   # tune if OOM
-        grad_accum = 1
-        base_lr = float(os.getenv("LR", "1e-4"))
-        lr = base_lr
-        lr_encoder = 0.15 * lr
-
         train_kwargs = dict(
             dataset_dir=str(derived_dir),
             output_dir=str(out_train),
             resolution=RESOLUTION,
             batch_size=per_gpu_batch,
-            grad_accum_steps=grad_accum,
-            epochs=int(os.getenv("EPOCHS", "180")),
-            lr=lr,
+            grad_accum_steps=1,
+            epochs=EPOCHS,
+            lr=base_lr,
             weight_decay=5e-4,
             dropout=0.1,
             class_names=[target_name],
-            num_queries=300,
+            num_queries=num_queries,
             multi_scale=True,
             gradient_checkpointing=True,
             amp=True,
@@ -466,31 +506,36 @@ def main():
             if name in can:
                 train_kwargs[name] = value
 
-        # Augmentations
-        maybe("hflip_prob", 0.5); maybe("flip_prob", 0.5)
-        maybe("rotation_degrees", 5)
-        maybe("translate", 0.05)
-        maybe("scale_range", (0.9, 1.1))
-        maybe("random_affine_prob", 0.5)
-        maybe("color_jitter", 0.2)
-        maybe("brightness", 0.2); maybe("contrast", 0.2)
-        maybe("saturation", 0.2); maybe("hue", 0.02)
-        maybe("gaussian_blur_prob", 0.2)
-        maybe("do_random_resize_via_padding", False)
-        maybe("square_resize_div_64", True)
+            # scheduler / optimizer knobs
+
         maybe("lr_encoder", lr_encoder)
         maybe("lr_schedule", "cosine")
-        maybe("warmup_steps", 1500)
+        maybe("warmup_steps", warmup_steps)
+        maybe("clip_grad_norm", 0.1)  # if supported: stabilizes long runs
+        maybe("ema", True)  # if supported: helps small-obj recall
 
-        # Log minimal meta
+        # augmentation tailored per target
+        scale_min, scale_max = prof["SCALE_RANGE"]
+        maybe("scale_range", (scale_min, scale_max))
+        maybe("rotation_degrees", prof["ROT_DEG"])
+        maybe("color_jitter", prof["CJ"])
+        maybe("gaussian_blur_prob", prof["GAUSS_BLUR"])
+        maybe("hflip_prob", 0.5);
+        maybe("flip_prob", 0.5)
+        # small-obj friendly crops/padding if available in your API:
+        maybe("random_resize_via_padding", True)  # keep objects from being cut off
+        maybe("min_crop_size", 0.50)  # don’t crop away tiny objs
+        maybe("square_resize_div_64", True)
+
+        # early stopping patience (if available)
+        maybe("early_stopping_patience", early_stop_pat)
+        # and make the metric used consistent (if supported)
+        maybe("early_stopping_metric", "map_50_95")
+
+        # save run meta
         meta_dir = out_train / "run_meta"
         meta_dir.mkdir(parents=True, exist_ok=True)
         (meta_dir / "train_kwargs.json").write_text(json.dumps(train_kwargs, indent=2), encoding="utf-8")
-        (meta_dir / "model_architecture.json").write_text(
-            json.dumps({"model_name": model.__class__.__name__, "target_class": target_name,
-                        "base_split_dir": str(out_dir), "derived_dir": str(derived_dir)}, indent=2),
-            encoding="utf-8"
-        )
 
         print(f"[TRAIN] {model.__class__.__name__} — {target_name}")
         model.train(**train_kwargs)
