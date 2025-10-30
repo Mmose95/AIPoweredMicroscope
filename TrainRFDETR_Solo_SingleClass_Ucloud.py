@@ -9,8 +9,7 @@ import os
 from rfdetr import RFDETRSmall, RFDETRLarge, RFDETRMedium
 
 # ====== YOUR PATHS ======
-import os, glob, os.path as op
-from pathlib import Path
+import glob, os.path as op
 
 # -------- UCloud user base detection (AAU/SDU layouts) --------
 def _detect_user_base() -> str | None:
@@ -89,22 +88,52 @@ TARGET_SPECS = [
     {"name": "Leucocyte",                "suffix": "Leucocyte"},
 ]
 
-# ---------- small utils ----------
-def world_size():
-    # torchrun sets these
+# ---- DDP helpers ----
+import torch
+import torch.distributed as dist
+
+def ddp_active() -> bool:
+    try:
+        return int(os.environ.get("WORLD_SIZE", "1")) > 1
+    except Exception:
+        return False
+
+def world_size() -> int:
     try:
         return int(os.environ.get("WORLD_SIZE", "1"))
     except Exception:
         return 1
 
-def nowstamp(): return datetime.now().strftime('%Y%m%d-%H%M%S')
+def ddp_setup():
+    if ddp_active():
+        if not dist.is_initialized():
+            dist.init_process_group(backend="nccl")
+        torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", "0")))
 
-def safe_out_dir(root: Path, prefix="dataset_coco_splits", suffix="Base_AllClasses"):
-    root.mkdir(parents=True, exist_ok=True)
-    out = root / f"{prefix}_{datetime.now().strftime('%Y%m%d-%H%M%S')}_{suffix}"
-    out.mkdir(parents=True, exist_ok=False)
+def ddp_barrier():
+    if ddp_active():
+        dist.barrier()
+
+def is_main() -> bool:
+    return int(os.environ.get("RANK", "0")) == 0
+
+def ddp_broadcast_str(val: str | None) -> str:
+    """Broadcast a short string (e.g., timestamp) from rank-0 to all ranks."""
+    if not ddp_active():
+        return val if val is not None else ""
+    obj_list = [val]
+    dist.broadcast_object_list(obj_list, src=0)
+    return obj_list[0]
+
+def make_out_dir_with_stamp(root: Path, stamp: str, suffix="Base_AllClasses") -> Path:
+    out = root / f"dataset_coco_splits_{stamp}_{suffix}"
+    if is_main():
+        out.mkdir(parents=True, exist_ok=False)
+    ddp_barrier()
     return out
 
+# ---------- small utils ----------
+def nowstamp(): return datetime.now().strftime('%Y%m%d-%H%M%S')
 
 def load_coco(p: Path):
     with p.open("r", encoding="utf-8") as f:
@@ -365,7 +394,7 @@ def write_logs(out_dir: Path, assign: dict, sample_stats: dict,
     }
     (out_dir / "split_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
-# ---- NEW: derive per-class filtered datasets (keep negatives) ----
+# ---- derive per-class filtered datasets (keep negatives) ----
 def derive_one_vs_rest(base_split_dir: Path, target_name: str) -> Path:
     """
     Create a sibling folder with suffix, keeping all images but only target-class annotations (id=0).
@@ -422,116 +451,138 @@ def main():
     if not IMAGES_DIR.exists():
         print(f"ERROR: Images dir not found: {IMAGES_DIR}"); sys.exit(1)
 
-    out_dir = safe_out_dir(OUT_ROOT)
-    print(f"[OK] Output (base split): {out_dir}")
+    # ---- DDP init early ----
+    ddp_setup()
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    ws = world_size()
 
-    coco = load_coco(ALL_COCO_JSON)
-    images_by_id, anns_by_image, categories = build_index(coco)
+    # Shared timestamp/outdir
+    stamp = nowstamp() if is_main() else None
+    stamp = ddp_broadcast_str(stamp)
+    out_dir = make_out_dir_with_stamp(OUT_ROOT, stamp)
+    if is_main():
+        print(f"[OK] Output (base split): {out_dir}")
 
-    kept_images = nonempty_images(images_by_id, anns_by_image) if not KEEP_EMPTY else list(images_by_id.values())
-    if not kept_images:
-        print("ERROR: No images to split."); sys.exit(1)
+    # ===== Rank-0: split/index/write; others wait =====
+    if is_main():
+        coco = load_coco(ALL_COCO_JSON)
+        images_by_id, anns_by_image, categories = build_index(coco)
 
-    print("[INDEX] Scanning images recursively…")
-    by_rel, by_name = index_image_paths(IMAGES_DIR)
-    if not by_rel and not by_name:
-        print(f"ERROR: No images under {IMAGES_DIR}"); sys.exit(1)
+        kept_images = nonempty_images(images_by_id, anns_by_image) if not KEEP_EMPTY else list(images_by_id.values())
+        if not kept_images:
+            print("ERROR: No images to split."); sys.exit(1)
 
-    # class sets
-    cat_name2id = {c["name"]: c["id"] for c in categories}
-    excluded_ids = {cat_name2id[n] for n in EXCLUDE_CLASS_NAMES if n in cat_name2id}
+        print("[INDEX] Scanning images recursively…")
+        by_rel, by_name = index_image_paths(IMAGES_DIR)
+        if not by_rel and not by_name:
+            print(f"ERROR: No images under {IMAGES_DIR}"); sys.exit(1)
 
-    # global per-class totals
-    total_class = Counter()
-    for im in kept_images:
-        for a in anns_by_image.get(im["id"], []):
-            total_class[a["category_id"]] += 1
+        # class sets
+        cat_name2id = {c["name"]: c["id"] for c in categories}
+        excluded_ids = {cat_name2id[n] for n in EXCLUDE_CLASS_NAMES if n in cat_name2id}
 
-    # include only classes with >0 annotations and not excluded
-    included_cat_ids = [c["id"] for c in categories if total_class[c["id"]] > 0 and c["id"] not in excluded_ids]
-    if not included_cat_ids:
-        print("ERROR: No classes with annotations to balance after exclusions."); sys.exit(1)
+        # global per-class totals
+        total_class = Counter()
+        for im in kept_images:
+            for a in anns_by_image.get(im["id"], []):
+                total_class[a["category_id"]] += 1
 
-    # Make a stable order for included classes
-    included_cats = [c for c in categories if c["id"] in included_cat_ids]
-    included_cats.sort(key=lambda c: c["name"])  # fixed order
+        # include only classes with >0 annotations and not excluded
+        included_cat_ids = [c["id"] for c in categories if total_class[c["id"]] > 0 and c["id"] not in excluded_ids]
+        if not included_cat_ids:
+            print("ERROR: No classes with annotations to balance after exclusions."); sys.exit(1)
 
-    # Remap: old_id -> new contiguous id 0..K-1
-    old2new = {c["id"]: i for i, c in enumerate(included_cats)}
+        # Make a stable order for included classes
+        included_cats = [c for c in categories if c["id"] in included_cat_ids]
+        included_cats.sort(key=lambda c: c["name"])  # fixed order
 
-    # include "supercategory" so rfdetr doesn't KeyError
-    new_categories = [
-        {"id": i, "name": c["name"], "supercategory": c.get("supercategory", "none")}
-        for i, c in enumerate(included_cats)
-    ]
+        # Remap: old_id -> new contiguous id 0..K-1
+        old2new = {c["id"]: i for i, c in enumerate(included_cats)}
 
-    # per-sample stats (only included classes counted)
-    sample_stats = compute_per_sample_stats(kept_images, anns_by_image, IMAGES_DIR, by_rel, by_name, included_cat_ids)
+        # include "supercategory" so rfdetr doesn't KeyError
+        new_categories = [
+            {"id": i, "name": c["name"], "supercategory": c.get("supercategory", "none")}
+            for i, c in enumerate(included_cats)
+        ]
 
-    # ---- PRESEED: ensure valid/test have >=1 of each class if feasible ----
-    locked = preseed_min_per_class(sample_stats, required_cls=included_cat_ids, seed=SEED)
+        # per-sample stats (only included classes counted)
+        sample_stats = compute_per_sample_stats(kept_images, anns_by_image, IMAGES_DIR, by_rel, by_name, included_cat_ids)
 
-    # ---- Greedy assignment with balancing + penalties ----
-    (splits, assign, tgt_imgs, tgt_class,
-     cur_imgs, cur_class, total_imgs, _total_class_included) = split_by_sample_balanced(
-        sample_stats, included_cat_ids, SPLIT, seed=SEED, locked=locked
-    )
+        # ---- PRESEED: ensure valid/test have >=1 of each class if feasible ----
+        locked = preseed_min_per_class(sample_stats, required_cls=included_cat_ids, seed=SEED)
 
-    # Write JSONs (absolute paths) — BASE (multi-class)
-    for part in ("train", "valid", "test"):
-        print(f"Writing {part} JSON ({len(splits[part])} images)…")
-        write_subset_json(
-            part, splits[part], coco, images_by_id, anns_by_image,
-            out_dir, IMAGES_DIR, by_rel, by_name,
-            old2new, new_categories
+        # ---- Greedy assignment with balancing + penalties ----
+        (splits, assign, tgt_imgs, tgt_class,
+         cur_imgs, cur_class, total_imgs, _total_class_included) = split_by_sample_balanced(
+            sample_stats, included_cat_ids, SPLIT, seed=SEED, locked=locked
         )
 
-    # Logs
-    write_logs(out_dir, assign, sample_stats, categories, included_cat_ids,
-               tgt_imgs, tgt_class, cur_imgs, cur_class, total_imgs, total_class, excluded_ids)
+        # Write JSONs (absolute paths) — BASE (multi-class)
+        for part in ("train", "valid", "test"):
+            print(f"Writing {part} JSON ({len(splits[part])} images)…")
+            write_subset_json(
+                part, splits[part], coco, images_by_id, anns_by_image,
+                out_dir, IMAGES_DIR, by_rel, by_name,
+                old2new, new_categories
+            )
 
-    print(f"[DONE] Base split at: {out_dir}")
-    print("  - split_summary.json")
-    print("  - sample_assignments.csv")
+        # Logs
+        write_logs(out_dir, assign, sample_stats, categories, included_cat_ids,
+                   tgt_imgs, tgt_class, cur_imgs, cur_class, total_imgs, total_class, excluded_ids)
 
-    # ===== DERIVE ONE-VS-REST DATASETS + TRAIN BOTH IN A LOOP =====
-    # Only keep target classes that actually exist in BASE categories
+        # Save a marker with categories for non-main ranks to read
+        (out_dir / ".CATS.json").write_text(json.dumps(new_categories), encoding="utf-8")
+
+        print(f"[DONE] Base split at: {out_dir}")
+        print("  - split_summary.json")
+
+    # Wait for split completion; non-main reads categories
+    ddp_barrier()
+    if not is_main():
+        new_categories = json.loads((out_dir / ".CATS.json").read_text(encoding="utf-8"))
+
+    # ===== DERIVE ONE-VS-REST DATASETS + TRAIN =====
     base_cats = [c["name"] for c in new_categories]
     active_targets = [t for t in TARGET_SPECS if t["name"] in base_cats]
     if not active_targets:
-        print("[WARN] No target classes found in base split; nothing to train.")
+        if is_main():
+            print("[WARN] No target classes found in base split; nothing to train.")
         return
 
-    # Choose model class & resolution (Large needs 56-divisible → 672)
     MODEL_CLS = RFDETRLarge
-    RESOLUTION = 672  # keep 672 for RFDETRLarge (divisible by 56). Use 640 for Medium/Small.
+    RESOLUTION = 672  # 56-divisible for Large; use 640 for Medium/Small.
 
     for spec in active_targets:
         target_name = spec["name"]
         suffix = spec["suffix"]
-        print(f"\n[DERIVE] Building one-vs-rest for: {target_name}")
-        derived_dir = derive_one_vs_rest(out_dir, target_name)
+
+        # Rank-0 derives once; everyone reads derived path from marker
+        marker = out_dir / f".DERIVED_{suffix}.txt"
+        if is_main():
+            print(f"\n[DERIVE] Building one-vs-rest for: {target_name}")
+            derived_dir = derive_one_vs_rest(out_dir, target_name)
+            marker.write_text(str(derived_dir), encoding="utf-8")
+        ddp_barrier()
+        derived_dir = Path(marker.read_text(encoding="utf-8").strip())
         print(f"[DERIVED] {target_name} dataset at: {derived_dir}")
 
-        # Train folder
-        out_train = derived_dir / "rfdetr_run"
-        out_train.mkdir(parents=True, exist_ok=True)
-
-        # One-class names
-        class_names = [target_name]
+        # Output dir strategy
+        base_run = derived_dir / "rfdetr_run"
+        if is_main():
+            base_run.mkdir(parents=True, exist_ok=True)
+            out_train = base_run
+        else:
+            out_train = base_run / f"_tmp_rank{int(os.environ.get('RANK','0'))}"
+            out_train.mkdir(parents=True, exist_ok=True)
 
         # Build kwargs safely (only pass what this rfdetr build supports)
         model = MODEL_CLS()
         sig = signature(model.train)
         can = set(sig.parameters.keys())
 
-        ws = world_size()
-        # Start conservatively; bump to 6–8/GPU if memory allows
-        per_gpu_batch = 4
-
+        per_gpu_batch = 4  # start safe; increase if VRAM allows
         TARGET_EFF_BATCH = 32
 
-        # Compute grad accumulation to reach target effective batch
         eff_per_step = per_gpu_batch * max(ws, 1)
         grad_accum = max(1, (TARGET_EFF_BATCH + eff_per_step - 1) // eff_per_step)
 
@@ -554,64 +605,61 @@ def main():
 
             class_names=[target_name],
             num_queries=300,
-            multi_scale=True,  # if your build supports it
+            multi_scale=True,              # if your build supports it
             gradient_checkpointing=True,
             amp=True,
-            num_workers=12,  # per process; tune 8–12
+            num_workers=12,                # per process; tune 8–12
             early_stopping=True,
             tensorboard=True,
-
-
+            pin_memory=True,
+            persistent_workers=True,
+            lr_schedule="cosine",
+            warmup_steps=1500,
         )
 
         def maybe(name, value):
             if name in can:
                 train_kwargs[name] = value
 
-        # Light augmentations (same as you had)
-        maybe("hflip_prob", 0.5)            # or flip_prob
-        maybe("flip_prob", 0.5)
-
-        maybe("rotation_degrees", 5)        # ±5°
-        maybe("translate", 0.05)            # up to 5% shift
-        maybe("scale_range", (0.9, 1.1))    # 0.9–1.1
+        # Light augmentations
+        maybe("hflip_prob", 0.5); maybe("flip_prob", 0.5)
+        maybe("rotation_degrees", 5)
+        maybe("translate", 0.05)
+        maybe("scale_range", (0.9, 1.1))
         maybe("random_affine_prob", 0.5)
-
-        maybe("color_jitter", 0.2)          # single knob
-        maybe("brightness", 0.2)
-        maybe("contrast", 0.2)
-        maybe("saturation", 0.2)
-        maybe("hue", 0.02)
-
+        maybe("color_jitter", 0.2)
+        maybe("brightness", 0.2); maybe("contrast", 0.2)
+        maybe("saturation", 0.2); maybe("hue", 0.02)
         maybe("gaussian_blur_prob", 0.2)
-
-        # DETR-specific
         maybe("do_random_resize_via_padding", False)
         maybe("square_resize_div_64", True)
-        maybe("lr_encoder", lr_encoder)
-        maybe("pin_memory", True)
-        maybe("persistent_workers", True)
-        maybe("do_random_resize_via_padding", False)
-        maybe("square_resize_div_64", True)
-        # optional schedule if available:
-        maybe("lr_schedule", "cosine")
-        maybe("warmup_steps", 1500)
 
-        # ---- Log hyperparameters & model name for THIS run
-        meta_dir = out_train / "run_meta"
-        meta_dir.mkdir(parents=True, exist_ok=True)
+        # ---- DDP hints (only if RFDETR supports them)
+        maybe("distributed", ddp_active())
+        maybe("ddp", ddp_active())
+        maybe("rank", int(os.environ.get("RANK", "0")))
+        maybe("world_size", ws)
+        maybe("local_rank", local_rank)
+        maybe("save_only_rank0", True)
 
-        (meta_dir / "train_kwargs.json").write_text(json.dumps(train_kwargs, indent=2), encoding="utf-8")
-        model_summary = {"model_name": model.__class__.__name__, "target_class": target_name,
-                         "base_split_dir": str(out_dir), "derived_dir": str(derived_dir)}
-        (meta_dir / "model_architecture.json").write_text(json.dumps(model_summary, indent=2), encoding="utf-8")
+        # ---- Log hyperparameters & model name (rank-0 only)
+        if is_main():
+            meta_dir = base_run / "run_meta"
+            meta_dir.mkdir(parents=True, exist_ok=True)
+            (meta_dir / f"train_kwargs_{suffix}.json").write_text(json.dumps(train_kwargs, indent=2), encoding="utf-8")
+            model_summary = {"model_name": model.__class__.__name__, "target_class": target_name,
+                             "base_split_dir": str(out_dir), "derived_dir": str(derived_dir)}
+            (meta_dir / f"model_architecture_{suffix}.json").write_text(json.dumps(model_summary, indent=2), encoding="utf-8")
+            print(f"[LOGGED] Saved train_kwargs and model meta for {target_name}")
 
-        print(f"[LOGGED] Saved train_kwargs and model name for {target_name}")
+        if is_main():
+            print(f"[TRAIN] {model.__class__.__name__} — {target_name} "
+                  f"(ws={ws}, per_gpu_batch={per_gpu_batch}, grad_accum={grad_accum})")
 
-        # ---- Train
-        print(f"[TRAIN] {model.__class__.__name__} — {target_name}")
         model.train(**train_kwargs)
-        print(f"[TRAIN DONE] Outputs in: {out_train}")
+
+        if is_main():
+            print(f"[TRAIN DONE] Outputs in: {base_run}")
 
 if __name__ == "__main__":
     try:
