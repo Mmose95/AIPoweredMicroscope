@@ -94,6 +94,44 @@ import torch.distributed as dist
 # --- replace your DDP helpers with this minimal version ----
 import torch, os
 
+import time
+
+def is_main() -> bool:
+    return int(os.environ.get("RANK", "0")) == 0
+
+def get_shared_stamp(out_root: Path, suffix="Base_AllClasses") -> tuple[str, Path]:
+    """
+    Rank-0 creates a timestamp once and writes it to a file.
+    Other ranks busy-wait until it exists and read it.
+    Returns (stamp, out_dir).
+    """
+    out_root.mkdir(parents=True, exist_ok=True)
+    stamp_file = out_root / ".STAMP"
+    if is_main():
+        stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+        stamp_file.write_text(stamp, encoding="utf-8")
+    else:
+        # wait up to 2 minutes
+        for _ in range(1200):
+            if stamp_file.exists():
+                break
+            time.sleep(0.1)
+        if not stamp_file.exists():
+            raise RuntimeError("Timeout waiting for stamp file from rank-0.")
+        stamp = stamp_file.read_text(encoding="utf-8").strip()
+
+    out_dir = out_root / f"dataset_coco_splits_{stamp}_{suffix}"
+    if is_main():
+        out_dir.mkdir(parents=True, exist_ok=False)
+    # no torch.distributed barrier here — RFDETR will init it later.
+    # Just spin until the folder exists so all ranks can proceed.
+    for _ in range(1200):
+        if out_dir.exists():
+            break
+        time.sleep(0.05)
+    return stamp, out_dir
+
+
 def ddp_active() -> bool:
     try:
         return int(os.environ.get("WORLD_SIZE", "1")) > 1
@@ -124,7 +162,6 @@ def ddp_barrier():
     import torch.distributed as dist
     if dist.is_available() and dist.is_initialized():
         dist.barrier()
-
 
 def ddp_broadcast_str(val: str | None) -> str:
     """Broadcast a short string (e.g., timestamp) from rank-0 to all ranks."""
@@ -466,9 +503,7 @@ def main():
     ws = world_size()
 
     # Shared timestamp/outdir
-    stamp = nowstamp() if is_main() else None
-    stamp = ddp_broadcast_str(stamp)
-    out_dir = make_out_dir_with_stamp(OUT_ROOT, stamp)
+    stamp, out_dir = get_shared_stamp(OUT_ROOT)
     if is_main():
         print(f"[OK] Output (base split): {out_dir}")
 
