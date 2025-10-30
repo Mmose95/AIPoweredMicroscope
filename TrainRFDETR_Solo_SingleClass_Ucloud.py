@@ -746,7 +746,6 @@ def main():
         maybe("checkpoint_interval", 1)
         # turn on ES, use EMA for the early-stop metric, and set your patience + min_delta
         maybe("early_stopping_use_ema", True)  # your logs show max(regular, EMA); be explicit
-        maybe("early_stopping_patience", 20)  # your desired patience
         maybe("early_stopping_min_delta", 0.001)  # your threshold for “improvement”
         maybe("run_test", True)  # ensure a val/test pass each epoch
 
