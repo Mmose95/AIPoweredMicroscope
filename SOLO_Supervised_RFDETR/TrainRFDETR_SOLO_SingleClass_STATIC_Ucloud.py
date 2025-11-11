@@ -4,12 +4,16 @@ from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
 from inspect import signature
-import os, json, glob, os.path as op, itertools, subprocess, time, csv, re
+import os, json, glob, os.path as op, itertools, time, csv, re
+import multiprocessing as mp
+
 import numpy as np, cv2
 import albumentations as A
+import torch
 
 # Models
 from rfdetr import RFDETRSmall, RFDETRMedium, RFDETRLarge
+
 
 # ───────────────────────────────────────────────────────────────────────────────
 # UCloud-friendly path detection
@@ -28,32 +32,38 @@ def env_path(name: str, default: Path) -> Path:
     v = os.getenv(name, "").strip()
     return Path(v) if v else default
 
+
 # ───────────────────────────────────────────────────────────────────────────────
 # ====== STATIC OVR DATASETS (point these to your stationary sets) ======
-# You can hardcode, or leave blank to let the script try to auto-find by pattern.
-DATASET_LEUCO   = Path(os.getenv("DATASET_LEUCO",   WORK_ROOT / "SOLO_Supervised_RFDETR/Stat_Dataset/QA-2025v1_Leucocyte_OVR"))  # e.g. /work/.../Stat_Dataset/QA-2025v1_Leucocyte_OVR_60-20-20
-DATASET_EPI     = Path(os.getenv("DATASET_EPI",     WORK_ROOT / "SOLO_Supervised_RFDETR/Stat_Dataset/QA-2025v1_SquamousEpithelialCell_OVR"))  # e.g. /work/.../Stat_Dataset/QA-2025v1_SquamousEpithelialCell_OVR_60-20-20
-DEFAULT_ROOT    = env_path("STAT_DATASETS_ROOT", WORK_ROOT / "SOLO_Supervised_RFDETR" / "Stat_Dataset")
+DATASET_LEUCO = Path(os.getenv(
+    "DATASET_LEUCO",
+    WORK_ROOT / "SOLO_Supervised_RFDETR/Stat_Dataset/QA-2025v1_Leucocyte_OVR"
+))
+DATASET_EPI = Path(os.getenv(
+    "DATASET_EPI",
+    WORK_ROOT / "SOLO_Supervised_RFDETR/Stat_Dataset/QA-2025v1_SquamousEpithelialCell_OVR"
+))
+DEFAULT_ROOT = env_path("STAT_DATASETS_ROOT", WORK_ROOT / "SOLO_Supervised_RFDETR" / "Stat_Dataset")
 
 def _autofind_dataset(root: Path, token: str) -> Path:
-    # tries to find the latest folder matching token, e.g., "*_Leucocyte_OVR_*"
     cands = sorted([p for p in root.glob(f"*{token}*") if p.is_dir()])
     if not cands:
         raise FileNotFoundError(f"Could not find dataset for token '{token}' under {root}")
     return cands[-1]
 
-if not DATASET_LEUCO:
+if not DATASET_LEUCO.exists():
     DATASET_LEUCO = _autofind_dataset(DEFAULT_ROOT, "Leucocyte_OVR")
-if not DATASET_EPI:
-    DATASET_EPI   = _autofind_dataset(DEFAULT_ROOT, "SquamousEpithelialCell_OVR")
+if not DATASET_EPI.exists():
+    DATASET_EPI = _autofind_dataset(DEFAULT_ROOT, "SquamousEpithelialCell_OVR")
 
 # Where to put all outputs (HPO runs + leaderboards + final selections)
 OUTPUT_ROOT = env_path("OUTPUT_ROOT", WORK_ROOT / "RFDETR_SOLO_OUTPUT" / "HPO_BOTH_OVR")
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 
-NUM_WORKERS = int(os.getenv("NUM_WORKERS", "8"))
-SEED        = int(os.getenv("SEED", "42"))
-PYTHON_EXE  = os.getenv("PYTHON", "python")
+NUM_WORKERS   = int(os.getenv("NUM_WORKERS", "8"))
+SEED          = int(os.getenv("SEED", "42"))
+MAX_PARALLEL  = int(os.getenv("MAX_PARALLEL", "1"))  # number of trials to run concurrently (caps at visible GPUs)
+
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Augmentation builder (TRAIN only). Val/Test pass through.
@@ -182,8 +192,9 @@ def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
     print(f"[AUG] Train images: base={len(images)}, total_out={len(out_images)}")
     return dst_dir
 
+
 # ───────────────────────────────────────────────────────────────────────────────
-# Training call (in-process, not a subprocess) for speed & simplicity
+# Training (single run). Called in worker processes.
 def train_one_run(target_name: str,
                   dataset_dir: Path,
                   out_dir: Path,
@@ -202,14 +213,12 @@ def train_one_run(target_name: str,
                   aug_copies: int,
                   seed: int = 42,
                   num_workers: int = 8) -> dict:
-    """
-    Builds (or reuses) AUG dataset for train, configures RF-DETR, runs training, returns best-val metrics dict.
-    """
-    # Build AUG dir once per run (named under its out_dir for isolation)
-    aug_dir = out_dir.parent / (out_dir.name + "_AUG_TMP")
-    aug_dir = build_augmented_train_set(dataset_dir, aug_dir, target_name, copies_per_image=aug_copies, keep_originals=True)
 
-    # Build & filter kwargs by model.train signature
+    # Build AUG dir colocated with run dir (isolated)
+    aug_dir = out_dir.parent / (out_dir.name + "_AUG")
+    aug_dir = build_augmented_train_set(dataset_dir, aug_dir, target_name,
+                                        copies_per_image=aug_copies, keep_originals=True)
+
     model = model_cls()
     sig = signature(model.train)
     can = set(sig.parameters.keys())
@@ -244,7 +253,7 @@ def train_one_run(target_name: str,
         checkpoint_interval=1,
         run_test=True,
 
-        # trainer-side augs if supported
+        # trainer-side augs (if supported)
         hflip_prob=0.5,
         rotation_degrees=rot_deg,
         scale_range=scale_range,
@@ -270,17 +279,14 @@ def train_one_run(target_name: str,
     print(f"[TRAIN] {model.__class__.__name__} — {target_name} → {out_dir}")
     model.train(**kwargs)
 
-    # Collect best val metrics
     best = find_best_val(out_dir)
     (out_dir / "val_best_summary.json").write_text(json.dumps(best, indent=2), encoding="utf-8")
     return best
 
+
 def find_best_val(output_dir: Path) -> dict:
-    """
-    Tries several common filenames for validation metrics; returns a compact dict.
-    """
     candidates = [
-        "val_best_summary.json",  # our own
+        "val_best_summary.json",
         "val_metrics.json", "metrics_val.json", "coco_eval_val.json",
         "metrics.json", "val_results.json", "results_val.json"
     ]
@@ -302,8 +308,9 @@ def find_best_val(output_dir: Path) -> dict:
             continue
     return {"best_epoch": None, "map50": None, "map5095": None, "source": "not_found"}
 
+
 # ───────────────────────────────────────────────────────────────────────────────
-# HPO spaces (compact, class-aware; tweak freely)
+# HPO spaces (compact)
 SEARCH_LEUCO = {
     "MODEL_CLS":       [RFDETRLarge],
     "RESOLUTION":      [672, 896],
@@ -342,25 +349,32 @@ def grid(space: dict):
     for combo in itertools.product(*vals):
         yield dict(zip(keys, combo))
 
-# ───────────────────────────────────────────────────────────────────────────────
-def run_hpo_for_class(target_name: str, dataset_dir: Path, search_space: dict, root_out: Path) -> dict:
-    """
-    Runs all configs for a given class, returns dict with leaderboard + best.
-    """
-    class_token = target_name.replace(" ", "")
-    out_root = root_out / class_token
-    out_root.mkdir(parents=True, exist_ok=True)
 
-    leaderboard = []
-    for idx, cfg in enumerate(grid(search_space), start=1):
-        run_dir = out_root / f"run_{idx:03d}"
+# ───────────────────────────────────────────────────────────────────────────────
+# Trial-level parallel launcher
+def _get_visible_gpu_ids() -> list[int]:
+    vis = os.getenv("CUDA_VISIBLE_DEVICES", "").strip()
+    if vis:
+        try:
+            return [int(x) for x in vis.split(",") if x != ""]
+        except ValueError:
+            pass
+    n = torch.cuda.device_count()
+    return list(range(n))
+
+def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
+                  dataset_dir: str, out_root: str, result_q: mp.Queue):
+    try:
+        # Isolate this process to a specific GPU
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        out_root = Path(out_root)
+        run_dir = out_root / f"run_{run_idx:03d}"
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        print(f"\n[HPO:{class_token}] {idx:03d} → {cfg}")
         t0 = time.time()
         best = train_one_run(
             target_name=target_name,
-            dataset_dir=dataset_dir,
+            dataset_dir=Path(dataset_dir),
             out_dir=run_dir,
             model_cls=cfg["MODEL_CLS"],
             resolution=cfg["RESOLUTION"],
@@ -381,7 +395,7 @@ def run_hpo_for_class(target_name: str, dataset_dir: Path, search_space: dict, r
         dur = round(time.time() - t0, 2)
 
         row = {
-            "run_idx": idx,
+            "run_idx": run_idx,
             "target": target_name,
             **{k: (v.__name__ if k == "MODEL_CLS" else v) for k, v in cfg.items()},
             "val_AP50": best.get("map50"),
@@ -392,26 +406,105 @@ def run_hpo_for_class(target_name: str, dataset_dir: Path, search_space: dict, r
             "seconds": dur,
         }
         (run_dir / "hpo_record.json").write_text(json.dumps(row, indent=2), encoding="utf-8")
-        leaderboard.append(row)
-        print(f"[HPO:{class_token}] {idx:03d} done — AP50={row['val_AP50']} mAP={row['val_mAP5095']}")
+        result_q.put(("ok", row))
+    except Exception as e:
+        result_q.put(("err", {"run_idx": run_idx, "target": target_name, "error": repr(e)}))
+
+
+def run_hpo_for_class(target_name: str, dataset_dir: Path, search_space: dict, root_out: Path) -> dict:
+    """
+    Parallel trial launcher across visible GPUs. Returns leaderboard + best.
+    """
+    class_token = target_name.replace(" ", "")
+    out_root = root_out / class_token
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    gpu_ids = _get_visible_gpu_ids()
+    if not gpu_ids:
+        raise RuntimeError("No visible GPUs. Set CUDA_VISIBLE_DEVICES or ensure CUDA is available.")
+    max_parallel = max(1, min(MAX_PARALLEL, len(gpu_ids)))
+    print(f"[HPO:{class_token}] Visible GPUs: {gpu_ids}  |  MAX_PARALLEL={max_parallel}")
+
+    jobs = list(grid(search_space))
+    leaderboard = []
+
+    # multiprocessing context
+    ctx = mp.get_context("spawn")
+    result_q: mp.Queue = ctx.Queue()
+    active: dict[int, mp.Process] = {}
+    next_gpu_slot = 0
+
+    def launch_job(run_idx: int, cfg: dict):
+        nonlocal next_gpu_slot
+        gpu_id = gpu_ids[next_gpu_slot]
+        next_gpu_slot = (next_gpu_slot + 1) % len(gpu_ids)
+        p = ctx.Process(target=_worker_entry,
+                        args=(cfg, gpu_id, run_idx, target_name, str(dataset_dir), str(out_root), result_q))
+        p.daemon = False
+        p.start()
+        active[run_idx] = p
+        print(f"[HPO:{class_token}] Launched run {run_idx:03d} on GPU {gpu_id}: {cfg}")
+
+    # schedule
+    run_idx = 0
+    for cfg in jobs:
+        # throttle to max_parallel
+        while len([p for p in active.values() if p.is_alive()]) >= max_parallel:
+            # collect any finished
+            while not result_q.empty():
+                status, payload = result_q.get()
+                rid = payload.get("run_idx")
+                if rid in active and not active[rid].is_alive():
+                    active[rid].join()
+                    del active[rid]
+                if status == "ok":
+                    leaderboard.append(payload)
+                    print(f"[HPO:{class_token}] Finished run {payload['run_idx']:03d} — "
+                          f"AP50={payload['val_AP50']} mAP={payload['val_mAP5095']}")
+                else:
+                    print(f"[HPO:{class_token}] ERROR run {payload.get('run_idx')}: {payload.get('error')}")
+            time.sleep(1)
+
+        run_idx += 1
+        launch_job(run_idx, cfg)
+
+    # drain remaining
+    while active:
+        while not result_q.empty():
+            status, payload = result_q.get()
+            rid = payload.get("run_idx")
+            if rid in active and not active[rid].is_alive():
+                active[rid].join()
+                del active[rid]
+            if status == "ok":
+                leaderboard.append(payload)
+                print(f"[HPO:{class_token}] Finished run {payload['run_idx']:03d} — "
+                      f"AP50={payload['val_AP50']} mAP={payload['val_mAP5095']}")
+            else:
+                print(f"[HPO:{class_token}] ERROR run {payload.get('run_idx')}: {payload.get('error')}")
+        time.sleep(1)
 
     # Sort & save leaderboard
+    if not leaderboard:
+        return {"leaderboard": [], "best": {}, "out_dir": str(out_root)}
+
     def sort_key(r):
-        # prioritize mAP50 (recall-friendly), then mAP50-95
         a = r["val_AP50"]; b = r["val_mAP5095"]
+        # prioritize AP50, then mAP50-95
         return (-(a if a is not None else -1), -(b if b is not None else -1))
+
     leaderboard.sort(key=sort_key)
 
-    if leaderboard:
-        csv_path = out_root / "hpo_leaderboard.csv"
-        with csv_path.open("w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=list(leaderboard[0].keys()))
-            w.writeheader(); [w.writerow(r) for r in leaderboard]
-        (out_root / "hpo_top.json").write_text(json.dumps(leaderboard[:5], indent=2), encoding="utf-8")
+    csv_path = out_root / "hpo_leaderboard.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=list(leaderboard[0].keys()))
+        w.writeheader(); [w.writerow(r) for r in leaderboard]
+    (out_root / "hpo_top.json").write_text(json.dumps(leaderboard[:5], indent=2), encoding="utf-8")
 
-    best_row = leaderboard[0] if leaderboard else {}
+    best_row = leaderboard[0]
     (out_root / "hpo_best.json").write_text(json.dumps(best_row, indent=2), encoding="utf-8")
     return {"leaderboard": leaderboard, "best": best_row, "out_dir": str(out_root)}
+
 
 # ───────────────────────────────────────────────────────────────────────────────
 def main():
@@ -423,7 +516,7 @@ def main():
             if not (p / part / "_annotations.coco.json").exists():
                 raise FileNotFoundError(f"Missing {part} split in {p}")
 
-    # HPO for each class
+    # HPO for each class (parallel per class; you can also sequence if you prefer)
     res_leu = run_hpo_for_class("Leucocyte", DATASET_LEUCO, SEARCH_LEUCO, OUTPUT_ROOT)
     res_epi = run_hpo_for_class("Squamous Epithelial Cell", DATASET_EPI, SEARCH_EPI, OUTPUT_ROOT)
 
@@ -444,5 +537,11 @@ def main():
     print("\n[FINAL] Summary →", OUTPUT_ROOT / "FINAL_HPO_SUMMARY.json")
     print(json.dumps(final, indent=2))
 
+
 if __name__ == "__main__":
+    # Make multiprocessing safe on UCloud
+    try:
+        mp.set_start_method("spawn", force=True)
+    except RuntimeError:
+        pass
     main()
