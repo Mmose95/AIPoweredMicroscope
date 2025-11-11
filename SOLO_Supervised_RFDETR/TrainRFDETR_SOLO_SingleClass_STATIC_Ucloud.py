@@ -33,17 +33,47 @@ def env_path(name: str, default: Path) -> Path:
     return Path(v) if v else default
 
 
+# ───────────────────────────────────────────────
+# Auto-detect GPU count and set MAX_PARALLEL
+# ───────────────────────────────────────────────
+def detect_visible_gpus() -> list[int]:
+    """Return list of visible GPU indices from CUDA_VISIBLE_DEVICES or torch.cuda.device_count()."""
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if visible:
+        try:
+            ids = [int(x) for x in visible.split(",") if x.strip() != ""]
+            if ids:
+                return ids
+        except Exception:
+            pass
+    try:
+        n = torch.cuda.device_count()
+        return list(range(n))
+    except Exception:
+        return []
+
+VISIBLE_GPUS = detect_visible_gpus()
+# Allow override via env, else default to number of visible GPUs (≥1)
+MAX_PARALLEL = int(os.getenv("MAX_PARALLEL", str(len(VISIBLE_GPUS) if VISIBLE_GPUS else 1)))
+print(f"[GPU DETECT] Visible GPUs: {VISIBLE_GPUS}  |  MAX_PARALLEL={MAX_PARALLEL}")
+
+
+# Optional: if your COCO contains legacy absolute paths, we can try to locate images by basename here.
+IMAGES_FALLBACK_ROOT = env_path("IMAGES_FALLBACK_ROOT", WORK_ROOT / "CellScanData" / "Zoom10x - Quality Assessment_Cleaned")
+
+
 # ───────────────────────────────────────────────────────────────────────────────
-# ====== STATIC OVR DATASETS (point these to your stationary sets) ======
+# ====== STATIC OVR DATASETS (point these to your stationary sets under WORK_ROOT) ======
+DEFAULT_ROOT = env_path("STAT_DATASETS_ROOT", WORK_ROOT / "SOLO_Supervised_RFDETR" / "Stat_Dataset")
+
 DATASET_LEUCO = Path(os.getenv(
     "DATASET_LEUCO",
-    WORK_ROOT / "SOLO_Supervised_RFDETR/Stat_Dataset/QA-2025v1_Leucocyte_OVR"
+    str(DEFAULT_ROOT / "QA-2025v1_Leucocyte_OVR")
 ))
 DATASET_EPI = Path(os.getenv(
     "DATASET_EPI",
-    WORK_ROOT / "SOLO_Supervised_RFDETR/Stat_Dataset/QA-2025v1_SquamousEpithelialCell_OVR"
+    str(DEFAULT_ROOT / "QA-2025v1_SquamousEpithelialCell_OVR")
 ))
-DEFAULT_ROOT = env_path("STAT_DATASETS_ROOT", WORK_ROOT / "SOLO_Supervised_RFDETR" / "Stat_Dataset")
 
 def _autofind_dataset(root: Path, token: str) -> Path:
     cands = sorted([p for p in root.glob(f"*{token}*") if p.is_dir()])
@@ -62,30 +92,32 @@ OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 
 NUM_WORKERS   = int(os.getenv("NUM_WORKERS", "8"))
 SEED          = int(os.getenv("SEED", "42"))
-MAX_PARALLEL  = int(os.getenv("MAX_PARALLEL", "1"))  # number of trials to run concurrently (caps at visible GPUs)
 
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Augmentation builder (TRAIN only). Val/Test pass through.
+# Use A.Affine instead of deprecated warning from ShiftScaleRotate.
 def _mk_pipeline_for(target_name: str):
     is_leuco = target_name.lower().startswith("leuco")
     if is_leuco:
         return A.Compose([
             A.HorizontalFlip(p=0.5),
-            A.ShiftScaleRotate(shift_limit=0.02, scale_limit=(0.10, 0.35), rotate_limit=7,
-                               border_mode=cv2.BORDER_REFLECT_101, p=0.8),
-            A.GaussNoise(var_limit=(2.0, 8.0), p=0.25),
+            A.Affine(translate_percent={"x": (-0.02, 0.02), "y": (-0.02, 0.02)},
+                     scale=(1.10, 1.35), rotate=(-7, 7),
+                     fit_output=False, cval=0, mode=cv2.BORDER_REFLECT_101, p=0.8),
+            A.GaussNoise(p=0.25),  # keep default var_limit for broader compatibility
             A.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.15, hue=0.01, p=0.4),
             A.GaussianBlur(blur_limit=(3, 3), p=0.10),
         ], bbox_params=A.BboxParams(format="coco", label_fields=["category_id"], min_visibility=0.30))
     else:
         return A.Compose([
             A.HorizontalFlip(p=0.5),
-            A.ShiftScaleRotate(shift_limit=0.02, scale_limit=(-0.10, 0.10), rotate_limit=5,
-                               border_mode=cv2.BORDER_REFLECT_101, p=0.7),
+            A.Affine(translate_percent={"x": (-0.02, 0.02), "y": (-0.02, 0.02)},
+                     scale=(0.90, 1.10), rotate=(-5, 5),
+                     fit_output=False, cval=0, mode=cv2.BORDER_REFLECT_101, p=0.7),
             A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.02, p=0.5),
             A.GaussianBlur(blur_limit=(3, 5), p=0.15),
-            A.GaussNoise(var_limit=(2.0, 12.0), p=0.2),
+            A.GaussNoise(p=0.2),
         ], bbox_params=A.BboxParams(format="coco", label_fields=["category_id"], min_visibility=0.40))
 
 def _read_json(p: Path): return json.loads(p.read_text(encoding="utf-8"))
@@ -102,6 +134,45 @@ def _clip_bbox(b, w, h):
     bw = max(1.0, min(float(bw), float(w - x)))
     bh = max(1.0, min(float(bh), float(h - y)))
     return [x, y, bw, bh]
+
+_WINDOWS_PATH_RE = re.compile(r"^[a-zA-Z]:\\")
+def _resolve_img_fp(src_dir: Path, file_name: str) -> Path:
+    """
+    Resolve an image path from COCO 'file_name' robustly:
+      1) literal path
+      2) relative to src_dir/train
+      3) scan IMAGES_FALLBACK_ROOT by basename
+    """
+    p = Path(file_name)
+    if p.exists():
+        return p
+
+    alt = (src_dir / "train" / file_name).resolve()
+    if alt.exists():
+        return alt
+
+    base = Path(file_name).name
+    # quick scan by basename under fallback root
+    if IMAGES_FALLBACK_ROOT.exists():
+        hits = list(IMAGES_FALLBACK_ROOT.rglob(base))
+        if len(hits) == 1:
+            return hits[0]
+        elif len(hits) > 1:
+            # choose shortest path as a heuristic
+            hits.sort(key=lambda q: len(str(q)))
+            return hits[0]
+
+    # if Windows path, strip drive and try again under fallback
+    if _WINDOWS_PATH_RE.match(file_name) and IMAGES_FALLBACK_ROOT.exists():
+        base = Path(file_name).name
+        hits = list(IMAGES_FALLBACK_ROOT.rglob(base))
+        if hits:
+            hits.sort(key=lambda q: len(str(q)))
+            return hits[0]
+
+    raise FileNotFoundError(f"Could not resolve image path for '{file_name}'. "
+                            f"Tried literal, relative to {src_dir/'train'}, and fallback {IMAGES_FALLBACK_ROOT}.")
+
 
 def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
                               copies_per_image: int,
@@ -138,9 +209,8 @@ def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
     if keep_originals:
         for iid, im in images.items():
             new_iid = next_img_id; next_img_id += 1
-            src_fp = Path(im["file_name"])
-            if not src_fp.exists(): src_fp = (src_dir / "train" / im["file_name"]).resolve()
-            ext = src_fp.suffix.lower()
+            src_fp = _resolve_img_fp(src_dir, im["file_name"])
+            ext = Path(src_fp).suffix.lower()
             if ext not in (".png", ".tif", ".tiff"): ext = ".jpg"
             new_name = f"img_{new_iid}{ext}"
             dst_fp = out_img_dir / new_name
@@ -159,8 +229,7 @@ def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
 
     # augmented copies
     for iid, im in images.items():
-        src_fp = Path(im["file_name"])
-        if not src_fp.exists(): src_fp = (src_dir / "train" / im["file_name"]).resolve()
+        src_fp = _resolve_img_fp(src_dir, im["file_name"])
         img_np = _safe_imread(src_fp)
 
         orig_bboxes = []
@@ -450,7 +519,6 @@ def run_hpo_for_class(target_name: str, dataset_dir: Path, search_space: dict, r
     for cfg in jobs:
         # throttle to max_parallel
         while len([p for p in active.values() if p.is_alive()]) >= max_parallel:
-            # collect any finished
             while not result_q.empty():
                 status, payload = result_q.get()
                 rid = payload.get("run_idx")
@@ -508,6 +576,7 @@ def run_hpo_for_class(target_name: str, dataset_dir: Path, search_space: dict, r
 
 # ───────────────────────────────────────────────────────────────────────────────
 def main():
+    print("[WORK_ROOT]", WORK_ROOT)
     print("[DATASETS]")
     print("  Leucocyte:", DATASET_LEUCO)
     print("  Epithelial:", DATASET_EPI)
@@ -516,12 +585,13 @@ def main():
             if not (p / part / "_annotations.coco.json").exists():
                 raise FileNotFoundError(f"Missing {part} split in {p}")
 
-    # HPO for each class (parallel per class; you can also sequence if you prefer)
+    # HPO for each class
     res_leu = run_hpo_for_class("Leucocyte", DATASET_LEUCO, SEARCH_LEUCO, OUTPUT_ROOT)
     res_epi = run_hpo_for_class("Squamous Epithelial Cell", DATASET_EPI, SEARCH_EPI, OUTPUT_ROOT)
 
     final = {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "work_root": str(WORK_ROOT),
         "leucocyte": {
             "dataset": str(DATASET_LEUCO),
             "best": res_leu["best"],
