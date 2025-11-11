@@ -6,14 +6,15 @@ from collections import defaultdict
 from inspect import signature
 import os, json, glob, os.path as op, itertools, time, csv, re
 import multiprocessing as mp
+from shutil import rmtree
 
 import numpy as np, cv2
 import albumentations as A
 import torch
 
+# ───────────────────────────────────────────────────────────────────────────────
 # Models
 from rfdetr import RFDETRSmall, RFDETRMedium, RFDETRLarge
-
 
 # ───────────────────────────────────────────────────────────────────────────────
 # UCloud-friendly path detection
@@ -31,7 +32,6 @@ WORK_ROOT = Path("/work") / USER_BASE_DIR if USER_BASE_DIR else Path.cwd()
 def env_path(name: str, default: Path) -> Path:
     v = os.getenv(name, "").strip()
     return Path(v) if v else default
-
 
 # ───────────────────────────────────────────────
 # Auto-detect GPU count and set MAX_PARALLEL
@@ -53,18 +53,22 @@ def detect_visible_gpus() -> list[int]:
         return []
 
 VISIBLE_GPUS = detect_visible_gpus()
-# Allow override via env, else default to number of visible GPUs (≥1)
 MAX_PARALLEL = int(os.getenv("MAX_PARALLEL", str(len(VISIBLE_GPUS) if VISIBLE_GPUS else 1)))
 print(f"[GPU DETECT] Visible GPUs: {VISIBLE_GPUS}  |  MAX_PARALLEL={MAX_PARALLEL}")
 
-
-# Optional: if your COCO contains legacy absolute paths, we can try to locate images by basename here.
-IMAGES_FALLBACK_ROOT = env_path("IMAGES_FALLBACK_ROOT", WORK_ROOT / "CellScanData" / "Zoom10x - Quality Assessment_Cleaned")
-
+# Where the **real images** live (on your drive)
+IMAGES_FALLBACK_ROOT = env_path(
+    "IMAGES_FALLBACK_ROOT",
+    WORK_ROOT / "CellScanData" / "Zoom10x - Quality Assessment_Cleaned",
+)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# ====== STATIC OVR DATASETS (point these to your stationary sets under WORK_ROOT) ======
-DEFAULT_ROOT = env_path("STAT_DATASETS_ROOT", WORK_ROOT / "SOLO_Supervised_RFDETR" / "Stat_Dataset")
+# ====== STATIC OVR DATASETS (jsons live in repo / project tree) ======
+REPO_ROOT = Path.cwd()  # you usually run this from /work/projects/myproj
+DEFAULT_ROOT = env_path(
+    "STAT_DATASETS_ROOT",
+    REPO_ROOT / "SOLO_Supervised_RFDETR" / "Stat_Dataset"
+)
 
 DATASET_LEUCO = Path(os.getenv(
     "DATASET_LEUCO",
@@ -84,19 +88,17 @@ def _autofind_dataset(root: Path, token: str) -> Path:
 if not DATASET_LEUCO.exists():
     DATASET_LEUCO = _autofind_dataset(DEFAULT_ROOT, "Leucocyte_OVR")
 if not DATASET_EPI.exists():
-    DATASET_EPI = _autofind_dataset(DEFAULT_ROOT, "SquamousEpithelialCell_OVR")
+    DATASET_EPI   = _autofind_dataset(DEFAULT_ROOT, "SquamousEpithelialCell_OVR")
 
-# Where to put all outputs (HPO runs + leaderboards + final selections)
+# Where to put all outputs (AUG caches + HPO runs + leaderboards + final selections) → on the drive
 OUTPUT_ROOT = env_path("OUTPUT_ROOT", WORK_ROOT / "RFDETR_SOLO_OUTPUT" / "HPO_BOTH_OVR")
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 
-NUM_WORKERS   = int(os.getenv("NUM_WORKERS", "8"))
-SEED          = int(os.getenv("SEED", "42"))
-
+NUM_WORKERS = int(os.getenv("NUM_WORKERS", "8"))
+SEED        = int(os.getenv("SEED", "42"))
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Augmentation builder (TRAIN only). Val/Test pass through.
-# Use A.Affine instead of deprecated warning from ShiftScaleRotate.
+# Augmentation builder (TRAIN only). Val/Test pass through. Use Affine.
 def _mk_pipeline_for(target_name: str):
     is_leuco = target_name.lower().startswith("leuco")
     if is_leuco:
@@ -105,7 +107,7 @@ def _mk_pipeline_for(target_name: str):
             A.Affine(translate_percent={"x": (-0.02, 0.02), "y": (-0.02, 0.02)},
                      scale=(1.10, 1.35), rotate=(-7, 7),
                      fit_output=False, cval=0, mode=cv2.BORDER_REFLECT_101, p=0.8),
-            A.GaussNoise(p=0.25),  # keep default var_limit for broader compatibility
+            A.GaussNoise(p=0.25),
             A.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.15, hue=0.01, p=0.4),
             A.GaussianBlur(blur_limit=(3, 3), p=0.10),
         ], bbox_params=A.BboxParams(format="coco", label_fields=["category_id"], min_visibility=0.30))
@@ -122,7 +124,6 @@ def _mk_pipeline_for(target_name: str):
 
 def _read_json(p: Path): return json.loads(p.read_text(encoding="utf-8"))
 def _write_json(p: Path, obj): p.parent.mkdir(parents=True, exist_ok=True); p.write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8")
-
 def _safe_imread(path: Path):
     from PIL import Image
     return np.array(Image.open(str(path)).convert("RGB"))
@@ -141,7 +142,7 @@ def _resolve_img_fp(src_dir: Path, file_name: str) -> Path:
     Resolve an image path from COCO 'file_name' robustly:
       1) literal path
       2) relative to src_dir/train
-      3) scan IMAGES_FALLBACK_ROOT by basename
+      3) scan IMAGES_FALLBACK_ROOT by basename (your drive)
     """
     p = Path(file_name)
     if p.exists():
@@ -152,36 +153,45 @@ def _resolve_img_fp(src_dir: Path, file_name: str) -> Path:
         return alt
 
     base = Path(file_name).name
-    # quick scan by basename under fallback root
+
     if IMAGES_FALLBACK_ROOT.exists():
         hits = list(IMAGES_FALLBACK_ROOT.rglob(base))
         if len(hits) == 1:
             return hits[0]
         elif len(hits) > 1:
-            # choose shortest path as a heuristic
             hits.sort(key=lambda q: len(str(q)))
             return hits[0]
 
-    # if Windows path, strip drive and try again under fallback
     if _WINDOWS_PATH_RE.match(file_name) and IMAGES_FALLBACK_ROOT.exists():
-        base = Path(file_name).name
         hits = list(IMAGES_FALLBACK_ROOT.rglob(base))
         if hits:
             hits.sort(key=lambda q: len(str(q)))
             return hits[0]
 
-    raise FileNotFoundError(f"Could not resolve image path for '{file_name}'. "
-                            f"Tried literal, relative to {src_dir/'train'}, and fallback {IMAGES_FALLBACK_ROOT}.")
+    raise FileNotFoundError(
+        f"Could not resolve image path for '{file_name}'. "
+        f"Tried literal, relative to {src_dir/'train'}, and fallback {IMAGES_FALLBACK_ROOT}."
+    )
 
-
+# ───────────────────────────────────────────────────────────────────────────────
+# Build AUG dataset with OK-marker; rebuild if incomplete
 def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
                               copies_per_image: int,
                               keep_originals: bool = True,
                               jpeg_quality: int = 92) -> Path:
     assert (src_dir / "train" / "_annotations.coco.json").exists(), f"Missing train json in {src_dir}"
+
+    ok_marker = dst_dir / ".AUG_OK"
+    out_img_dir = dst_dir / "train" / "images"
+
     if dst_dir.exists():
-        print(f"[AUG] Using existing AUG dir: {dst_dir}")
-        return dst_dir
+        if ok_marker.exists() and out_img_dir.exists() and any(out_img_dir.glob("*")):
+            print(f"[AUG] Using existing AUG dir: {dst_dir}")
+            return dst_dir
+        else:
+            print(f"[AUG] Incomplete AUG dir detected, rebuilding: {dst_dir}")
+            rmtree(dst_dir, ignore_errors=True)
+
     print(f"[AUG] Build train AUG for '{target_name}' → {dst_dir}")
 
     # passthrough val/test
@@ -201,7 +211,6 @@ def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
     next_ann_id = 1
 
     pipeline = _mk_pipeline_for(target_name)
-    out_img_dir = dst_dir / "train" / "images"
     out_img_dir.mkdir(parents=True, exist_ok=True)
     out_ann_path = dst_dir / "train" / "_annotations.coco.json"
 
@@ -258,9 +267,16 @@ def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
                 out_anns.append(aa)
 
     _write_json(out_ann_path, {"images": out_images, "annotations": out_anns, "categories": cats})
+    (dst_dir / ".AUG_OK").write_text("ok", encoding="utf-8")
     print(f"[AUG] Train images: base={len(images)}, total_out={len(out_images)}")
     return dst_dir
 
+# Reusable per-class AUG cache (faster & fair for HPO)
+def get_or_build_aug_cache(target_name: str, dataset_dir: Path, root_out: Path, aug_copies: int) -> Path:
+    class_token = target_name.replace(" ", "")
+    cache_dir = root_out / f"{class_token}_AUG_CACHE"
+    return build_augmented_train_set(dataset_dir, cache_dir, target_name,
+                                     copies_per_image=aug_copies, keep_originals=True)
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Training (single run). Called in worker processes.
@@ -283,10 +299,8 @@ def train_one_run(target_name: str,
                   seed: int = 42,
                   num_workers: int = 8) -> dict:
 
-    # Build AUG dir colocated with run dir (isolated)
-    aug_dir = out_dir.parent / (out_dir.name + "_AUG")
-    aug_dir = build_augmented_train_set(dataset_dir, aug_dir, target_name,
-                                        copies_per_image=aug_copies, keep_originals=True)
+    # Use the per-class AUG cache instead of per-run AUG dirs
+    aug_dir = get_or_build_aug_cache(target_name, dataset_dir, OUTPUT_ROOT, aug_copies)
 
     model = model_cls()
     sig = signature(model.train)
@@ -352,7 +366,6 @@ def train_one_run(target_name: str,
     (out_dir / "val_best_summary.json").write_text(json.dumps(best, indent=2), encoding="utf-8")
     return best
 
-
 def find_best_val(output_dir: Path) -> dict:
     candidates = [
         "val_best_summary.json",
@@ -376,7 +389,6 @@ def find_best_val(output_dir: Path) -> dict:
         except Exception:
             continue
     return {"best_epoch": None, "map50": None, "map5095": None, "source": "not_found"}
-
 
 # ───────────────────────────────────────────────────────────────────────────────
 # HPO spaces (compact)
@@ -418,7 +430,6 @@ def grid(space: dict):
     for combo in itertools.product(*vals):
         yield dict(zip(keys, combo))
 
-
 # ───────────────────────────────────────────────────────────────────────────────
 # Trial-level parallel launcher
 def _get_visible_gpu_ids() -> list[int]:
@@ -434,7 +445,6 @@ def _get_visible_gpu_ids() -> list[int]:
 def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
                   dataset_dir: str, out_root: str, result_q: mp.Queue):
     try:
-        # Isolate this process to a specific GPU
         os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
         out_root = Path(out_root)
         run_dir = out_root / f"run_{run_idx:03d}"
@@ -479,7 +489,6 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
     except Exception as e:
         result_q.put(("err", {"run_idx": run_idx, "target": target_name, "error": repr(e)}))
 
-
 def run_hpo_for_class(target_name: str, dataset_dir: Path, search_space: dict, root_out: Path) -> dict:
     """
     Parallel trial launcher across visible GPUs. Returns leaderboard + best.
@@ -497,7 +506,6 @@ def run_hpo_for_class(target_name: str, dataset_dir: Path, search_space: dict, r
     jobs = list(grid(search_space))
     leaderboard = []
 
-    # multiprocessing context
     ctx = mp.get_context("spawn")
     result_q: mp.Queue = ctx.Queue()
     active: dict[int, mp.Process] = {}
@@ -514,10 +522,8 @@ def run_hpo_for_class(target_name: str, dataset_dir: Path, search_space: dict, r
         active[run_idx] = p
         print(f"[HPO:{class_token}] Launched run {run_idx:03d} on GPU {gpu_id}: {cfg}")
 
-    # schedule
     run_idx = 0
     for cfg in jobs:
-        # throttle to max_parallel
         while len([p for p in active.values() if p.is_alive()]) >= max_parallel:
             while not result_q.empty():
                 status, payload = result_q.get()
@@ -536,7 +542,6 @@ def run_hpo_for_class(target_name: str, dataset_dir: Path, search_space: dict, r
         run_idx += 1
         launch_job(run_idx, cfg)
 
-    # drain remaining
     while active:
         while not result_q.empty():
             status, payload = result_q.get()
@@ -552,13 +557,11 @@ def run_hpo_for_class(target_name: str, dataset_dir: Path, search_space: dict, r
                 print(f"[HPO:{class_token}] ERROR run {payload.get('run_idx')}: {payload.get('error')}")
         time.sleep(1)
 
-    # Sort & save leaderboard
     if not leaderboard:
         return {"leaderboard": [], "best": {}, "out_dir": str(out_root)}
 
     def sort_key(r):
         a = r["val_AP50"]; b = r["val_mAP5095"]
-        # prioritize AP50, then mAP50-95
         return (-(a if a is not None else -1), -(b if b is not None else -1))
 
     leaderboard.sort(key=sort_key)
@@ -572,7 +575,6 @@ def run_hpo_for_class(target_name: str, dataset_dir: Path, search_space: dict, r
     best_row = leaderboard[0]
     (out_root / "hpo_best.json").write_text(json.dumps(best_row, indent=2), encoding="utf-8")
     return {"leaderboard": leaderboard, "best": best_row, "out_dir": str(out_root)}
-
 
 # ───────────────────────────────────────────────────────────────────────────────
 def main():
@@ -607,9 +609,7 @@ def main():
     print("\n[FINAL] Summary →", OUTPUT_ROOT / "FINAL_HPO_SUMMARY.json")
     print(json.dumps(final, indent=2))
 
-
 if __name__ == "__main__":
-    # Make multiprocessing safe on UCloud
     try:
         mp.set_start_method("spawn", force=True)
     except RuntimeError:
