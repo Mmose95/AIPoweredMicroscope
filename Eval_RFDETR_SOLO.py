@@ -31,7 +31,7 @@ from rfdetr import RFDETRSmall, RFDETRMedium, RFDETRLarge
 RunName = "dataset_coco_splits_20251030-103504_Base_AllClasses_Leucocyte"
 CHECKPOINT = "./RFDETR_SOLO_OUTPUT/" + RunName + "/rfdetr_run/checkpoint_best_total.pth"
 TEST_JSON  = Path(r"./RFDETR_SOLO_OUTPUT/" + RunName + "/test/_annotations.coco.json")
-OUT_DIR    = Path("./rfdeval_out") / RunName
+OUT_DIR    = Path("SOLO_Supervised_RFDETR/rfdeval_out") / RunName
 SCORE_THRESH = 0.30     # confidence threshold for predictions & confusion/overlays
 IOU_FOR_CONFMAT = 0.50  # IoU threshold used to match GT<->Pred for confusion matrix
 MAX_IMAGES = None       # set e.g. 200 to evaluate on subset for speed
