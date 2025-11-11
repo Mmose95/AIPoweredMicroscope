@@ -1,0 +1,51 @@
+{
+  "coco_summary": {
+    "AP@50:95_all": 0.1254317092272529,
+    "AP@50_all": 0.24177903522321798,
+    "AP@75_all": 0.12042286726870872,
+    "AR@50:95_all": 0.0369683257918552,
+    "per_class": [
+      {
+        "category_id": 0,
+        "class": "Leucocyte",
+        "AP@50:95": -0.479329850383432,
+        "AP@50": -0.4466248180271272
+      },
+      {
+        "category_id": 1,
+        "class": "Squamous Epithelial Cell",
+        "AP@50:95": -0.15595066690068682,
+        "AP@50": -0.10835535934545834
+      }
+    ]
+  },
+  "confusion_matrix": {
+    "labels": [
+      "Leucocyte",
+      "Squamous Epithelial Cell",
+      "background"
+    ],
+    "matrix": [
+      [
+        74,
+        0,
+        186
+      ],
+      [
+        4,
+        19,
+        45
+      ],
+      [
+        45,
+        3,
+        0
+      ]
+    ],
+    "iou_for_confmat": 0.5,
+    "score_thresh": 0.3
+  },
+  "num_images_eval": 17,
+  "checkpoint": "./RFDETR_SOLO_OUTPUT/dataset_coco_splits_20251023-213847/rfdetr_run/checkpoint_best_total.pth",
+  "test_json": "RFDETR_SOLO_OUTPUT\\dataset_coco_splits_20251023-213847\\test\\_annotations.coco.json"
+}

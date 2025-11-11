@@ -1,0 +1,37 @@
+{
+  "coco_summary": {
+    "AP@50:95_all": 0.12453291539027318,
+    "AP@50_all": 0.2527951557336744,
+    "AP@75_all": 0.09107260471317845,
+    "AR@50:95_all": 0.014965986394557823,
+    "per_class": [
+      {
+        "category_id": 0,
+        "class": "Leucocyte",
+        "AP@50:95": -0.4674699881972043,
+        "AP@50": -0.43541632097111993
+      }
+    ]
+  },
+  "confusion_matrix": {
+    "labels": [
+      "Leucocyte",
+      "background"
+    ],
+    "matrix": [
+      [
+        156,
+        138
+      ],
+      [
+        232,
+        0
+      ]
+    ],
+    "iou_for_confmat": 0.5,
+    "score_thresh": 0.3
+  },
+  "num_images_eval": 22,
+  "checkpoint": "./RFDETR_SOLO_OUTPUT/dataset_coco_splits_20251028-104905_Leucocyte/rfdetr_run/checkpoint_best_regular.pth",
+  "test_json": "RFDETR_SOLO_OUTPUT\\dataset_coco_splits_20251028-104905_Leucocyte\\test\\_annotations.coco.json"
+}

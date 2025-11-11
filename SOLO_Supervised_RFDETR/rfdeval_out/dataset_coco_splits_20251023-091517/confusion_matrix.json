@@ -1,0 +1,36 @@
+{
+  "labels": [
+    "Squamous Epithelial Cell",
+    "Leucocyte",
+    "Cylindrical Epithelial Cell",
+    "background"
+  ],
+  "matrix": [
+    [
+      25,
+      4,
+      0,
+      39
+    ],
+    [
+      0,
+      55,
+      0,
+      205
+    ],
+    [
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      11,
+      17,
+      0,
+      0
+    ]
+  ],
+  "iou_for_confmat": 0.5,
+  "score_thresh": 0.3
+}
