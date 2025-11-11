@@ -175,6 +175,9 @@ def _resolve_img_fp(src_dir: Path, file_name: str) -> Path:
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Build AUG dataset with OK-marker; rebuild if incomplete
+import time
+from tqdm import tqdm  # add at the top of your file if not already imported
+
 def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
                               copies_per_image: int,
                               keep_originals: bool = True,
@@ -193,6 +196,7 @@ def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
             rmtree(dst_dir, ignore_errors=True)
 
     print(f"[AUG] Build train AUG for '{target_name}' → {dst_dir}")
+    t0 = time.time()
 
     # passthrough val/test
     for part in ("valid", "test"):
@@ -214,9 +218,13 @@ def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
     out_img_dir.mkdir(parents=True, exist_ok=True)
     out_ann_path = dst_dir / "train" / "_annotations.coco.json"
 
+    total_images = len(images)
+    total_aug = total_images * copies_per_image
+    print(f"[AUG] {total_images} base images × {copies_per_image} augmentations each = {total_aug} new images")
+
     # keep originals
     if keep_originals:
-        for iid, im in images.items():
+        for iid, im in tqdm(images.items(), desc="[AUG] Writing originals", ncols=100):
             new_iid = next_img_id; next_img_id += 1
             src_fp = _resolve_img_fp(src_dir, im["file_name"])
             ext = Path(src_fp).suffix.lower()
@@ -236,7 +244,8 @@ def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
                 aa["bbox"] = _clip_bbox(aa["bbox"], im["width"], im["height"])
                 out_anns.append(aa)
 
-    # augmented copies
+    # augmented copies with progress bar
+    pbar = tqdm(total=total_images, desc=f"[AUG] Generating {copies_per_image}× per image", ncols=100)
     for iid, im in images.items():
         src_fp = _resolve_img_fp(src_dir, im["file_name"])
         img_np = _safe_imread(src_fp)
@@ -265,11 +274,17 @@ def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
                       "bbox": _clip_bbox(bb, W, H), "area": float(max(1.0, bb[2]*bb[3])), "iscrowd": 0}
                 next_ann_id += 1
                 out_anns.append(aa)
+        pbar.update(1)
+    pbar.close()
 
     _write_json(out_ann_path, {"images": out_images, "annotations": out_anns, "categories": cats})
     (dst_dir / ".AUG_OK").write_text("ok", encoding="utf-8")
-    print(f"[AUG] Train images: base={len(images)}, total_out={len(out_images)}")
+
+    elapsed = time.time() - t0
+    mins = elapsed / 60
+    print(f"[AUG] Train images: base={len(images)}, total_out={len(out_images)} | Done in {mins:.1f} min")
     return dst_dir
+
 
 # Reusable per-class AUG cache (faster & fair for HPO)
 def get_or_build_aug_cache(target_name: str, dataset_dir: Path, root_out: Path, aug_copies: int) -> Path:
