@@ -10,11 +10,6 @@ from shutil import rmtree
 
 import numpy as np, cv2
 import albumentations as A
-import torch
-
-# ───────────────────────────────────────────────────────────────────────────────
-# Models
-from rfdetr import RFDETRSmall, RFDETRMedium, RFDETRLarge
 
 # ───────────────────────────────────────────────────────────────────────────────
 # UCloud-friendly path detection
@@ -34,7 +29,7 @@ def env_path(name: str, default: Path) -> Path:
     return Path(v) if v else default
 
 # ───────────────────────────────────────────────
-# Auto-detect GPU count and set MAX_PARALLEL
+# Auto-detect GPU count and set MAX_PARALLEL (lazy torch import)
 # ───────────────────────────────────────────────
 def detect_visible_gpus() -> list[int]:
     """Return list of visible GPU indices from CUDA_VISIBLE_DEVICES or torch.cuda.device_count()."""
@@ -47,6 +42,7 @@ def detect_visible_gpus() -> list[int]:
         except Exception:
             pass
     try:
+        import torch  # lazy
         n = torch.cuda.device_count()
         return list(range(n))
     except Exception:
@@ -176,7 +172,7 @@ def _resolve_img_fp(src_dir: Path, file_name: str) -> Path:
 # ───────────────────────────────────────────────────────────────────────────────
 # Build AUG dataset with OK-marker; rebuild if incomplete
 import time
-from tqdm import tqdm  # add at the top of your file if not already imported
+from tqdm import tqdm  # progress bars
 
 def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
                               copies_per_image: int,
@@ -312,7 +308,9 @@ def train_one_run(target_name: str,
                   gauss_blur_prob: float,
                   aug_copies: int,
                   seed: int = 42,
-                  num_workers: int = 8) -> dict:
+                  num_workers: int = 8,
+                  pin_memory: bool = True,
+                  persistent_workers: bool = True) -> dict:
 
     # Use the per-class AUG cache instead of per-run AUG dirs
     aug_dir = get_or_build_aug_cache(target_name, dataset_dir, OUTPUT_ROOT, aug_copies)
@@ -338,9 +336,9 @@ def train_one_run(target_name: str,
         multi_scale=True,
         gradient_checkpointing=True,
         amp=True,
-        num_workers=num_workers,
-        pin_memory=True,
-        persistent_workers=True,
+        num_workers=min(num_workers, os.cpu_count() or num_workers),
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
 
         seed=seed,
         early_stopping=True,
@@ -406,15 +404,15 @@ def find_best_val(output_dir: Path) -> dict:
     return {"best_epoch": None, "map50": None, "map5095": None, "source": "not_found"}
 
 # ───────────────────────────────────────────────────────────────────────────────
-# HPO spaces (compact)
+# HPO spaces (compact) — keep using MODEL_CLS but we’ll resolve it inside the worker
 SEARCH_LEUCO = {
-    "MODEL_CLS":       [RFDETRLarge],
+    "MODEL_CLS":       ["RFDETRLarge"],
     "RESOLUTION":      [672, 896],
     "EPOCHS":          [180, 260],
     "LR":              [8e-5, 1e-4],
     "LR_ENCODER_MULT": [0.10, 0.15],
-    "BATCH":           [4, 6],
-    "NUM_QUERIES":     [600, 900],
+    "BATCH":           [4],
+    "NUM_QUERIES":     [300, 450],
     "WARMUP_STEPS":    [2000, 4000],
     "AUG_COPIES":      [2],
     "SCALE_RANGE":     [(1.0, 1.6)],
@@ -424,12 +422,12 @@ SEARCH_LEUCO = {
 }
 
 SEARCH_EPI = {
-    "MODEL_CLS":       [RFDETRLarge],
+    "MODEL_CLS":       ["RFDETRLarge"],
     "RESOLUTION":      [640, 672],
     "EPOCHS":          [160, 220],
     "LR":              [1e-4],
     "LR_ENCODER_MULT": [0.15],
-    "BATCH":           [6, 8],
+    "BATCH":           [6],
     "NUM_QUERIES":     [300],
     "WARMUP_STEPS":    [1500, 3000],
     "AUG_COPIES":      [1],
@@ -446,7 +444,7 @@ def grid(space: dict):
         yield dict(zip(keys, combo))
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Trial-level parallel launcher
+# Trial-level parallel launcher with allocator + OOM backoff
 def _get_visible_gpu_ids() -> list[int]:
     vis = os.getenv("CUDA_VISIBLE_DEVICES", "").strip()
     if vis:
@@ -454,44 +452,144 @@ def _get_visible_gpu_ids() -> list[int]:
             return [int(x) for x in vis.split(",") if x != ""]
         except ValueError:
             pass
-    n = torch.cuda.device_count()
-    return list(range(n))
+    try:
+        import torch  # lazy
+        return list(range(torch.cuda.device_count()))
+    except Exception:
+        return []
+
+def _configure_allocator_env():
+    """Configure safe allocator options *only if not set by user*."""
+    conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+    if conf.strip() == "":
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+def _set_perf_toggles():
+    try:
+        import torch
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = False
+    except Exception:
+        pass
+
+def _oom_backoff(cfg: dict) -> dict:
+    """Return a slightly 'lighter' config when OOM is detected."""
+    new = dict(cfg)
+    if new["BATCH"] > 2:
+        new["BATCH"] = max(2, new["BATCH"] - 1)
+        return new
+    if new["NUM_QUERIES"] > 240:
+        new["NUM_QUERIES"] = int(max(240, round(new["NUM_QUERIES"] * 0.8)))
+        return new
+    # drop resolution by ~10% (round to nearest 32)
+    def _downscale(r):
+        x = int(round(r * 0.9 / 32) * 32)
+        return max(512, x)
+    new["RESOLUTION"] = _downscale(new["RESOLUTION"])
+    return new
 
 def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
                   dataset_dir: str, out_root: str, result_q: mp.Queue):
     try:
+        # Mask to a single physical GPU for this process BEFORE importing torch/rfdetr
+        os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        _configure_allocator_env()
+
+        import torch  # import AFTER masking
+        torch.cuda.set_device(0)  # within this worker, the masked GPU is cuda:0
+
+        # Import model classes AFTER masking
+        from rfdetr import RFDETRSmall, RFDETRMedium, RFDETRLarge
+        name2cls = {
+            "RFDETRSmall": RFDETRSmall,
+            "RFDETRMedium": RFDETRMedium,
+            "RFDETRLarge": RFDETRLarge,
+        }
+        # Accept either a class or a string in SEARCH_*["MODEL_CLS"]
+        mc = cfg["MODEL_CLS"]
+        if isinstance(mc, str):
+            model_cls = name2cls[mc]
+        else:
+            # if user passed the class itself, remap to the class again (no-op) but avoids pickling issues
+            model_cls = name2cls.get(getattr(mc, "__name__", "RFDETRLarge"), RFDETRLarge)
+
+        # Helpful mapping print
+        vis = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        cur = torch.cuda.current_device()
+        print(f"[WORKER {run_idx:03d}] Physical GPU {gpu_id} masked as cuda:0 | "
+              f"CUDA_VISIBLE_DEVICES={vis} | using cuda:{cur} ({torch.cuda.get_device_name(cur)})")
+
+        _set_perf_toggles()
+
         out_root = Path(out_root)
         run_dir = out_root / f"run_{run_idx:03d}"
         run_dir.mkdir(parents=True, exist_ok=True)
 
+        # First attempt
         t0 = time.time()
-        best = train_one_run(
-            target_name=target_name,
-            dataset_dir=Path(dataset_dir),
-            out_dir=run_dir,
-            model_cls=cfg["MODEL_CLS"],
-            resolution=cfg["RESOLUTION"],
-            epochs=cfg["EPOCHS"],
-            lr=cfg["LR"],
-            lr_encoder_mult=cfg["LR_ENCODER_MULT"],
-            batch_size=cfg["BATCH"],
-            num_queries=cfg["NUM_QUERIES"],
-            warmup_steps=cfg["WARMUP_STEPS"],
-            scale_range=cfg["SCALE_RANGE"],
-            rot_deg=cfg["ROT_DEG"],
-            color_jitter=cfg["COLOR_JITTER"],
-            gauss_blur_prob=cfg["GAUSS_BLUR"],
-            aug_copies=cfg["AUG_COPIES"],
-            seed=SEED,
-            num_workers=NUM_WORKERS
-        )
+        try_cfg = dict(cfg)
+        try:
+            best = train_one_run(
+                target_name=target_name,
+                dataset_dir=Path(dataset_dir),
+                out_dir=run_dir,
+                model_cls=model_cls,
+                resolution=try_cfg["RESOLUTION"],
+                epochs=try_cfg["EPOCHS"],
+                lr=try_cfg["LR"],
+                lr_encoder_mult=try_cfg["LR_ENCODER_MULT"],
+                batch_size=try_cfg["BATCH"],
+                num_queries=try_cfg["NUM_QUERIES"],
+                warmup_steps=try_cfg["WARMUP_STEPS"],
+                scale_range=try_cfg["SCALE_RANGE"],
+                rot_deg=try_cfg["ROT_DEG"],
+                color_jitter=try_cfg["COLOR_JITTER"],
+                gauss_blur_prob=try_cfg["GAUSS_BLUR"],
+                aug_copies=try_cfg["AUG_COPIES"],
+                seed=SEED,
+                num_workers=NUM_WORKERS,
+                pin_memory=True,
+                persistent_workers=True,
+            )
+        except RuntimeError as e:
+            msg = str(e)
+            if "CUDA out of memory" in msg or "CUDNN_STATUS_ALLOC_FAILED" in msg:
+                torch.cuda.empty_cache()
+                try_cfg = _oom_backoff(try_cfg)
+                (run_dir / "oom_backoff.json").write_text(json.dumps(try_cfg, indent=2), encoding="utf-8")
+                best = train_one_run(
+                    target_name=target_name,
+                    dataset_dir=Path(dataset_dir),
+                    out_dir=run_dir,
+                    model_cls=model_cls,
+                    resolution=try_cfg["RESOLUTION"],
+                    epochs=try_cfg["EPOCHS"],
+                    lr=try_cfg["LR"],
+                    lr_encoder_mult=try_cfg["LR_ENCODER_MULT"],
+                    batch_size=try_cfg["BATCH"],
+                    num_queries=try_cfg["NUM_QUERIES"],
+                    warmup_steps=try_cfg["WARMUP_STEPS"],
+                    scale_range=try_cfg["SCALE_RANGE"],
+                    rot_deg=try_cfg["ROT_DEG"],
+                    color_jitter=try_cfg["COLOR_JITTER"],
+                    gauss_blur_prob=try_cfg["GAUSS_BLUR"],
+                    aug_copies=try_cfg["AUG_COPIES"],
+                    seed=SEED,
+                    num_workers=max(2, NUM_WORKERS // 2),
+                    pin_memory=False,
+                    persistent_workers=False,
+                )
+            else:
+                raise
+
         dur = round(time.time() - t0, 2)
 
         row = {
             "run_idx": run_idx,
             "target": target_name,
-            **{k: (v.__name__ if k == "MODEL_CLS" else v) for k, v in cfg.items()},
+            **{k: (v if not hasattr(v, "__name__") else v.__name__) for k, v in try_cfg.items()},
             "val_AP50": best.get("map50"),
             "val_mAP5095": best.get("map5095"),
             "best_epoch": best.get("best_epoch"),
@@ -517,6 +615,12 @@ def run_hpo_for_class(target_name: str, dataset_dir: Path, search_space: dict, r
         raise RuntimeError("No visible GPUs. Set CUDA_VISIBLE_DEVICES or ensure CUDA is available.")
     max_parallel = max(1, min(MAX_PARALLEL, len(gpu_ids)))
     print(f"[HPO:{class_token}] Visible GPUs: {gpu_ids}  |  MAX_PARALLEL={max_parallel}")
+
+    def grid(space: dict):
+        keys = list(space.keys())
+        vals = [space[k] for k in keys]
+        for combo in itertools.product(*vals):
+            yield dict(zip(keys, combo))
 
     jobs = list(grid(search_space))
     leaderboard = []
