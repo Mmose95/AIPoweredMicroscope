@@ -63,7 +63,7 @@ IMAGES_FALLBACK_ROOT = env_path(
 REPO_ROOT = Path.cwd()  # you usually run this from /work/projects/myproj
 DEFAULT_ROOT = env_path(
     "STAT_DATASETS_ROOT",
-    REPO_ROOT / "SOLO_Supervised_RFDETR" / "Stat_Dataset"
+    REPO_ROOT / "Stat_Dataset"
 )
 
 DATASET_LEUCO = Path(os.getenv(
