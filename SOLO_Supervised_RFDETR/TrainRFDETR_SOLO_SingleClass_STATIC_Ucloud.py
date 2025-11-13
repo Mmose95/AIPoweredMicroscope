@@ -178,13 +178,36 @@ def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
                               copies_per_image: int,
                               keep_originals: bool = True,
                               jpeg_quality: int = 92) -> Path:
+    """
+    Build a per-class augmentation cache under `dst_dir`.
+
+    - Train: read COCO json from `src_dir/train/_annotations.coco.json`,
+      copy originals + create augmented images into `dst_dir/train/images`,
+      write a new COCO json for train.
+    - Valid/Test: copy COCO jsons AND the corresponding images from the
+      original dataset into `dst_dir/valid` and `dst_dir/test` with the
+      same relative paths as in the json.
+
+    The cache is considered complete when:
+      * .AUG_OK exists
+      * train/images has files
+      * valid/ and test/ each contain at least one image file.
+    """
     assert (src_dir / "train" / "_annotations.coco.json").exists(), f"Missing train json in {src_dir}"
 
     ok_marker = dst_dir / ".AUG_OK"
-    out_img_dir = dst_dir / "train" / "images"
+    train_img_dir = dst_dir / "train" / "images"
 
+    # ---- helper: does this directory contain any files? ----
+    def _has_any_images(p: Path) -> bool:
+        return p.exists() and any(p.rglob("*.*"))
+
+    # ---- reuse existing cache if complete ----
     if dst_dir.exists():
-        if ok_marker.exists() and out_img_dir.exists() and any(out_img_dir.glob("*")):
+        valid_ok = _has_any_images(dst_dir / "valid")
+        test_ok  = _has_any_images(dst_dir / "test")
+        train_ok = _has_any_images(train_img_dir)
+        if ok_marker.exists() and train_ok and valid_ok and test_ok:
             print(f"[AUG] Using existing AUG dir: {dst_dir}")
             return dst_dir
         else:
@@ -194,54 +217,109 @@ def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
     print(f"[AUG] Build train AUG for '{target_name}' → {dst_dir}")
     t0 = time.time()
 
-    # passthrough val/test
+    # ─────────────────────────────────────────────
+    # 1) Passthrough VALID + TEST (copy json + images)
+    # ─────────────────────────────────────────────
     for part in ("valid", "test"):
-        (dst_dir / part).mkdir(parents=True, exist_ok=True)
-        _write_json(dst_dir / part / "_annotations.coco.json", _read_json(src_dir / part / "_annotations.coco.json"))
+        src_json = src_dir / part / "_annotations.coco.json"
+        if not src_json.exists():
+            print(f"[AUG][WARN] No {part} json in {src_dir}, skipping {part} passthrough.")
+            continue
 
+        dst_part = dst_dir / part
+        dst_part.mkdir(parents=True, exist_ok=True)
+
+        ann_part = _read_json(src_json)
+        _write_json(dst_part / "_annotations.coco.json", ann_part)
+
+        images = ann_part.get("images", [])
+        print(f"[AUG] Passthrough {part}: {len(images)} images")
+
+        for im in images:
+            rel = Path(im["file_name"])  # e.g. "Sample 14/Patches for Sample 14/xxx.tif"
+            src_fp = (src_dir / part / rel).resolve()
+            if not src_fp.exists():
+                print(f"[AUG][WARN] Missing source image for {part}: {src_fp}")
+                continue
+
+            dst_fp = dst_part / rel
+            dst_fp.parent.mkdir(parents=True, exist_ok=True)
+            if not dst_fp.exists():
+                copy2(src_fp, dst_fp)
+
+    # ─────────────────────────────────────────────
+    # 2) TRAIN: originals + augmentations
+    # ─────────────────────────────────────────────
     ann_train = _read_json(src_dir / "train" / "_annotations.coco.json")
-    cats = ann_train["categories"]
-    images = {im["id"]: im for im in ann_train["images"]}
+    cats      = ann_train["categories"]
+    images    = {im["id"]: im for im in ann_train["images"]}
+
     anns_by_img = defaultdict(list)
     for a in ann_train["annotations"]:
         anns_by_img[a["image_id"]].append(a)
 
-    out_images, out_anns = [], []
+    out_images: list[dict] = []
+    out_anns:   list[dict] = []
     next_img_id = 1
     next_ann_id = 1
 
-    pipeline = _mk_pipeline_for(target_name)
-    out_img_dir.mkdir(parents=True, exist_ok=True)
-    out_ann_path = dst_dir / "train" / "_annotations.coco.json"
+    pipeline    = _mk_pipeline_for(target_name)
+    train_root  = dst_dir / "train"
+    train_img_dir.mkdir(parents=True, exist_ok=True)
+    out_ann_path = train_root / "_annotations.coco.json"
 
     total_images = len(images)
-    total_aug = total_images * copies_per_image
-    print(f"[AUG] {total_images} base images × {copies_per_image} augmentations each = {total_aug} new images")
+    total_aug    = total_images * copies_per_image
+    print(f"[AUG] {total_images} base train images × {copies_per_image} augmentations each = {total_aug} new images")
 
-    # keep originals
+    # ---- 2a) keep originals in train/images ----
     if keep_originals:
-        for iid, im in tqdm(images.items(), desc="[AUG] Writing originals", ncols=100):
-            new_iid = next_img_id; next_img_id += 1
+        for iid, im in tqdm(images.items(), desc="[AUG] Writing train originals", ncols=100):
+            new_iid = next_img_id
+            next_img_id += 1
+
+            # robust resolution (handles Windows paths etc.)
             src_fp = _resolve_img_fp(src_dir, im["file_name"])
             ext = Path(src_fp).suffix.lower()
-            if ext not in (".png", ".tif", ".tiff"): ext = ".jpg"
+            if ext not in (".png", ".tif", ".tiff"):
+                ext = ".jpg"
+
             new_name = f"img_{new_iid}{ext}"
-            dst_fp = out_img_dir / new_name
+            dst_fp   = train_img_dir / new_name
+
             img_np = _safe_imread(src_fp)
             if ext == ".png":
-                cv2.imwrite(str(dst_fp), cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_PNG_COMPRESSION, 3])
+                cv2.imwrite(
+                    str(dst_fp),
+                    cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR),
+                    [cv2.IMWRITE_PNG_COMPRESSION, 3],
+                )
             else:
-                cv2.imwrite(str(dst_fp), cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
-            out_images.append({"id": new_iid, "file_name": str(dst_fp.resolve()),
-                               "width": int(im["width"]), "height": int(im["height"])})
+                cv2.imwrite(
+                    str(dst_fp),
+                    cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR),
+                    [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality],
+                )
+
+            # file_name relative to train root (so root/train + file_name works)
+            rel_name = dst_fp.relative_to(train_root)
+            out_images.append({
+                "id": new_iid,
+                "file_name": str(rel_name),
+                "width":  int(im["width"]),
+                "height": int(im["height"]),
+            })
+
             for a in anns_by_img.get(iid, []):
-                aa = dict(a); aa["id"] = next_ann_id; next_ann_id += 1
+                aa = dict(a)
+                aa["id"]       = next_ann_id
                 aa["image_id"] = new_iid
-                aa["bbox"] = _clip_bbox(aa["bbox"], im["width"], im["height"])
+                next_ann_id   += 1
+                aa["bbox"]     = _clip_bbox(aa["bbox"], im["width"], im["height"])
                 out_anns.append(aa)
 
-    # augmented copies with progress bar
-    pbar = tqdm(total=total_images, desc=f"[AUG] Generating {copies_per_image}× per image", ncols=100)
+    # ---- 2b) augmented copies with progress bar ----
+    pbar = tqdm(total=total_images, desc=f"[AUG] Generating {copies_per_image}× per train image", ncols=100)
     for iid, im in images.items():
         src_fp = _resolve_img_fp(src_dir, im["file_name"])
         img_np = _safe_imread(src_fp)
@@ -255,32 +333,59 @@ def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
 
         for k in range(copies_per_image):
             t = pipeline(image=img_np, bboxes=orig_bboxes, category_id=orig_labels)
-            aug = t["image"]; bbs = t["bboxes"]; lbs = t["category_id"]
+            aug = t["image"]
+            bbs = t["bboxes"]
+            lbs = t["category_id"]
             if not bbs:
-                continue
-            new_iid = next_img_id; next_img_id += 1
+                continue  # skip if augmentation dropped all boxes
+
+            new_iid = next_img_id
+            next_img_id += 1
             new_name = f"img_{new_iid}_aug{k+1}.jpg"
-            dst_fp = out_img_dir / new_name
-            cv2.imwrite(str(dst_fp), cv2.cvtColor(aug, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 92])
+            dst_fp   = train_img_dir / new_name
+
+            cv2.imwrite(
+                str(dst_fp),
+                cv2.cvtColor(aug, cv2.COLOR_RGB2BGR),
+                [cv2.IMWRITE_JPEG_QUALITY, 92],
+            )
+
             H, W = aug.shape[:2]
-            out_images.append({"id": new_iid, "file_name": str(dst_fp.resolve()),
-                               "width": int(W), "height": int(H)})
+            rel_name = dst_fp.relative_to(train_root)
+            out_images.append({
+                "id": new_iid,
+                "file_name": str(rel_name),
+                "width":  int(W),
+                "height": int(H),
+            })
+
             for bb, lab in zip(bbs, lbs):
-                aa = {"id": next_ann_id, "image_id": new_iid, "category_id": int(lab),
-                      "bbox": _clip_bbox(bb, W, H), "area": float(max(1.0, bb[2]*bb[3])), "iscrowd": 0}
+                bb = _clip_bbox(bb, W, H)
+                aa = {
+                    "id":         next_ann_id,
+                    "image_id":   new_iid,
+                    "category_id": int(lab),
+                    "bbox":       bb,
+                    "area":       float(max(1.0, bb[2] * bb[3])),
+                    "iscrowd":    0,
+                }
                 next_ann_id += 1
                 out_anns.append(aa)
+
         pbar.update(1)
     pbar.close()
 
-    _write_json(out_ann_path, {"images": out_images, "annotations": out_anns, "categories": cats})
-    (dst_dir / ".AUG_OK").write_text("ok", encoding="utf-8")
+    # ---- 2c) write train json + OK marker ----
+    _write_json(out_ann_path, {
+        "images":      out_images,
+        "annotations": out_anns,
+        "categories":  cats,
+    })
+    ok_marker.write_text("ok", encoding="utf-8")
 
     elapsed = time.time() - t0
-    mins = elapsed / 60
-    print(f"[AUG] Train images: base={len(images)}, total_out={len(out_images)} | Done in {mins:.1f} min")
+    print(f"[AUG] Train images: base={len(images)}, total_out={len(out_images)} | Done in {elapsed/60:.1f} min")
     return dst_dir
-
 
 # Reusable per-class AUG cache (faster & fair for HPO)
 def get_or_build_aug_cache(target_name: str, dataset_dir: Path, root_out: Path, aug_copies: int) -> Path:
