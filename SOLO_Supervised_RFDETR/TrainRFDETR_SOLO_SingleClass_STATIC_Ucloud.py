@@ -955,3 +955,11 @@ def main():
     (OUTPUT_ROOT / "FINAL_HPO_SUMMARY.json").write_text(json.dumps(final, indent=2), encoding="utf-8")
     print("\n[FINAL] Summary →", OUTPUT_ROOT / "FINAL_HPO_SUMMARY.json")
     print(json.dumps(final, indent=2))
+
+
+if __name__ == "__main__":
+    try:
+        mp.set_start_method("spawn", force=True)
+    except RuntimeError:
+        pass
+    main()
