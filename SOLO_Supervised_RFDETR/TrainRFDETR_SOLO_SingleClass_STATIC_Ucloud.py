@@ -239,6 +239,7 @@ def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
             rel = Path(im["file_name"])  # e.g. "Sample 14/Patches for Sample 14/xxx.tif"
             src_fp = (src_dir / part / rel).resolve()
             if not src_fp.exists():
+                print(IMAGES_FALLBACK_ROOT)
                 print(f"[AUG][WARN] Missing source image for {part}: {src_fp}")
                 continue
 
