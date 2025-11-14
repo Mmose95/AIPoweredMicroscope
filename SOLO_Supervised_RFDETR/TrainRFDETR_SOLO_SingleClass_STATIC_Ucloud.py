@@ -11,6 +11,14 @@ from shutil import rmtree
 import numpy as np, cv2
 import albumentations as A
 
+# Which classes to train in this HPO run:
+# "leu"  -> only Leucocyte
+# "epi"  -> only Squamous Epithelial Cell
+# "all"  -> both
+HPO_TARGET = os.environ.get("RFDETR_HPO_TARGET", "all").lower()
+print(f"[HPO] Target classes: {HPO_TARGET!r} (env RFDETR_HPO_TARGET)")
+
+
 # ───────────────────────────────────────────────────────────────────────────────
 # UCloud-friendly path detection
 def _detect_user_base() -> str | None:
@@ -737,66 +745,97 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
     except Exception as e:
         result_q.put(("err", {"run_idx": run_idx, "target": target_name, "error": repr(e)}))
 
-def run_hpo_for_class(target_name: str, dataset_dir: Path, search_space: dict, root_out: Path) -> dict:
-    """
-    Parallel trial launcher across visible GPUs. Returns leaderboard + best.
-    """
-    class_token = target_name.replace(" ", "")
-    out_root = root_out / class_token
-    out_root.mkdir(parents=True, exist_ok=True)
+from collections import defaultdict  # already imported above, but fine
 
+def run_hpo_all_classes() -> dict:
+    """
+    Multi-class HPO launcher.
+    - Uses ALL visible GPUs as a shared pool.
+    - Each run occupies ONE GPU until it finishes.
+    - Classes are selected by HPO_TARGET ('leu', 'epi', 'all').
+    Returns:
+        {
+          "Leucocyte": { "leaderboard": [...], "best": {...}, "out_dir": str },
+          "Squamous Epithelial Cell": { ... },
+        }
+        (only for the classes actually trained)
+    """
+    # ---- Decide which classes are active ----
+    selected = []
+
+    if HPO_TARGET in ("leu", "all"):
+        selected.append(("Leucocyte", DATASET_LEUCO, SEARCH_LEUCO))
+    if HPO_TARGET in ("epi", "all"):
+        selected.append(("Squamous Epithelial Cell", DATASET_EPI, SEARCH_EPI))
+
+    if not selected:
+        raise RuntimeError(f"HPO_TARGET={HPO_TARGET!r} did not match any classes (expected 'leu', 'epi', or 'all').")
+
+    # ---- Output roots per class ----
+    class_out_roots = {}
+    for target_name, _, _ in selected:
+        class_token = target_name.replace(" ", "")
+        out_root = OUTPUT_ROOT / class_token
+        out_root.mkdir(parents=True, exist_ok=True)
+        class_out_roots[target_name] = out_root
+
+    # ---- GPU info ----
     gpu_ids = _get_visible_gpu_ids()
     if not gpu_ids:
         raise RuntimeError("No visible GPUs. Set CUDA_VISIBLE_DEVICES or ensure CUDA is available.")
     max_parallel = max(1, min(MAX_PARALLEL, len(gpu_ids)))
-    print(f"[HPO:{class_token}] Visible GPUs: {gpu_ids}  |  MAX_PARALLEL={max_parallel}")
+    print(f"[HPO] Visible GPUs: {gpu_ids}  |  MAX_PARALLEL={max_parallel}")
 
-    def grid(space: dict):
-        keys = list(space.keys())
-        vals = [space[k] for k in keys]
-        for combo in itertools.product(*vals):
-            yield dict(zip(keys, combo))
+    # ---- Build global job list (Leuco + Epi mixed) ----
+    jobs = []
+    for target_name, dataset_dir, search_space in selected:
+        for cfg in grid(search_space):
+            jobs.append({
+                "target_name": target_name,
+                "dataset_dir": str(dataset_dir),
+                "out_root": str(class_out_roots[target_name]),
+                "cfg": cfg,
+            })
 
-    jobs = list(grid(search_space))
-    leaderboard = []
+    print(f"[HPO] Total jobs across classes={len(jobs)}")
 
+    # ---- Scheduler state ----
     ctx = mp.get_context("spawn")
     result_q: mp.Queue = ctx.Queue()
     active: dict[int, mp.Process] = {}
+    leaderboard_all = []
+    gpu_count = len(gpu_ids)
     next_gpu_slot = 0
+    next_run_idx = 0
+    job_iter = iter(jobs)
 
-    def launch_job(run_idx: int, cfg: dict):
+    def launch_job(run_idx: int, job: dict):
         nonlocal next_gpu_slot
         gpu_id = gpu_ids[next_gpu_slot]
-        next_gpu_slot = (next_gpu_slot + 1) % len(gpu_ids)
-        p = ctx.Process(target=_worker_entry,
-                        args=(cfg, gpu_id, run_idx, target_name, str(dataset_dir), str(out_root), result_q))
+        next_gpu_slot = (next_gpu_slot + 1) % gpu_count
+
+        p = ctx.Process(
+            target=_worker_entry,
+            args=(
+                job["cfg"],
+                gpu_id,
+                run_idx,
+                job["target_name"],
+                job["dataset_dir"],
+                job["out_root"],
+                result_q,
+            ),
+        )
         p.daemon = False
         p.start()
         active[run_idx] = p
-        print(f"[HPO:{class_token}] Launched run {run_idx:03d} on GPU {gpu_id}: {cfg}")
+        print(f"[HPO] Launched run {run_idx:03d} on GPU {gpu_id} "
+              f"for target='{job['target_name']}' with cfg={job['cfg']}")
 
-    run_idx = 0
-    for cfg in jobs:
-        while len([p for p in active.values() if p.is_alive()]) >= max_parallel:
-            while not result_q.empty():
-                status, payload = result_q.get()
-                rid = payload.get("run_idx")
-                if rid in active and not active[rid].is_alive():
-                    active[rid].join()
-                    del active[rid]
-                if status == "ok":
-                    leaderboard.append(payload)
-                    print(f"[HPO:{class_token}] Finished run {payload['run_idx']:03d} — "
-                          f"AP50={payload['val_AP50']} mAP={payload['val_mAP5095']}")
-                else:
-                    print(f"[HPO:{class_token}] ERROR run {payload.get('run_idx')}: {payload.get('error')}")
-            time.sleep(1)
-
-        run_idx += 1
-        launch_job(run_idx, cfg)
-
-    while active:
+    # ---- Main loop: keep GPUs busy ----
+    def _drain_results_blocking():
+        """Consume all available results from queue and update active/leaderboard."""
+        nonlocal leaderboard_all
         while not result_q.empty():
             status, payload = result_q.get()
             rid = payload.get("run_idx")
@@ -804,31 +843,80 @@ def run_hpo_for_class(target_name: str, dataset_dir: Path, search_space: dict, r
                 active[rid].join()
                 del active[rid]
             if status == "ok":
-                leaderboard.append(payload)
-                print(f"[HPO:{class_token}] Finished run {payload['run_idx']:03d} — "
-                      f"AP50={payload['val_AP50']} mAP={payload['val_mAP5095']}")
+                leaderboard_all.append(payload)
+                print(f"[HPO] Finished run {payload['run_idx']:03d} "
+                      f"({payload['target']}) — AP50={payload['val_AP50']} mAP={payload['val_mAP5095']}")
             else:
-                print(f"[HPO:{class_token}] ERROR run {payload.get('run_idx')}: {payload.get('error')}")
+                print(f"[HPO] ERROR run {payload.get('run_idx')} ({payload.get('target')}): {payload.get('error')}")
+
+    # Feed GPUs until jobs are done
+    try:
+        while True:
+            # Launch as many jobs as we can, up to max_parallel
+            while len([p for p in active.values() if p.is_alive()]) < max_parallel:
+                try:
+                    job = next(job_iter)
+                except StopIteration:
+                    break  # no more jobs to launch
+                next_run_idx += 1
+                launch_job(next_run_idx, job)
+
+            # If no active jobs and no more to launch → done
+            if not active and all(j is None for j in [job_iter]):
+                break
+
+            _drain_results_blocking()
+            time.sleep(1)
+
+    except StopIteration:
+        # All jobs queued; now just wait for remaining processes
+        pass
+
+    # Final drain
+    while active:
+        _drain_results_blocking()
         time.sleep(1)
 
-    if not leaderboard:
-        return {"leaderboard": [], "best": {}, "out_dir": str(out_root)}
+    if not leaderboard_all:
+        print("[HPO] No successful runs.")
+        return {}
 
-    def sort_key(r):
-        a = r["val_AP50"]; b = r["val_mAP5095"]
-        return (-(a if a is not None else -1), -(b if b is not None else -1))
+    # ---- Build per-class leaderboards + write files ----
+    per_class_rows = defaultdict(list)
+    for row in leaderboard_all:
+        per_class_rows[row["target"]].append(row)
 
-    leaderboard.sort(key=sort_key)
+    results = {}
 
-    csv_path = out_root / "hpo_leaderboard.csv"
-    with csv_path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=list(leaderboard[0].keys()))
-        w.writeheader(); [w.writerow(r) for r in leaderboard]
-    (out_root / "hpo_top.json").write_text(json.dumps(leaderboard[:5], indent=2), encoding="utf-8")
+    for target_name, rows in per_class_rows.items():
+        class_token = target_name.replace(" ", "")
+        out_root = class_out_roots[target_name]
 
-    best_row = leaderboard[0]
-    (out_root / "hpo_best.json").write_text(json.dumps(best_row, indent=2), encoding="utf-8")
-    return {"leaderboard": leaderboard, "best": best_row, "out_dir": str(out_root)}
+        def sort_key(r):
+            a = r["val_AP50"]
+            b = r["val_mAP5095"]
+            return (-(a if a is not None else -1), -(b if b is not None else -1))
+
+        rows.sort(key=sort_key)
+
+        csv_path = out_root / "hpo_leaderboard.csv"
+        with csv_path.open("w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            w.writeheader()
+            for r in rows:
+                w.writerow(r)
+
+        (out_root / "hpo_top.json").write_text(json.dumps(rows[:5], indent=2), encoding="utf-8")
+        best_row = rows[0]
+        (out_root / "hpo_best.json").write_text(json.dumps(best_row, indent=2), encoding="utf-8")
+
+        results[target_name] = {
+            "leaderboard": rows,
+            "best": best_row,
+            "out_dir": str(out_root),
+        }
+
+    return results
 
 # ───────────────────────────────────────────────────────────────────────────────
 def main():
@@ -837,35 +925,33 @@ def main():
     print("  Leucocyte:", DATASET_LEUCO)
     print("  Epithelial:", DATASET_EPI)
     for p in (DATASET_LEUCO, DATASET_EPI):
-        for part in ("train","valid"):
+        for part in ("train", "valid"):
             if not (p / part / "_annotations.coco.json").exists():
                 raise FileNotFoundError(f"Missing {part} split in {p}")
 
-    # HPO for each class
-    res_leu = run_hpo_for_class("Leucocyte", DATASET_LEUCO, SEARCH_LEUCO, OUTPUT_ROOT)
-    res_epi = run_hpo_for_class("Squamous Epithelial Cell", DATASET_EPI, SEARCH_EPI, OUTPUT_ROOT)
+    # Run multi-class HPO (according to HPO_TARGET)
+    res_all = run_hpo_all_classes()
 
+    # Build final summary only for classes that were actually trained
     final = {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "work_root": str(WORK_ROOT),
-        "leucocyte": {
-            "dataset": str(DATASET_LEUCO),
-            "best": res_leu["best"],
-            "leaderboard_top5": res_leu["leaderboard"][:5]
-        },
-        "epithelial": {
-            "dataset": str(DATASET_EPI),
-            "best": res_epi["best"],
-            "leaderboard_top5": res_epi["leaderboard"][:5]
-        }
     }
+
+    if "Leucocyte" in res_all:
+        final["leucocyte"] = {
+            "dataset": str(DATASET_LEUCO),
+            "best": res_all["Leucocyte"]["best"],
+            "leaderboard_top5": res_all["Leucocyte"]["leaderboard"][:5],
+        }
+
+    if "Squamous Epithelial Cell" in res_all:
+        final["epithelial"] = {
+            "dataset": str(DATASET_EPI),
+            "best": res_all["Squamous Epithelial Cell"]["best"],
+            "leaderboard_top5": res_all["Squamous Epithelial Cell"]["leaderboard"][:5],
+        }
+
     (OUTPUT_ROOT / "FINAL_HPO_SUMMARY.json").write_text(json.dumps(final, indent=2), encoding="utf-8")
     print("\n[FINAL] Summary →", OUTPUT_ROOT / "FINAL_HPO_SUMMARY.json")
     print(json.dumps(final, indent=2))
-
-if __name__ == "__main__":
-    try:
-        mp.set_start_method("spawn", force=True)
-    except RuntimeError:
-        pass
-    main()
