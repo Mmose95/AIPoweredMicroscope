@@ -210,61 +210,75 @@ def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
     # ──────────────────────────────────────────
     # 1) COPY + REWRITE VALID/TEST INTO AUG CACHE
     # ──────────────────────────────────────────
+    # ──────────────── passthrough / copy VALID + TEST ────────────────
     for part in ("valid", "test"):
         src_json = src_dir / part / "_annotations.coco.json"
         if not src_json.exists():
+            print(f"[AUG] No {part} split found in {src_dir}, skipping.")
             continue
 
-        ann = _read_json(src_json)
-        imgs = ann.get("images", [])
-        anns = ann.get("annotations", [])
-        cats = ann.get("categories", [])
+        print(f"[AUG] Building {part} split → {dst_dir / part}")
+        ann_part = _read_json(src_json)
+        cats = ann_part.get("categories", [])
+        images = ann_part.get("images", [])
+        anns   = ann_part.get("annotations", [])
 
         out_part_dir = dst_dir / part
-        out_part_img_dir = out_part_dir / "images"
-        out_part_img_dir.mkdir(parents=True, exist_ok=True)
+        out_img_dir  = out_part_dir / "images"
+        out_img_dir.mkdir(parents=True, exist_ok=True)
 
+        out_images = []
+        out_anns   = []
         missing = 0
-        for im in imgs:
-            fname = im["file_name"]
-            try:
-                src_fp = _resolve_img_fp(src_dir, fname, split=part)
-            except FileNotFoundError:
-                print(f"[AUG][WARN] Missing source image for {part}: {fname}")
+
+        from tqdm import tqdm
+        for im in tqdm(images, desc=f"[AUG] {part}: copying images", ncols=100):
+            src_fp = _resolve_img_fp(src_dir, im["file_name"])
+            if not src_fp.exists():
+                # we already printed the fallback root earlier if needed
                 missing += 1
+                print(f"[AUG][WARN] Missing source image for {part}: {src_fp}")
                 continue
 
-            img_np = _safe_imread(src_fp)
+            # keep original extension if sensible, else default to .tif
             ext = Path(src_fp).suffix.lower()
-            if ext not in (".jpg", ".jpeg", ".png", ".tif", ".tiff"):
-                ext = ".jpg"
+            if ext not in (".tif", ".tiff", ".png", ".jpg", ".jpeg"):
+                ext = ".tif"
 
-            # stable but simple naming
             new_name = f"img_{im['id']}{ext}"
-            dst_fp = out_part_img_dir / new_name
+            dst_fp   = out_img_dir / new_name
 
-            if ext == ".png":
-                cv2.imwrite(
-                    str(dst_fp),
-                    cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR),
-                    [cv2.IMWRITE_PNG_COMPRESSION, 3],
-                )
+            img_np = _safe_imread(src_fp)
+            if ext in (".png",):
+                cv2.imwrite(str(dst_fp), cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR),
+                            [cv2.IMWRITE_PNG_COMPRESSION, 3])
             else:
-                cv2.imwrite(
-                    str(dst_fp),
-                    cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR),
-                    [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality],
-                )
+                cv2.imwrite(str(dst_fp), cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR),
+                            [cv2.IMWRITE_TIFF_COMPRESSION, 1] if ext.endswith("tif")
+                            else [cv2.IMWRITE_JPEG_QUALITY, 92])
 
-            # update file_name to point into AUG cache
-            im["file_name"] = str(dst_fp.resolve())
+            out_images.append({
+                "id": im["id"],
+                "file_name": str(dst_fp.resolve()),
+                "width": int(im["width"]),
+                "height": int(im["height"]),
+            })
 
-        if missing:
-            print(f"[AUG][WARN] {missing} {part} images missing and skipped.")
+        # keep only annotations whose image we actually copied
+        valid_ids = {im["id"] for im in out_images}
+        for a in anns:
+            if a["image_id"] in valid_ids:
+                out_anns.append(a)
 
-        # write updated JSON (images + same anns/cats)
-        _write_json(out_part_dir / "_annotations.coco.json",
-                    {"images": imgs, "annotations": anns, "categories": cats})
+        _write_json(out_part_dir / "_annotations.coco.json", {
+            "images": out_images,
+            "annotations": out_anns,
+            "categories": cats,
+        })
+
+        print(f"[AUG] {part} done: copied={len(out_images)} "
+              f"missing={missing}, anns={len(out_anns)}")
+
 
     # ──────────────────────────────────────────
     # 2) TRAIN AUGMENTATION (as before)
