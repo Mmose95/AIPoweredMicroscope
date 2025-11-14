@@ -507,9 +507,9 @@ def find_best_val(output_dir: Path) -> dict:
 
 # ───────────────────────────────────────────────────────────────────────────────
 # HPO spaces (compact) — keep using MODEL_CLS but we’ll resolve it inside the worker
-SEARCH_LEUCO = {
+'''SEARCH_LEUCO = {
     "MODEL_CLS":       ["RFDETRLarge"],
-    "RESOLUTION":      [672, 896],
+    "RESOLUTION":      [672],
     "EPOCHS":          [180, 260],
     "LR":              [8e-5, 1e-4],
     "LR_ENCODER_MULT": [0.10, 0.15],
@@ -525,7 +525,7 @@ SEARCH_LEUCO = {
 
 SEARCH_EPI = {
     "MODEL_CLS":       ["RFDETRLarge"],
-    "RESOLUTION":      [640, 672],
+    "RESOLUTION":      [672],
     "EPOCHS":          [160, 220],
     "LR":              [1e-4],
     "LR_ENCODER_MULT": [0.15],
@@ -537,7 +537,40 @@ SEARCH_EPI = {
     "ROT_DEG":         [5.0],
     "COLOR_JITTER":    [0.20],
     "GAUSS_BLUR":      [0.20],
+}'''
+
+SEARCH_LEUCO = {
+    "MODEL_CLS":       ["RFDETRLarge"],
+    "RESOLUTION":      [672],
+    "EPOCHS":          [40],
+    "LR":              [8e-5],
+    "LR_ENCODER_MULT": [0.10],
+    "BATCH":           [4],
+    "NUM_QUERIES":     [450],
+    "WARMUP_STEPS":    [4000],
+    "AUG_COPIES":      [2],
+    "SCALE_RANGE":     [(1.0, 1.6)],
+    "ROT_DEG":         [7.0],
+    "COLOR_JITTER":    [0.25],
+    "GAUSS_BLUR":      [0.10],
 }
+
+SEARCH_EPI = {
+    "MODEL_CLS":       ["RFDETRLarge"],
+    "RESOLUTION":      [672],
+    "EPOCHS":          [40],
+    "LR":              [1e-4],
+    "LR_ENCODER_MULT": [0.15],
+    "BATCH":           [6],
+    "NUM_QUERIES":     [300],
+    "WARMUP_STEPS":    [3000],
+    "AUG_COPIES":      [1],
+    "SCALE_RANGE":     [(0.9, 1.1)],
+    "ROT_DEG":         [5.0],
+    "COLOR_JITTER":    [0.20],
+    "GAUSS_BLUR":      [0.20],
+}
+
 
 def grid(space: dict):
     keys = list(space.keys())
