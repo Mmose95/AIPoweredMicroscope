@@ -202,10 +202,10 @@ def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
     assert (src_dir / "train" / "_annotations.coco.json").exists(), f"Missing train json in {src_dir}"
 
     ok_marker = dst_dir / ".AUG_OK"
-    out_img_dir = dst_dir / "train" / "images"
+    train_img_dir = dst_dir / "train" / "images"   # <-- fixed: dedicated train dir
 
     if dst_dir.exists():
-        if ok_marker.exists() and out_img_dir.exists() and any(out_img_dir.glob("*")):
+        if ok_marker.exists() and train_img_dir.exists() and any(train_img_dir.glob("*")):
             print(f"[AUG] Using existing AUG dir: {dst_dir}")
             return dst_dir
         else:
@@ -215,10 +215,7 @@ def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
     print(f"[AUG] Build train AUG for '{target_name}' → {dst_dir}")
     t0 = time.time()
 
-    # ──────────────────────────────────────────
     # 1) COPY + REWRITE VALID/TEST INTO AUG CACHE
-    # ──────────────────────────────────────────
-    # ──────────────── passthrough / copy VALID + TEST ────────────────
     for part in ("valid", "test"):
         src_json = src_dir / part / "_annotations.coco.json"
         if not src_json.exists():
@@ -232,8 +229,8 @@ def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
         anns   = ann_part.get("annotations", [])
 
         out_part_dir = dst_dir / part
-        out_img_dir  = out_part_dir / "images"
-        out_img_dir.mkdir(parents=True, exist_ok=True)
+        part_img_dir = out_part_dir / "images"      # <-- use local var for val/test
+        part_img_dir.mkdir(parents=True, exist_ok=True)
 
         out_images = []
         out_anns   = []
@@ -243,19 +240,16 @@ def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
         for im in tqdm(images, desc=f"[AUG] {part}: copying images", ncols=100):
             src_fp = _resolve_img_fp(src_dir, im["file_name"])
             if not src_fp.exists():
-                # we already printed the fallback root earlier if needed
                 missing += 1
                 print(f"[AUG][WARN] Missing source image for {part}: {src_fp}")
                 continue
 
-            # keep original extension if sensible, else default to .tif
             ext = Path(src_fp).suffix.lower()
             if ext not in (".tif", ".tiff", ".png", ".jpg", ".jpeg"):
                 ext = ".tif"
 
             new_name = f"img_{im['id']}{ext}"
-            dst_fp   = out_img_dir / new_name
-
+            dst_fp   = part_img_dir / new_name        # <-- use part_img_dir here
             img_np = _safe_imread(src_fp)
             if ext in (".png",):
                 cv2.imwrite(str(dst_fp), cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR),
@@ -272,7 +266,6 @@ def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
                 "height": int(im["height"]),
             })
 
-        # keep only annotations whose image we actually copied
         valid_ids = {im["id"] for im in out_images}
         for a in anns:
             if a["image_id"] in valid_ids:
@@ -287,10 +280,7 @@ def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
         print(f"[AUG] {part} done: copied={len(out_images)} "
               f"missing={missing}, anns={len(out_anns)}")
 
-
-    # ──────────────────────────────────────────
-    # 2) TRAIN AUGMENTATION (as before)
-    # ──────────────────────────────────────────
+    # 2) TRAIN AUGMENTATION
     ann_train = _read_json(src_dir / "train" / "_annotations.coco.json")
     cats = ann_train["categories"]
     images = {im["id"]: im for im in ann_train["images"]}
@@ -302,16 +292,16 @@ def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
     next_img_id = 1
     next_ann_id = 1
 
-    pipeline = _mk_pipeline_for(target_name)
-    out_img_dir.mkdir(parents=True, exist_ok=True)
+    train_img_dir.mkdir(parents=True, exist_ok=True)
     out_ann_path = dst_dir / "train" / "_annotations.coco.json"
 
     total_images = len(images)
-    total_aug = total_images * copies_per_image
-    print(f"[AUG] {total_images} base images × {copies_per_image} augmentations each = {total_aug} new images")
 
-    # keep originals
+    # ──────────────────────────
+    # 2a) KEEP ORIGINALS (always, if keep_originals=True)
+    # ──────────────────────────
     if keep_originals:
+        from tqdm import tqdm
         for iid, im in tqdm(images.items(), desc="[AUG] Writing originals", ncols=100):
             new_iid = next_img_id; next_img_id += 1
             src_fp = _resolve_img_fp(src_dir, im["file_name"], split="train")
@@ -319,7 +309,7 @@ def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
             if ext not in (".png", ".tif", ".tiff", ".jpg", ".jpeg"):
                 ext = ".jpg"
             new_name = f"img_{new_iid}{ext}"
-            dst_fp = out_img_dir / new_name
+            dst_fp = train_img_dir / new_name
             img_np = _safe_imread(src_fp)
             if ext == ".png":
                 cv2.imwrite(str(dst_fp), cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR),
@@ -339,50 +329,60 @@ def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
                 aa["bbox"] = _clip_bbox(aa["bbox"], im["width"], im["height"])
                 out_anns.append(aa)
 
-    # augmented copies with progress bar
-    pbar = tqdm(total=total_images, desc=f"[AUG] Generating {copies_per_image}× per image", ncols=100)
-    for iid, im in images.items():
-        src_fp = _resolve_img_fp(src_dir, im["file_name"], split="train")
-        img_np = _safe_imread(src_fp)
+    # ──────────────────────────
+    # 2b) OPTIONAL AUGMENTED COPIES (only if copies_per_image > 0)
+    # ──────────────────────────
+    if copies_per_image > 0:
+        pipeline = _mk_pipeline_for(target_name)
+        total_aug = total_images * copies_per_image
+        print(f"[AUG] {total_images} base images × {copies_per_image} augmentations each = {total_aug} new images")
 
-        orig_bboxes = []
-        orig_labels = []
-        for a in anns_by_img.get(iid, []):
-            x, y, w, h = a["bbox"]
-            orig_bboxes.append([float(x), float(y), float(w), float(h)])
-            orig_labels.append(a["category_id"])
+        from tqdm import tqdm
+        pbar = tqdm(total=total_images,
+                    desc=f"[AUG] Generating {copies_per_image}× per image",
+                    ncols=100)
+        for iid, im in images.items():
+            src_fp = _resolve_img_fp(src_dir, im["file_name"], split="train")
+            img_np = _safe_imread(src_fp)
 
-        for k in range(copies_per_image):
-            t = pipeline(image=img_np, bboxes=orig_bboxes, category_id=orig_labels)
-            aug = t["image"]; bbs = t["bboxes"]; lbs = t["category_id"]
-            if not bbs:
-                continue
-            new_iid = next_img_id; next_img_id += 1
-            new_name = f"img_{new_iid}_aug{k+1}.jpg"
-            dst_fp = out_img_dir / new_name
-            cv2.imwrite(str(dst_fp), cv2.cvtColor(aug, cv2.COLOR_RGB2BGR),
-                        [cv2.IMWRITE_JPEG_QUALITY, 92])
-            H, W = aug.shape[:2]
-            out_images.append({
-                "id": new_iid,
-                "file_name": str(dst_fp.resolve()),
-                "width": int(W),
-                "height": int(H),
-            })
-            for bb, lab in zip(bbs, lbs):
-                aa = {
-                    "id": next_ann_id,
-                    "image_id": new_iid,
-                    "category_id": int(lab),
-                    "bbox": _clip_bbox(bb, W, H),
-                    "area": float(max(1.0, bb[2] * bb[3])),
-                    "iscrowd": 0,
-                }
-                next_ann_id += 1
-                out_anns.append(aa)
-        pbar.update(1)
-    pbar.close()
+            orig_bboxes = []
+            orig_labels = []
+            for a in anns_by_img.get(iid, []):
+                x, y, w, h = a["bbox"]
+                orig_bboxes.append([float(x), float(y), float(w), float(h)])
+                orig_labels.append(a["category_id"])
 
+            for k in range(copies_per_image):
+                t = pipeline(image=img_np, bboxes=orig_bboxes, category_id=orig_labels)
+                aug = t["image"]; bbs = t["bboxes"]; lbs = t["category_id"]
+                if not bbs:
+                    continue
+                new_iid = next_img_id; next_img_id += 1
+                new_name = f"img_{new_iid}_aug{k+1}.jpg"
+                dst_fp = train_img_dir / new_name
+                cv2.imwrite(str(dst_fp), cv2.cvtColor(aug, cv2.COLOR_RGB2BGR),
+                            [cv2.IMWRITE_JPEG_QUALITY, 92])
+                H, W = aug.shape[:2]
+                out_images.append({
+                    "id": new_iid,
+                    "file_name": str(dst_fp.resolve()),
+                    "width": int(W),
+                    "height": int(H),
+                })
+                for bb, lab in zip(bbs, lbs):
+                    aa = {
+                        "id": next_ann_id,
+                        "image_id": new_iid,
+                        "category_id": int(lab),
+                        "bbox": _clip_bbox(bb, W, H),
+                        "area": float(max(1.0, bb[2] * bb[3])),
+                        "iscrowd": 0,
+                    }
+                    next_ann_id += 1
+                    out_anns.append(aa)
+        pbar.close()
+
+    # write train JSON as before
     _write_json(out_ann_path, {"images": out_images, "annotations": out_anns, "categories": cats})
     ok_marker.write_text("ok", encoding="utf-8")
 
@@ -390,6 +390,7 @@ def build_augmented_train_set(src_dir: Path, dst_dir: Path, target_name: str,
     mins = elapsed / 60
     print(f"[AUG] Train images: base={len(images)}, total_out={len(out_images)} | Done in {mins:.1f} min")
     return dst_dir
+
 
 
 # Reusable per-class AUG cache (faster & fair for HPO)
@@ -443,7 +444,7 @@ def train_one_run(target_name: str,
         dropout=0.1,
         num_queries=num_queries,
 
-        multi_scale=True,
+        multi_scale=False,
         gradient_checkpointing=True,
         amp=True,
         num_workers=min(num_workers, os.cpu_count() or num_workers),
@@ -564,20 +565,22 @@ SEARCH_LEUCO = {
 }
 
 SEARCH_EPI = {
-    "MODEL_CLS":       ["RFDETRLarge"],
-    "RESOLUTION":      [672],
-    "EPOCHS":          [40],
+    "MODEL_CLS":       ["RFDETRMedium"],
+    "RESOLUTION":      [640],
+    "EPOCHS":          [140],
     "LR":              [1e-4],
-    "LR_ENCODER_MULT": [0.15],
-    "BATCH":           [6],
+    "LR_ENCODER_MULT": [0.10],
+    "BATCH":           [8],
     "NUM_QUERIES":     [300],
-    "WARMUP_STEPS":    [3000],
-    "AUG_COPIES":      [1],
+    "WARMUP_STEPS":    [0],
+    "AUG_COPIES":      [0],          # <-- key change
     "SCALE_RANGE":     [(0.9, 1.1)],
     "ROT_DEG":         [5.0],
     "COLOR_JITTER":    [0.20],
     "GAUSS_BLUR":      [0.20],
 }
+
+
 
 
 def grid(space: dict):
