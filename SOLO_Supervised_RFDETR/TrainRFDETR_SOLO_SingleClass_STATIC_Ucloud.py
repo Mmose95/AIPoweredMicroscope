@@ -339,90 +339,13 @@ def train_one_run(target_name: str,
 
     print(f"[TRAIN] {model.__class__.__name__} — {target_name} → {out_dir}")
     model.train(**kwargs)
-    # After training: annotate best checkpoints and get their epochs
-    best_ckpt_epochs = annotate_best_checkpoints(out_dir)
 
-    best = find_best_val(out_dir, best_ckpt_epochs)
-
+    best = find_best_val(out_dir)
     (out_dir / "val_best_summary.json").write_text(json.dumps(best, indent=2), encoding="utf-8")
     return best
 
-def _extract_epoch_from_ckpt(path: Path) -> int | None:
-    """Return epoch stored in a RFDETR checkpoint, or None if not found."""
-    if not path.exists():
-        return None
-    try:
-        import torch
-        ckpt = torch.load(path, map_location="cpu")
-    except Exception:
-        return None
 
-    for key in ("epoch", "start_epoch", "global_step", "step"):
-        if key in ckpt:
-            try:
-                return int(ckpt[key])
-            except Exception:
-                pass
-    return None
-
-
-def annotate_best_checkpoints(output_dir: Path) -> dict:
-    """
-    Read epochs from checkpoint_best_*.pth, optionally rename them to include
-    the epoch number, and return a dict with those epochs.
-
-    Returns something like:
-        {
-          "best_total_epoch": 27,
-          "best_regular_epoch": 21,
-          "best_ema_epoch": 29,
-        }
-    """
-    epochs = {}
-
-    for tag in ("best_total", "best_regular", "best_ema"):
-        ckpt = output_dir / f"checkpoint_{tag}.pth"
-        if not ckpt.exists():
-            continue
-
-        ep = _extract_epoch_from_ckpt(ckpt)
-        if ep is None:
-            continue
-
-        epochs[f"{tag}_epoch"] = ep
-
-        # New filename with epoch suffix, e.g. checkpoint_best_ema_e027.pth
-        new_name = output_dir / f"checkpoint_{tag}_e{ep:03d}.pth"
-
-        # Only rename if it does not already exist
-        if not new_name.exists():
-            ckpt.rename(new_name)
-            print(f"[POST] Renamed {ckpt.name} -> {new_name.name} (epoch {ep})")
-        else:
-            print(f"[POST] {new_name.name} already exists, keeping existing file.")
-
-    return epochs
-
-
-def find_best_val(output_dir: Path, best_ckpt_epochs: dict | None = None) -> dict:
-    """
-    Try to obtain validation mAP and best epoch for this run.
-
-    Priority:
-      1) RFDETR's results.json (final valid metrics)
-      2) Any of the legacy metrics files (metrics.json, coco_eval_val.json, ...)
-    Epoch info is taken from the best_total / best_regular / best_ema checkpoints
-    if available.
-    """
-    best_ckpt_epochs = best_ckpt_epochs or {}
-
-    # Choose "best_epoch" from checkpoints: prefer best_total, then regular, then ema
-    best_epoch = (
-        best_ckpt_epochs.get("best_total_epoch")
-        or best_ckpt_epochs.get("best_regular_epoch")
-        or best_ckpt_epochs.get("best_ema_epoch")
-    )
-
+def find_best_val(output_dir: Path) -> dict:
     # 1) prefer RFDETR results.json if present
     p = output_dir / "results.json"
     if p.exists():
@@ -435,10 +358,9 @@ def find_best_val(output_dir: Path, best_ckpt_epochs: dict | None = None) -> dic
                 break
         if val_row is None and valid:
             val_row = valid[0]
-
         if val_row is not None:
             return {
-                "best_epoch": best_epoch,
+                "best_epoch": None,  # RFDETR doesn't log epoch in results.json
                 "map50": float(val_row.get("map@50", 0.0)),
                 "map5095": float(val_row.get("map@50:95", 0.0)),
                 "source": "results.json",
@@ -457,49 +379,54 @@ def find_best_val(output_dir: Path, best_ckpt_epochs: dict | None = None) -> dic
                 continue
             try:
                 js = json.loads(p.read_text(encoding="utf-8"))
-
                 def pick(keys):
                     for k in keys:
                         if k in js:
                             return float(js[k])
-
                 return {
-                    "best_epoch": js.get("best") or js.get("best_epoch") or js.get("epoch") or best_epoch,
-                    "map50":      pick(["map50", "mAP50", "ap50", "AP50", "bbox/AP50"]),
-                    "map5095":    pick(["map", "mAP", "mAP5095", "bbox/mAP"]),
+                    "best_epoch": js.get("best") or js.get("best_epoch") or js.get("epoch"),
+                    "map50":      pick(["map50","mAP50","ap50","AP50","bbox/AP50"]),
+                    "map5095":    pick(["map","mAP","mAP5095","bbox/mAP"]),
                     "source":     name,
                 }
             except Exception:
                 continue
-
-    return {"best_epoch": best_epoch, "map50": None, "map5095": None, "source": "not_found"}
-
+    return {"best_epoch": None, "map50": None, "map5095": None, "source": "not_found"}
 
 
 # ───────────────────────────────────────────────────────────────────────────────
 # HPO spaces (compact) — MODEL_CLS will be resolved inside the worker
 
 SEARCH_LEUCO = {
+    # Model & input
     "MODEL_CLS":       ["RFDETRLarge"],
     "RESOLUTION":      [672],
-    "EPOCHS":          [40],
-    "LR":              [8e-5],
-    "LR_ENCODER_MULT": [0.10],
-    "BATCH":           [4],
-    "NUM_QUERIES":     [450],
-    "WARMUP_STEPS":    [4000],
-    "SCALE_RANGE":     [(1.0, 1.6)],
-    "ROT_DEG":         [7.0],
-    "COLOR_JITTER":    [0.25],
+    "EPOCHS":          [80],          # let early stopping decide
+
+    # Optimizer / schedule
+    "LR":              [5e-5, 8e-5],  # around your good EPI LR
+    "LR_ENCODER_MULT": [1.0],         # still ignored, keep for future
+    "BATCH":           [4],           # safer than 8 with large model + many queries
+    "WARMUP_STEPS":    [0, 4000],     # no warmup vs. moderate warmup
+
+    # Detector capacity
+    "NUM_QUERIES":     [384, 512],    # 1.1–1.5× max #leu per image
+
+    # Aug / regularization (we’re using RFDETR defaults; these are just logged)
+    "AUG_COPIES":      [0],
+    "SCALE_RANGE":     [(0.9, 1.1)],
+    "ROT_DEG":         [5.0],
+    "COLOR_JITTER":    [0.20],
     "GAUSS_BLUR":      [0.10],
 }
 
+
 #skinny search
-SEARCH_EPI = {
+'''SEARCH_EPI = {
     # Model & input
     "MODEL_CLS":       ["RFDETRLarge"],
     "RESOLUTION":      [672],          # or 672 if you want, both are fine here
-    "EPOCHS":          [2],
+    "EPOCHS":          [80],
     # Optimizer / schedule
     "LR":              [5e-5],
     "LR_ENCODER_MULT": [1.0],          # still ignored in current pipeline
@@ -513,10 +440,10 @@ SEARCH_EPI = {
     "ROT_DEG":         [5.0],
     "COLOR_JITTER":    [0.20],
     "GAUSS_BLUR":      [0.20],
-}
+}'''
 
 #full search
-'''SEARCH_EPI = {
+SEARCH_EPI = {
     # Model & input
     "MODEL_CLS":       ["RFDETRLarge"],
     "RESOLUTION":      [672],          # or 672 if you want, both are fine here
@@ -534,7 +461,7 @@ SEARCH_EPI = {
     "ROT_DEG":         [5.0],
     "COLOR_JITTER":    [0.20],
     "GAUSS_BLUR":      [0.20],
-}'''
+}
 
 
 def grid(space: dict):
@@ -817,10 +744,6 @@ def run_hpo_all_classes(session_root: Path) -> dict:
         print("[HPO] No successful runs.")
         return {}
 
-    print(f"[HPO] All HPO runs finished, building leaderboards for classes: "
-          f"{sorted({row['target'] for row in leaderboard_all})}")
-
-
     per_class_rows = defaultdict(list)
     for row in leaderboard_all:
         per_class_rows[row["target"]].append(row)
@@ -832,8 +755,7 @@ def run_hpo_all_classes(session_root: Path) -> dict:
         out_root = class_out_roots[target_name]
 
         def sort_key(r):
-            a = r["val_AP50"];
-            b = r["val_mAP5095"]
+            a = r["val_AP50"]; b = r["val_mAP5095"]
             return (-(a if a is not None else -1), -(b if b is not None else -1))
 
         rows.sort(key=sort_key)
@@ -844,8 +766,6 @@ def run_hpo_all_classes(session_root: Path) -> dict:
             w.writeheader()
             for r in rows:
                 w.writerow(r)
-
-        print(f"[HPO] Wrote leaderboard for {target_name!r} → {csv_path}")
 
         (out_root / "hpo_top.json").write_text(json.dumps(rows[:5], indent=2), encoding="utf-8")
         best_row = rows[0]
