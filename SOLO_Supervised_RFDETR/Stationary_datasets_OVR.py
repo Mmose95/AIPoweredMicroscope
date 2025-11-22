@@ -24,7 +24,7 @@ def nowstamp() -> str: return datetime.now().strftime("%Y%m%d-%H%M%S")
 def load_json(p: Path): return json.loads(p.read_text(encoding="utf-8"))
 def dump_json(p: Path, obj):
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8")
+    p.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def build_index(coco):
     anns_by_image = defaultdict(list)
@@ -105,20 +105,27 @@ def main():
     by_rel, by_name = index_image_paths(IMAGES_DIR)
 
     # Map images to samples and detect which samples contain the target
+    # *** Only keep images that have at least one TARGET_CLASS annotation ***
     imgid_to_sample = {}
     sample_to_imgids = defaultdict(list)
     sample_has_target = defaultdict(bool)
 
     for iid, im in images_by_id.items():
+        anns = anns_by_image.get(iid, [])
+        has_target = any(a["category_id"] == target_id_src for a in anns)
+        if not has_target:
+            # Skip inactive images entirely
+            continue
+
         try:
             p_abs = resolve_image_path(im["file_name"], IMAGES_DIR, by_rel, by_name)
         except FileNotFoundError:
             continue
+
         s_key = extract_sample_key(p_abs)
         imgid_to_sample[iid] = s_key
         sample_to_imgids[s_key].append(iid)
-        if any(a["category_id"] == target_id_src for a in anns_by_image.get(iid, [])):
-            sample_has_target[s_key] = True
+        sample_has_target[s_key] = True  # by construction this is true
 
     target_samples = sorted([s for s, has in sample_has_target.items() if has])
     if not target_samples:
@@ -126,13 +133,18 @@ def main():
 
     split = split_samples(target_samples, split=SPLIT, seed=SEED)
 
-    # Build image lists per split (all images from each selected sample)
+    # Build image lists per split (only active images from each selected sample)
     img_ids_per_split = {k: [] for k in ("train","valid","test")}
     for sp, samples in split.items():
         for s in samples:
             img_ids_per_split[sp].extend(sample_to_imgids[s])
 
-    ds_name = f"QA-2025v1_{TARGET_CLASS.replace(' ','')}_OVR"
+    # Build a timestamp so we never overwrite old datasets
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+    # Dataset name now includes timestamp
+    ds_name = f"QA-2025v1_{TARGET_CLASS.replace(' ', '')}_OVR_{timestamp}"
+
     out_dir = OUT_ROOT / ds_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -145,30 +157,45 @@ def main():
         for iid in keep_ids:
             im_src = images_by_id[iid]
             p_abs  = resolve_image_path(im_src["file_name"], IMAGES_DIR, by_rel, by_name)
+
+            # We know these have at least one target box, but we re-filter for safety
+            target_anns = [a for a in anns_by_image.get(iid, []) if a["category_id"] == target_id_src]
+            if not target_anns:
+                continue
+
             images.append({
                 "id": im_src["id"],
                 "file_name": to_coco_filename(p_abs, IMAGES_DIR),  # <— PORTABLE
-                "width": im_src["width"], "height": im_src["height"]
+                "width": im_src["width"],
+                "height": im_src["height"],
             })
-            for a in anns_by_image.get(iid, []):
-                if a["category_id"] == target_id_src:
-                    x,y,w,h = a["bbox"]
-                    annotations.append({
-                        "id": a["id"],
-                        "image_id": iid,
-                        "category_id": 0,
-                        "bbox": [float(x), float(y), float(max(1.0, w)), float(max(1.0, h))],
-                        "area": float(max(1.0, w*h)),
-                        "iscrowd": int(a.get("iscrowd", 0)),
-                    })
+            for a in target_anns:
+                x, y, w, h = a["bbox"]
+                w = float(max(1.0, w))
+                h = float(max(1.0, h))
+                annotations.append({
+                    "id": a["id"],
+                    "image_id": iid,
+                    "category_id": 0,
+                    "bbox": [float(x), float(y), w, h],
+                    "area": float(max(1.0, w*h)),
+                    "iscrowd": int(a.get("iscrowd", 0)),
+                })
+
         split_dir = out_dir / sp
         split_dir.mkdir(parents=True, exist_ok=True)
         dump_json(split_dir / "_annotations.coco.json", {
-            "images": images, "annotations": annotations, "categories": new_categories
+            "images": images,
+            "annotations": annotations,
+            "categories": new_categories,
         })
 
+        # Return set of actually kept image IDs for summary
+        return {im["id"] for im in images}
+
+    kept_ids_per_split = {}
     for sp in ("train", "valid", "test"):
-        write_split(sp)
+        kept_ids_per_split[sp] = write_split(sp)
 
     # Summary for reproducibility
     def count_target(keep_ids):
@@ -185,14 +212,15 @@ def main():
         "seed": SEED,
         "split_ratio": {"train": SPLIT[0], "valid": SPLIT[1], "test": SPLIT[2]},
         "file_name_mode": FILE_NAME_MODE,
-        "samples": {k: sorted(v) for k,v in split.items()},
+        "samples": {k: sorted(v) for k, v in split.items()},
         "counts": {
             k: {
                 "n_samples": len(split[k]),
-                "n_images": len(img_ids_per_split[k]),
-                "n_target_boxes": count_target(set(img_ids_per_split[k])),
-            } for k in ("train","valid","test")
-        }
+                # use actually kept active images:
+                "n_images": len(kept_ids_per_split[k]),
+                "n_target_boxes": count_target(kept_ids_per_split[k]),
+            } for k in ("train", "valid", "test")
+        },
     }
     dump_json(out_dir / "split_summary.json", summary)
     print(f"[OK] Wrote stationary OVR dataset: {out_dir}")
