@@ -30,8 +30,136 @@ WORK_ROOT = Path("/work") / USER_BASE_DIR if USER_BASE_DIR else Path.cwd()
 def env_path(name: str, default: Path) -> Path:
     v = os.getenv(name, "").strip()
     return Path(v) if v else default
-
 # ───────────────────────────────────────────────
+
+import re
+from collections import defaultdict
+
+VALID_EXTS = {".tif", ".tiff", ".png", ".jpg", ".jpeg"}
+WINDOWS_PATH_RE = re.compile(r"^[a-zA-Z]:\\")  # detect old Windows-style paths
+
+def _index_image_paths(root: Path):
+    """Index all images under IMAGES_FALLBACK_ROOT for fast lookup."""
+    by_rel = {}
+    by_name = defaultdict(list)
+    root = root.resolve()
+    for p in root.rglob("*"):
+        if p.is_file() and p.suffix.lower() in VALID_EXTS:
+            rel = p.resolve().relative_to(root).as_posix()
+            by_rel[rel] = p
+            by_name[p.name].append(p)
+    return by_rel, by_name
+
+
+def _resolve_image_path(file_name: str, images_root: Path,
+                        by_rel: dict, by_name: dict) -> Path:
+    """
+    Resolve a COCO file_name to an actual image file on the mounted drive.
+    - Handles 'Sample 25/...tif'
+    - Handles old Windows absolute paths
+    """
+    # normalize slashes
+    rel = file_name.replace("\\", "/")
+
+    # direct relative match: "Sample 25/..." under images_root
+    direct = (images_root / rel)
+    if direct.exists():
+        return direct
+
+    # look it up by relative key
+    if rel in by_rel:
+        return by_rel[rel]
+
+    # fallback: by basename
+    base = Path(rel).name
+    if base in by_name:
+        cands = by_name[base]
+        if len(cands) == 1:
+            return cands[0]
+        # if multiple, pick shortest path
+        cands.sort(key=lambda q: len(str(q)))
+        return cands[0]
+
+    # if JSON kept Windows absolute paths, strip drive + search by basename
+    if WINDOWS_PATH_RE.match(file_name):
+        if base in by_name:
+            cands = by_name[base]
+            cands.sort(key=lambda q: len(str(q)))
+            return cands[0]
+
+    raise FileNotFoundError(f"Could not resolve image '{file_name}' under {images_root}")
+
+def build_resolved_static_dataset(src_dir: Path, dst_dir: Path) -> Path:
+    """
+    Create a lightweight copy of the static OVR dataset where all `file_name`
+    entries are replaced by absolute paths on the mounted drive.
+
+    No images are copied. RFDETR will see absolute paths and ignore its root.
+    """
+    ok_marker = dst_dir / ".RESOLVED_OK"
+    if ok_marker.exists():
+        print(f"[RESOLVE] Using cached resolved dataset: {dst_dir}")
+        return dst_dir
+
+    if not IMAGES_FALLBACK_ROOT.exists():
+        raise FileNotFoundError(
+            f"IMAGES_FALLBACK_ROOT does not exist: {IMAGES_FALLBACK_ROOT}\n"
+            f"Set it to your mounted CellScanData root."
+        )
+
+    print(f"[RESOLVE] Building resolved dataset for {src_dir.name} → {dst_dir}")
+    dst_dir.mkdir(parents=True, exist_ok=True)
+
+    # index all images once
+    by_rel, by_name = _index_image_paths(IMAGES_FALLBACK_ROOT)
+
+    for split in ("train", "valid", "test"):
+        src_json = src_dir / split / "_annotations.coco.json"
+        if not src_json.exists():
+            continue
+
+        data = json.loads(src_json.read_text(encoding="utf-8"))
+        images = data.get("images", [])
+        anns   = data.get("annotations", [])
+        cats   = data.get("categories", [])
+
+        out_images = []
+        missing = 0
+
+        for im in images:
+            try:
+                resolved = _resolve_image_path(im["file_name"], IMAGES_FALLBACK_ROOT, by_rel, by_name)
+            except FileNotFoundError as e:
+                missing += 1
+                print(f"[RESOLVE][WARN] {e}")
+                continue
+
+            im2 = dict(im)
+            # absolute path to mounted drive
+            im2["file_name"] = str(resolved.resolve())
+            out_images.append(im2)
+
+        valid_ids = {im["id"] for im in out_images}
+        out_anns = [a for a in anns if a["image_id"] in valid_ids]
+
+        out_split_dir = dst_dir / split
+        out_split_dir.mkdir(parents=True, exist_ok=True)
+        out_json = out_split_dir / "_annotations.coco.json"
+        out_json.write_text(
+            json.dumps({"images": out_images,
+                        "annotations": out_anns,
+                        "categories": cats},
+                       ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        print(f"[RESOLVE] {split}: kept {len(out_images)} images, "
+              f"{len(out_anns)} anns (missing={missing})")
+
+    ok_marker.write_text("ok", encoding="utf-8")
+    return dst_dir
+
+
 # Auto-detect GPU count and set MAX_PARALLEL
 # ───────────────────────────────────────────────
 def detect_visible_gpus() -> list[int]:
@@ -102,11 +230,14 @@ SEED        = int(os.getenv("SEED", "42"))
 # ───────────────────────────────────────────────────────────────────────────────
 def get_or_build_aug_cache(target_name: str, dataset_dir: Path, root_out: Path, aug_copies: int) -> Path:
     """
-    Offline augmentation is disabled for now.
-    We simply point RFDETR to the original static dataset directory.
+    Offline augmentation is disabled.
+    We only build a 'resolved' dataset where file_name paths point to the
+    mounted CellScanData tree. No image copying, no aug.
     """
-    print(f"[AUG] Offline augmentation DISABLED for '{target_name}'. Using original dataset: {dataset_dir}")
-    return dataset_dir
+    # one resolved dataset per original dataset_dir
+    cache_dir = root_out / f"{dataset_dir.name}_RESOLVED"
+    return build_resolved_static_dataset(dataset_dir, cache_dir)
+
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Training (single run). Called in worker processes.
