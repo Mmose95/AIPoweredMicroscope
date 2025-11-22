@@ -392,7 +392,7 @@ SEARCH_LEUCO = {
 SEARCH_EPI = {
     # Model & input
     "MODEL_CLS":       ["RFDETRLarge"],
-    "RESOLUTION":      [640],          # or 672 if you want, both are fine here
+    "RESOLUTION":      [672],          # or 672 if you want, both are fine here
     "EPOCHS":          [80],
     # Optimizer / schedule
     "LR":              [5e-5, 1e-4, 2e-4],
