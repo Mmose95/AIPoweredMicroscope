@@ -346,30 +346,53 @@ def train_one_run(target_name: str,
 
 
 def find_best_val(output_dir: Path) -> dict:
+    # 1) prefer RFDETR results.json if present
+    p = output_dir / "results.json"
+    if p.exists():
+        js = json.loads(p.read_text())
+        valid = js.get("class_map", {}).get("valid", [])
+        val_row = None
+        for r in valid:
+            if r.get("class") == "all":
+                val_row = r
+                break
+        if val_row is None and valid:
+            val_row = valid[0]
+        if val_row is not None:
+            return {
+                "best_epoch": None,  # RFDETR doesn't log epoch in results.json
+                "map50": float(val_row.get("map@50", 0.0)),
+                "map5095": float(val_row.get("map@50:95", 0.0)),
+                "source": "results.json",
+            }
+
+    # 2) fall back to old behaviour (also check eval/ subfolder)
     candidates = [
         "val_best_summary.json",
         "val_metrics.json", "metrics_val.json", "coco_eval_val.json",
-        "metrics.json", "val_results.json", "results_val.json"
+        "metrics.json", "val_results.json", "results_val.json",
     ]
     for name in candidates:
-        p = output_dir / name
-        if not p.exists():
-            continue
-        try:
-            js = json.loads(p.read_text(encoding="utf-8"))
-            def pick(keys):
-                for k in keys:
-                    if k in js:
-                        return float(js[k])
-            return {
-                "best_epoch": js.get("best") or js.get("best_epoch") or js.get("epoch"),
-                "map50":      pick(["map50","mAP50","ap50","AP50","bbox/AP50"]),
-                "map5095":    pick(["map","mAP","mAP5095","bbox/mAP"]),
-                "source":     name
-            }
-        except Exception:
-            continue
+        for base in (output_dir, output_dir / "eval"):
+            p = base / name
+            if not p.exists():
+                continue
+            try:
+                js = json.loads(p.read_text(encoding="utf-8"))
+                def pick(keys):
+                    for k in keys:
+                        if k in js:
+                            return float(js[k])
+                return {
+                    "best_epoch": js.get("best") or js.get("best_epoch") or js.get("epoch"),
+                    "map50":      pick(["map50","mAP50","ap50","AP50","bbox/AP50"]),
+                    "map5095":    pick(["map","mAP","mAP5095","bbox/mAP"]),
+                    "source":     name,
+                }
+            except Exception:
+                continue
     return {"best_epoch": None, "map50": None, "map5095": None, "source": "not_found"}
+
 
 # ───────────────────────────────────────────────────────────────────────────────
 # HPO spaces (compact) — MODEL_CLS will be resolved inside the worker
