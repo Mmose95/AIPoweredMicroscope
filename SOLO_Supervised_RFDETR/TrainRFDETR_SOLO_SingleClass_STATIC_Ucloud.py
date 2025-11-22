@@ -298,7 +298,7 @@ def train_one_run(target_name: str,
 
         seed=seed,
         early_stopping=True,         # same flag as local
-        checkpoint_interval=1,
+        checkpoint_interval=10,
         run_test=True,
     )
 
@@ -306,8 +306,8 @@ def train_one_run(target_name: str,
         if name in can:
             kwargs[name] = value
 
-    # ---- augmentations: copy local setup ----
-    maybe("hflip_prob", 0.5)
+    # ---- augmentations: copy local setup ---- not used in rfdetr
+    '''maybe("hflip_prob", 0.5)
     maybe("flip_prob", 0.5)
 
     maybe("rotation_degrees", rot_deg)      # 5.0
@@ -321,15 +321,12 @@ def train_one_run(target_name: str,
     maybe("saturation", 0.2)
     maybe("hue", 0.02)
 
-    maybe("gaussian_blur_prob", gauss_blur_prob)  # 0.2
+    maybe("gaussian_blur_prob", gauss_blur_prob)  # 0.2'''
 
-    # resizing behaviour: match local (no random padding resize, but square resize)
+    # resizing behaviour: these are used in rfdetr so we need to keep them
     maybe("square_resize_div_64", True)
     maybe("do_random_resize_via_padding", False)
     maybe("random_resize_via_padding", False)  # if this is the accepted name
-
-    # IMPORTANT: for parity with local, DO NOT override lr_encoder, lr_schedule, warmup, EMA etc.
-    # We rely on RFDETR defaults, just like the local script does.
 
     # Log meta
     meta = out_dir / "run_meta"; meta.mkdir(parents=True, exist_ok=True)
@@ -386,7 +383,6 @@ SEARCH_LEUCO = {
     "BATCH":           [4],
     "NUM_QUERIES":     [450],
     "WARMUP_STEPS":    [4000],
-    "AUG_COPIES":      [0],              # offline AUG disabled
     "SCALE_RANGE":     [(1.0, 1.6)],
     "ROT_DEG":         [7.0],
     "COLOR_JITTER":    [0.25],
@@ -394,21 +390,25 @@ SEARCH_LEUCO = {
 }
 
 SEARCH_EPI = {
-    # Same as local OVR training
-    "MODEL_CLS":       ["RFDETRMedium"],
-    "RESOLUTION":      [640],
-    "EPOCHS":          [140],
-    "LR":              [1e-4],
-    "LR_ENCODER_MULT": [1.0],    # not used
+    # Model & input
+    "MODEL_CLS":       ["RFDETRLarge"],
+    "RESOLUTION":      [640],          # or 672 if you want, both are fine here
+    "EPOCHS":          [80],
+    # Optimizer / schedule
+    "LR":              [5e-5, 1e-4, 2e-4],
+    "LR_ENCODER_MULT": [1.0],          # still ignored in current pipeline
     "BATCH":           [8],
-    "NUM_QUERIES":     [300],
-    "WARMUP_STEPS":    [0],      # not used
+    "WARMUP_STEPS":    [0, 4000],      # no warmup vs. moderate warmup
+    # Detector capacity
+    "NUM_QUERIES":     [200, 250],     # 25×max cells is already overkill
+    # Augmentation / regularization (fixed to match your good run)
     "AUG_COPIES":      [0],
     "SCALE_RANGE":     [(0.9, 1.1)],
     "ROT_DEG":         [5.0],
     "COLOR_JITTER":    [0.20],
     "GAUSS_BLUR":      [0.20],
 }
+
 
 def grid(space: dict):
     keys = list(space.keys())
