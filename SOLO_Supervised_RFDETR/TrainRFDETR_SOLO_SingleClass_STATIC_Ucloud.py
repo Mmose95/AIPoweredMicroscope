@@ -412,7 +412,29 @@ SEARCH_LEUCO = {
     "GAUSS_BLUR":      [0.10],
 }
 
+#skinny search
 SEARCH_EPI = {
+    # Model & input
+    "MODEL_CLS":       ["RFDETRLarge"],
+    "RESOLUTION":      [672],          # or 672 if you want, both are fine here
+    "EPOCHS":          [80],
+    # Optimizer / schedule
+    "LR":              [5e-5],
+    "LR_ENCODER_MULT": [1.0],          # still ignored in current pipeline
+    "BATCH":           [8],
+    "WARMUP_STEPS":    [0],      # no warmup vs. moderate warmup
+    # Detector capacity
+    "NUM_QUERIES":     [200, 250],     # 25×max cells is already overkill
+    # Augmentation / regularization (fixed to match your good run)
+    "AUG_COPIES":      [0],
+    "SCALE_RANGE":     [(0.9, 1.1)],
+    "ROT_DEG":         [5.0],
+    "COLOR_JITTER":    [0.20],
+    "GAUSS_BLUR":      [0.20],
+}
+
+#full search
+'''SEARCH_EPI = {
     # Model & input
     "MODEL_CLS":       ["RFDETRLarge"],
     "RESOLUTION":      [672],          # or 672 if you want, both are fine here
@@ -430,7 +452,7 @@ SEARCH_EPI = {
     "ROT_DEG":         [5.0],
     "COLOR_JITTER":    [0.20],
     "GAUSS_BLUR":      [0.20],
-}
+}'''
 
 
 def grid(space: dict):
