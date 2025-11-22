@@ -221,6 +221,11 @@ if not DATASET_EPI.exists():
 # Where to put all outputs (HPO runs + leaderboards + final selections) → on the drive
 OUTPUT_ROOT = env_path("OUTPUT_ROOT", WORK_ROOT / "RFDETR_SOLO_OUTPUT" / "HPO_BOTH_OVR")
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+# One unique subfolder per HPO session (timestamped)
+HPO_SESSION_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
+SESSION_ROOT = OUTPUT_ROOT / f"session_{HPO_SESSION_ID}"
+SESSION_ROOT.mkdir(parents=True, exist_ok=True)
+print(f"[HPO] Session root: {SESSION_ROOT}")
 
 NUM_WORKERS = int(os.getenv("NUM_WORKERS", "8"))
 SEED        = int(os.getenv("SEED", "42"))
@@ -378,7 +383,7 @@ SEARCH_LEUCO = {
 SEARCH_EPI = {
     "MODEL_CLS":       ["RFDETRMedium"],
     "RESOLUTION":      [640],
-    "EPOCHS":          [140],
+    "EPOCHS":          [40],
     "LR":              [1e-4],
     "LR_ENCODER_MULT": [0.10],
     "BATCH":           [8],
@@ -573,7 +578,7 @@ def run_hpo_all_classes() -> dict:
     class_out_roots = {}
     for target_name, _, _ in selected:
         class_token = target_name.replace(" ", "")
-        out_root = OUTPUT_ROOT / class_token
+        out_root = SESSION_ROOT / class_token
         out_root.mkdir(parents=True, exist_ok=True)
         class_out_roots[target_name] = out_root
 
@@ -720,6 +725,7 @@ def main():
 
     final = {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "session_id": HPO_SESSION_ID,
         "work_root": str(WORK_ROOT),
     }
 
@@ -737,8 +743,9 @@ def main():
             "leaderboard_top5": res_all["Squamous Epithelial Cell"]["leaderboard"][:5],
         }
 
-    (OUTPUT_ROOT / "FINAL_HPO_SUMMARY.json").write_text(json.dumps(final, indent=2), encoding="utf-8")
-    print("\n[FINAL] Summary →", OUTPUT_ROOT / "FINAL_HPO_SUMMARY.json")
+    summary_path = SESSION_ROOT / "FINAL_HPO_SUMMARY.json"
+    summary_path.write_text(json.dumps(final, indent=2), encoding="utf-8")
+    print("\n[FINAL] Summary →", summary_path)
     print(json.dumps(final, indent=2))
 
 if __name__ == "__main__":
