@@ -221,11 +221,11 @@ if not DATASET_EPI.exists():
 # Where to put all outputs (HPO runs + leaderboards + final selections) → on the drive
 OUTPUT_ROOT = env_path("OUTPUT_ROOT", WORK_ROOT / "RFDETR_SOLO_OUTPUT" / "HPO_BOTH_OVR")
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
-# One unique subfolder per HPO session (timestamped)
-HPO_SESSION_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
-SESSION_ROOT = OUTPUT_ROOT / f"session_{HPO_SESSION_ID}"
-SESSION_ROOT.mkdir(parents=True, exist_ok=True)
-print(f"[HPO] Session root: {SESSION_ROOT}")
+
+# Will be set in main() only (avoid workers creating their own sessions)
+HPO_SESSION_ID: str | None = None
+SESSION_ROOT: Path | None = None
+
 
 NUM_WORKERS = int(os.getenv("NUM_WORKERS", "8"))
 SEED        = int(os.getenv("SEED", "42"))
@@ -274,6 +274,7 @@ def train_one_run(target_name: str,
     sig = signature(model.train)
     can = set(sig.parameters.keys())
 
+    # ---- base kwargs: match local OVR training ----
     kwargs = dict(
         dataset_dir=str(data_dir),
         output_dir=str(out_dir),
@@ -281,14 +282,14 @@ def train_one_run(target_name: str,
 
         resolution=resolution,
         batch_size=batch_size,
-        grad_accum_steps=1,
+        grad_accum_steps=8,          # LOCAL: 8
         epochs=epochs,
         lr=lr,
         weight_decay=5e-4,
         dropout=0.1,
         num_queries=num_queries,
 
-        multi_scale=False,                   # keep equal to your good local run
+        multi_scale=False,
         gradient_checkpointing=True,
         amp=True,
         num_workers=min(num_workers, os.cpu_count() or num_workers),
@@ -296,28 +297,39 @@ def train_one_run(target_name: str,
         persistent_workers=persistent_workers,
 
         seed=seed,
-        early_stopping=True,
-        early_stopping_patience=35 if target_name.lower().startswith("leuco") else 20,
-        early_stopping_metric="map_50_95",
-        early_stopping_min_delta=0.001,
-        early_stopping_use_ema=True,
+        early_stopping=True,         # same flag as local
         checkpoint_interval=1,
         run_test=True,
-
-        # trainer-side augs (ONLINE only)
-        hflip_prob=0.5,
-        rotation_degrees=rot_deg,
-        scale_range=scale_range,
-        color_jitter=color_jitter,
-        gaussian_blur_prob=gauss_blur_prob,
-        square_resize_div_64=True,
-        random_resize_via_padding=True,
     )
-    if "lr_encoder" in can: kwargs["lr_encoder"] = lr * lr_encoder_mult
-    if "lr_schedule" in can: kwargs["lr_schedule"] = "cosine"
-    if "warmup_steps" in can: kwargs["warmup_steps"] = warmup_steps
-    if "clip_grad_norm" in can: kwargs["clip_grad_norm"] = 0.1
-    if "ema" in can: kwargs["ema"] = True
+
+    def maybe(name, value):
+        if name in can:
+            kwargs[name] = value
+
+    # ---- augmentations: copy local setup ----
+    maybe("hflip_prob", 0.5)
+    maybe("flip_prob", 0.5)
+
+    maybe("rotation_degrees", rot_deg)      # 5.0
+    maybe("translate", 0.05)
+    maybe("scale_range", scale_range)       # (0.9, 1.1)
+    maybe("random_affine_prob", 0.5)
+
+    maybe("color_jitter", color_jitter)     # 0.2
+    maybe("brightness", 0.2)
+    maybe("contrast", 0.2)
+    maybe("saturation", 0.2)
+    maybe("hue", 0.02)
+
+    maybe("gaussian_blur_prob", gauss_blur_prob)  # 0.2
+
+    # resizing behaviour: match local (no random padding resize, but square resize)
+    maybe("square_resize_div_64", True)
+    maybe("do_random_resize_via_padding", False)
+    maybe("random_resize_via_padding", False)  # if this is the accepted name
+
+    # IMPORTANT: for parity with local, DO NOT override lr_encoder, lr_schedule, warmup, EMA etc.
+    # We rely on RFDETR defaults, just like the local script does.
 
     # Log meta
     meta = out_dir / "run_meta"; meta.mkdir(parents=True, exist_ok=True)
@@ -334,6 +346,7 @@ def train_one_run(target_name: str,
     best = find_best_val(out_dir)
     (out_dir / "val_best_summary.json").write_text(json.dumps(best, indent=2), encoding="utf-8")
     return best
+
 
 def find_best_val(output_dir: Path) -> dict:
     candidates = [
@@ -381,15 +394,16 @@ SEARCH_LEUCO = {
 }
 
 SEARCH_EPI = {
+    # Same as local OVR training
     "MODEL_CLS":       ["RFDETRMedium"],
     "RESOLUTION":      [640],
-    "EPOCHS":          [40],
+    "EPOCHS":          [140],
     "LR":              [1e-4],
-    "LR_ENCODER_MULT": [0.10],
+    "LR_ENCODER_MULT": [1.0],    # not used
     "BATCH":           [8],
     "NUM_QUERIES":     [300],
-    "WARMUP_STEPS":    [0],
-    "AUG_COPIES":      [0],              # offline AUG disabled
+    "WARMUP_STEPS":    [0],      # not used
+    "AUG_COPIES":      [0],
     "SCALE_RANGE":     [(0.9, 1.1)],
     "ROT_DEG":         [5.0],
     "COLOR_JITTER":    [0.20],
@@ -480,7 +494,7 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
         _set_perf_toggles()
 
         out_root = Path(out_root)
-        run_dir = out_root / f"run_{run_idx:03d}"
+        run_dir = out_root / f"HPO_Config_{run_idx:03d}"
         run_dir.mkdir(parents=True, exist_ok=True)
 
         t0 = time.time()
@@ -558,7 +572,8 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
         result_q.put(("err", {"run_idx": run_idx, "target": target_name, "error": repr(e)}))
 
 # ───────────────────────────────────────────────────────────────────────────────
-def run_hpo_all_classes() -> dict:
+def run_hpo_all_classes(session_root: Path) -> dict:
+
     """
     Multi-class HPO launcher.
     - Uses ALL visible GPUs as a shared pool.
@@ -578,7 +593,7 @@ def run_hpo_all_classes() -> dict:
     class_out_roots = {}
     for target_name, _, _ in selected:
         class_token = target_name.replace(" ", "")
-        out_root = SESSION_ROOT / class_token
+        out_root = session_root / class_token
         out_root.mkdir(parents=True, exist_ok=True)
         class_out_roots[target_name] = out_root
 
@@ -712,6 +727,10 @@ def run_hpo_all_classes() -> dict:
 
 # ───────────────────────────────────────────────────────────────────────────────
 def main():
+    global HPO_SESSION_ID, SESSION_ROOT
+
+    global HPO_SESSION_ID, SESSION_ROOT
+
     print("[WORK_ROOT]", WORK_ROOT)
     print("[DATASETS]")
     print("  Leucocyte:", DATASET_LEUCO)
@@ -721,7 +740,13 @@ def main():
             if not (p / part / "_annotations.coco.json").exists():
                 raise FileNotFoundError(f"Missing {part} split in {p}")
 
-    res_all = run_hpo_all_classes()
+    # Create a single timestamped session directory for THIS script run
+    HPO_SESSION_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
+    SESSION_ROOT = OUTPUT_ROOT / f"session_{HPO_SESSION_ID}"
+    SESSION_ROOT.mkdir(parents=True, exist_ok=False)
+    print(f"[HPO] Session root: {SESSION_ROOT}")
+
+    res_all = run_hpo_all_classes(SESSION_ROOT)
 
     final = {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
