@@ -80,42 +80,48 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
     mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
     # -----------------------------------------------------------------------
 
+    # ---------------------- Dataset helpers -------------------------------
     from torch.utils.data import Dataset
     from PIL import Image
 
-    VALID_IMG_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
+    VALID_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
 
-    def collect_ssl_image_paths(root: Path,
-                                first_sample: int,
-                                last_sample: int) -> list[Path]:
+    def collect_ssl_image_paths(root: Path, first_sample: int, last_sample: int) -> list[Path]:
         """
-        Collect all image files from Sample <N> folders under `root`,
-        for N in [first_sample, last_sample].
-        Example root:
-            /work/.../CellScanData/Zoom10x - Quality Assessment_Cleaned
+        Collect all image files from 'Sample XX' folders in [first_sample, last_sample].
         """
-        paths = []
-        for sid in range(first_sample, last_sample + 1):
-            sample_dir = root / f"Sample {sid}"
-            if not sample_dir.exists():
-                print(f"[SSL] WARNING: {sample_dir} does not exist, skipping.")
+        root = Path(root)
+        paths: list[Path] = []
+
+        for sample_dir in sorted(root.glob("Sample *")):
+            # Expect folder names like "Sample 37"
+            parts = sample_dir.name.split()
+            try:
+                num = int(parts[-1])
+            except (ValueError, IndexError):
                 continue
+
+            if num < first_sample or num > last_sample:
+                continue
+
             for p in sample_dir.rglob("*"):
-                if p.is_file() and p.suffix.lower() in VALID_IMG_EXTS:
+                if p.is_file() and p.suffix.lower() in VALID_EXTS:
                     paths.append(p)
-        print(f"[SSL] Collected {len(paths)} images from Sample {first_sample}–{last_sample}")
+
         if not paths:
             raise RuntimeError(
-                f"No SSL images found under {root} for samples {first_sample}–{last_sample}"
+                f"No images found under {root} for samples {first_sample}-{last_sample}"
             )
+
         return paths
 
     class SimpleSSLImageDataset(Dataset):
         """
-        Minimal SSL dataset:
+        Dataset that:
           - takes a list of image paths
+          - loads PIL image
           - applies DataAugmentationDINO
-          - returns (crops, 0) just like your original SSLImageDataset.
+          - returns list-of-crops, label_dummy
         """
 
         def __init__(self, image_paths: list[Path], transform):
@@ -125,11 +131,10 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
         def __len__(self) -> int:
             return len(self.image_paths)
 
-        def __getitem__(self, idx: int):
+        def __getitem__(self, idx):
             path = self.image_paths[idx]
             img = Image.open(path).convert("RGB")
-            crops = self.transform(img)
-            # second element is a dummy target to keep the old (images, _) API
+            crops = self.transform(img)  # DataAugmentationDINO -> list of tensors
             return crops, 0
 
     # ---------------------- Configs -----------------------
@@ -165,10 +170,10 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
 
     # Load weights
     # Use on ucloud
-    state_dict = torch.load("/work/" + USER_BASE_DIR + "/Checkpoints/Pretrained_Models/VIT_BASE_DINOV2.bin",
-                            map_location="cpu")  # VIT BASE MODEL
-    # Use on Local
-    # state_dict = torch.load("./Checkpoints/Pretrained_Models/VIT_BASE_DINOV2.bin", map_location="cpu")  # VIT BASE MODEL
+    state_dict = torch.load(
+        f"/work/{USER_BASE_DIR}/Checkpoints/Pretrained_Models/VIT_BASE_DINOV2.bin",
+        map_location="cpu"
+    )  # VIT BASE MODEL
 
     student.load_state_dict(state_dict, strict=False)
     teacher.load_state_dict(state_dict, strict=False)
@@ -192,25 +197,31 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
         nepochs=NUM_EPOCHS,
     ).to(DEVICE)
 
-    # Transforms
-    transform = DataAugmentationDINO(
-        global_crops_scale=(0.2, 1.0),
-        local_crops_scale=(0.05, 0.35),
-        local_crops_number=8
-    )
+    # ---------------------- Transforms + Dataset / loader ------------------
+    # Use env vars to define which samples to include; defaults 37–110
+    if "SSL_FIRST_SAMPLE" not in os.environ or "SSL_LAST_SAMPLE" not in os.environ:
+        raise RuntimeError(
+            "Environment variables SSL_FIRST_SAMPLE and SSL_LAST_SAMPLE must be set.\n"
+            "Example:\n"
+            "   os.environ['SSL_FIRST_SAMPLE'] = '37'\n"
+            "   os.environ['SSL_LAST_SAMPLE'] = '110'\n"
+        )
 
-    # ---------------------- Dataset / loader -----------------------
-    # Here DATA_PATH is the *root* of your cleaned CellScanData tree,
-    # e.g. /work/.../CellScanData/Zoom10x - Quality Assessment_Cleaned
+    SSL_FIRST_SAMPLE = int(os.environ["SSL_FIRST_SAMPLE"])
+    SSL_LAST_SAMPLE = int(os.environ["SSL_LAST_SAMPLE"])
 
-    # Configure which samples to use for SSL:
-    SSL_FIRST_SAMPLE = 37
-    SSL_LAST_SAMPLE = 110
+    print(f"[SSL] Using sample range explicitly: {SSL_FIRST_SAMPLE}–{SSL_LAST_SAMPLE}")
 
     all_image_paths = collect_ssl_image_paths(
         Path(DATA_PATH),
         SSL_FIRST_SAMPLE,
         SSL_LAST_SAMPLE,
+    )
+
+    transform = DataAugmentationDINO(
+        global_crops_scale=(0.2, 1.0),
+        local_crops_scale=(0.05, 0.35),
+        local_crops_number=8,
     )
 
     dataset = SimpleSSLImageDataset(all_image_paths, transform=transform)
@@ -222,13 +233,12 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
         pin_memory=True,
     )
 
+    print(f"[SSL] Loaded {len(all_image_paths)} images from samples {SSL_FIRST_SAMPLE}-{SSL_LAST_SAMPLE}")
 
     # EMA update
     def update_teacher(student_model, teacher_model, momentum):
         for student_param, teacher_param in zip(student_model.parameters(), teacher_model.parameters()):
             teacher_param.data = momentum * teacher_param.data + (1.0 - momentum) * student_param.data
-
-    ##### END OF UPDATE_TEACHER()
 
     def compute_entropy(p):
         # p: (B, C) probabilities
@@ -238,8 +248,10 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
     if trackExperiment_QualityAssessment_SSL:
         # Start mlflow experiment tracking (uses file store set above)
         experiment_id = setup_mlflow_experiment("Main Phase: Quality Assessment (SelfSupervised)")
-        runId = mlflow.start_run(run_name=f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-                                 experiment_id=experiment_id)
+        runId = mlflow.start_run(
+            run_name=f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            experiment_id=experiment_id,
+        )
         run_name = runId.info.run_name
         print("Experiment tracking via MLFLOW is ON!!:  ID:", experiment_id, "| run:", run_name)
     else:
@@ -271,12 +283,11 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
         json.dump(manifest, f, indent=2)
     # ------------------------------------------------------------
 
-    # logging the data list (accept common image types)
+    # logging the data list (relative to DATA_PATH)
     image_folder = save_folder / "SSL"
     image_folder.mkdir(parents=True, exist_ok=True)
     output_json = image_folder / "SSLdata_filenames.json"
 
-    # store relative paths from root for easier reading
     root_path = Path(DATA_PATH)
     rel_files = [p.relative_to(root_path).as_posix() for p in all_image_paths]
     with open(output_json, "w") as f:
@@ -284,7 +295,6 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
 
     if trackExperiment_QualityAssessment_SSL:
         mlflow.log_param("number_of_images_used_in_training", len(all_image_paths))
-
 
         # Log hyperparameters dynamically
         mlflow.log_param("batch_size", BATCH_SIZE)
@@ -362,12 +372,16 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
                 samples_this_epoch += batch_size
 
                 # Prepare global and local crops
-                global_crops = torch.cat([torch.stack([crops[i].to(DEVICE, non_blocking=True)
-                                                       for i in range(num_global_crops)])
-                                          for crops in images])
-                local_crops = torch.cat([torch.stack([crops[i].to(DEVICE, non_blocking=True)
-                                                      for i in range(num_global_crops, total_crops)])
-                                         for crops in images])
+                global_crops = torch.cat([
+                    torch.stack([crops[i].to(DEVICE, non_blocking=True)
+                                 for i in range(num_global_crops)])
+                    for crops in images
+                ])
+                local_crops = torch.cat([
+                    torch.stack([crops[i].to(DEVICE, non_blocking=True)
+                                 for i in range(num_global_crops, total_crops)])
+                    for crops in images
+                ])
                 all_crops = torch.cat([global_crops, local_crops])
 
                 student_output = student(all_crops)
@@ -409,7 +423,8 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
 
             if batch_idx % 1 == 0:
                 print(
-                    f"\n[Epoch {epoch + 1}/ {NUM_EPOCHS}] Batch {batch_idx + 1}/{len(dataloader)} - Loss: {loss.item():.4f}")
+                    f"\n[Epoch {epoch + 1}/ {NUM_EPOCHS}] Batch {batch_idx + 1}/{len(dataloader)} - Loss: {loss.item():.4f}"
+                )
                 if trackExperiment_QualityAssessment_SSL and torch.cuda.is_available():
                     mlflow.log_metric("gpu_memory_allocated_MB", torch.cuda.memory_allocated() / 1024 ** 2, step=epoch)
                     mlflow.log_metric("gpu_memory_reserved_MB", torch.cuda.memory_reserved() / 1024 ** 2, step=epoch)
@@ -468,9 +483,9 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
         entropy_gap = abs(student_entropy.item() - teacher_entropy.item())
 
         should_consider = (
-                epoch >= WARMUP_EPOCHS and
-                (epoch + 1) % CHECKPOINT_FREQ == 0 and
-                avg_loss <= best_loss_seen * LOSS_TOLERANCE
+            epoch >= WARMUP_EPOCHS
+            and (epoch + 1) % CHECKPOINT_FREQ == 0
+            and avg_loss <= best_loss_seen * LOSS_TOLERANCE
         )
 
         if should_consider:
@@ -488,7 +503,8 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
                 if avg_loss < worst_loss and all(d >= EPOCH_DISTANCE_MIN for d in epoch_diffs):
                     _, _, w_stu, w_tea = top_checkpoints[worst_idx]
                     for p in [w_stu, w_tea]:
-                        if os.path.exists(p): os.remove(p)
+                        if os.path.exists(p):
+                            os.remove(p)
 
                     save_safely({'model': student.state_dict()}, student_path)
                     save_safely({'model': teacher.state_dict()}, teacher_path)
@@ -550,3 +566,4 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
     # best_model_path = run_linear_probe_all_with_rfdetr(ssl_data_path, save_folder, id_only)
 
     return best_model_path.as_posix()
+
