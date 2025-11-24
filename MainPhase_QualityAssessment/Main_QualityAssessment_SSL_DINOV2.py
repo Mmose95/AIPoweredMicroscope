@@ -83,17 +83,39 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
     from torch.utils.data import Dataset
     from PIL import Image
 
+    from pathlib import Path
+    from typing import List
+
     VALID_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
 
-    def collect_ssl_image_paths(root: Path, first_sample: int, last_sample: int) -> list[Path]:
+    def collect_ssl_image_paths(root: Path, first_sample: int, last_sample: int) -> List[Path]:
         """
-        Collect all image files from 'Sample XX' folders in [first_sample, last_sample].
+        Collect all image files for SSL from 'Sample XX' folders in [first_sample, last_sample].
+
+        For each 'Sample N' folder:
+          - If 'Patches for Sample N' exists, use images from there (preferred).
+          - Otherwise, use images directly under 'Sample N'.
+
+        Parameters
+        ----------
+        root : Path
+            Root folder that contains 'Sample XX' subfolders
+            e.g. /work/.../CellScanData/Zoom10x - Quality Assessment_Cleaned
+        first_sample : int
+            First sample index to include (inclusive)
+        last_sample : int
+            Last sample index to include (inclusive)
+
+        Returns
+        -------
+        List[Path]
+            List of image file paths.
         """
         root = Path(root)
-        paths: list[Path] = []
+        paths: List[Path] = []
 
         for sample_dir in sorted(root.glob("Sample *")):
-            # Expect folder names like "Sample 37"
+            # Expect folder names like 'Sample 37'
             parts = sample_dir.name.split()
             try:
                 num = int(parts[-1])
@@ -103,7 +125,11 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
             if num < first_sample or num > last_sample:
                 continue
 
-            for p in sample_dir.rglob("*"):
+            # Prefer patches if they exist
+            patch_root = sample_dir / f"Patches for Sample {num}"
+            search_root = patch_root if patch_root.is_dir() else sample_dir
+
+            for p in search_root.rglob("*"):
                 if p.is_file() and p.suffix.lower() in VALID_EXTS:
                     paths.append(p)
 
@@ -133,7 +159,22 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
         def __getitem__(self, idx):
             path = self.image_paths[idx]
             img = Image.open(path).convert("RGB")
-            crops = self.transform(img)  # DataAugmentationDINO -> list of tensors
+            crops = self.transform(img)
+
+            # DataAugmentationDINO may return a dict; we just want a flat list of tensors
+            if isinstance(crops, dict):
+                tensors = []
+                for v in crops.values():
+                    if torch.is_tensor(v):
+                        tensors.append(v)
+                    elif isinstance(v, (list, tuple)):
+                        for x in v:
+                            if torch.is_tensor(x):
+                                tensors.append(x)
+                    # ignore non-tensor metadata
+                crops = tensors
+
+            # At this point crops should be: list[Tensor] of length ncrops
             return crops, 0
 
     # ---------------------- Configs -----------------------
