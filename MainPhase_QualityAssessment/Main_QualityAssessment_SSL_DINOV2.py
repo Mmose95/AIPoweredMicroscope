@@ -67,6 +67,12 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
     https://huggingface.co/facebook/dinov2-base/tree/main
     '''
 
+    from torch.utils.data import Dataset
+    from PIL import Image
+
+    from pathlib import Path
+    from typing import List
+
     # ---------------------- Persistent dirs on UCloud -----------------------
     PROJECT_DIR = Path("/work/projects/myproj")
     CHECKPOINTS = PROJECT_DIR / "Checkpoints"
@@ -80,12 +86,6 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
     # -----------------------------------------------------------------------
 
     # ---------------------- Dataset helpers -------------------------------
-    from torch.utils.data import Dataset
-    from PIL import Image
-
-    from pathlib import Path
-    from typing import List
-
     VALID_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
 
     def collect_ssl_image_paths(root: Path, first_sample: int, last_sample: int) -> List[Path]:
