@@ -80,6 +80,58 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
     mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
     # -----------------------------------------------------------------------
 
+    from torch.utils.data import Dataset
+    from PIL import Image
+
+    VALID_IMG_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
+
+    def collect_ssl_image_paths(root: Path,
+                                first_sample: int,
+                                last_sample: int) -> list[Path]:
+        """
+        Collect all image files from Sample <N> folders under `root`,
+        for N in [first_sample, last_sample].
+        Example root:
+            /work/.../CellScanData/Zoom10x - Quality Assessment_Cleaned
+        """
+        paths = []
+        for sid in range(first_sample, last_sample + 1):
+            sample_dir = root / f"Sample {sid}"
+            if not sample_dir.exists():
+                print(f"[SSL] WARNING: {sample_dir} does not exist, skipping.")
+                continue
+            for p in sample_dir.rglob("*"):
+                if p.is_file() and p.suffix.lower() in VALID_IMG_EXTS:
+                    paths.append(p)
+        print(f"[SSL] Collected {len(paths)} images from Sample {first_sample}–{last_sample}")
+        if not paths:
+            raise RuntimeError(
+                f"No SSL images found under {root} for samples {first_sample}–{last_sample}"
+            )
+        return paths
+
+    class SimpleSSLImageDataset(Dataset):
+        """
+        Minimal SSL dataset:
+          - takes a list of image paths
+          - applies DataAugmentationDINO
+          - returns (crops, 0) just like your original SSLImageDataset.
+        """
+
+        def __init__(self, image_paths: list[Path], transform):
+            self.image_paths = list(image_paths)
+            self.transform = transform
+
+        def __len__(self) -> int:
+            return len(self.image_paths)
+
+        def __getitem__(self, idx: int):
+            path = self.image_paths[idx]
+            img = Image.open(path).convert("RGB")
+            crops = self.transform(img)
+            # second element is a dummy target to keep the old (images, _) API
+            return crops, 0
+
     # ---------------------- Configs -----------------------
     DATA_PATH = ssl_data_path
 
@@ -147,9 +199,29 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
         local_crops_number=8
     )
 
-    # Dataset / loader
-    dataset = SSLImageDataset(DATA_PATH, transform=transform)
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=8, pin_memory=True)
+    # ---------------------- Dataset / loader -----------------------
+    # Here DATA_PATH is the *root* of your cleaned CellScanData tree,
+    # e.g. /work/.../CellScanData/Zoom10x - Quality Assessment_Cleaned
+
+    # Configure which samples to use for SSL:
+    SSL_FIRST_SAMPLE = 37
+    SSL_LAST_SAMPLE = 110
+
+    all_image_paths = collect_ssl_image_paths(
+        Path(DATA_PATH),
+        SSL_FIRST_SAMPLE,
+        SSL_LAST_SAMPLE,
+    )
+
+    dataset = SimpleSSLImageDataset(all_image_paths, transform=transform)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=8,
+        pin_memory=True,
+    )
+
 
     # EMA update
     def update_teacher(student_model, teacher_model, momentum):
@@ -203,16 +275,16 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
     image_folder = save_folder / "SSL"
     image_folder.mkdir(parents=True, exist_ok=True)
     output_json = image_folder / "SSLdata_filenames.json"
-    jpg_files = sorted([f.name for f in Path(ssl_data_path + "/images").glob("*")
-                        if f.is_file() and f.suffix.lower() in {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}])
+
+    # store relative paths from root for easier reading
+    root_path = Path(DATA_PATH)
+    rel_files = [p.relative_to(root_path).as_posix() for p in all_image_paths]
     with open(output_json, "w") as f:
-        json.dump(jpg_files, f, indent=2)
+        json.dump(rel_files, f, indent=2)
 
     if trackExperiment_QualityAssessment_SSL:
-        # to save the number of images used in this training we just count the number of labels/images
-        label_dir = Path(ssl_data_path) / "labels"
-        n_labels = len(list(label_dir.glob("*.txt")))  # number of label files
-        mlflow.log_param("number_of_images_used_in_training", str(n_labels))
+        mlflow.log_param("number_of_images_used_in_training", len(all_image_paths))
+
 
         # Log hyperparameters dynamically
         mlflow.log_param("batch_size", BATCH_SIZE)
