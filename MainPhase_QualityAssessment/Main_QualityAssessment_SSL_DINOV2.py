@@ -21,7 +21,6 @@ from tqdm import tqdm
 from Utils_MLFLOW import setup_mlflow_experiment
 import torch
 from torch.utils.data import DataLoader
-from dinov2.CustomDataset import SSLImageDataset
 from dinov2.loss.CustomDINO import CustomDINOLoss
 from dinov2.models.vision_transformer import vit_base, vit_small
 from dinov2.data import DataAugmentationDINO
@@ -225,13 +224,33 @@ def qualityAssessment_SSL_DINOV2(trackExperiment_QualityAssessment_SSL, ssl_data
     )
 
     dataset = SimpleSSLImageDataset(all_image_paths, transform=transform)
+
+    def ssl_collate(batch):
+        """
+        batch: list of (crops, label) pairs
+          - crops: list[Tensor] of length ncrops
+        Returns:
+          - images: list[ list[Tensor] ], len(images) == batch_size
+          - labels: Tensor of shape (batch_size,)
+        """
+        crops_list, labels = zip(*batch)  # tuples length B
+        return list(crops_list), torch.tensor(labels, dtype=torch.long)
+
     dataloader = DataLoader(
         dataset,
         batch_size=BATCH_SIZE,
         shuffle=True,
         num_workers=8,
         pin_memory=True,
+        collate_fn=ssl_collate,  # <- important
     )
+
+    first_images, _ = next(iter(dataloader))
+    print("[DEBUG] type(first_images):", type(first_images))
+    print("[DEBUG] len(first_images):", len(first_images))
+    print("[DEBUG] type(first_images[0]):", type(first_images[0]))
+    print("[DEBUG] len(first_images[0]):", len(first_images[0]))
+    print("[DEBUG] type(first_images[0][0]):", type(first_images[0][0]))
 
     print(f"[SSL] Loaded {len(all_image_paths)} images from samples {SSL_FIRST_SAMPLE}-{SSL_LAST_SAMPLE}")
 
