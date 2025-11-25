@@ -8,9 +8,12 @@ from lightly_train import train as lightly_train
 import json
 import numpy as np
 import cv2
+import concurrent.futures
 
 PATCH_SIZE = 224
 
+# How many CPU workers to use for crop generation
+NUM_PATCH_WORKERS = int(os.getenv("SSL_PATCH_WORKERS", "14"))
 
 # ─────────────────────────────────────────────
 # 1) Detect USER_BASE_DIR (AAU / SDU style)
@@ -66,6 +69,51 @@ if CALIB_STATS_JSON.exists():
 else:
     print("[SSL][WARN] No calib stats JSON found at", CALIB_STATS_JSON,
           "→ will NOT filter SSL patches.")
+
+def _process_image_for_crops(
+    img_path: Path,
+    crops_dir: Path,
+    patch_size: int,
+    stats: dict | None
+) -> tuple[int, int]:
+    """
+    Worker function:
+    - Opens one full-size image
+    - Generates all candidate 224×224 crops
+    - Filters them using supervised stats
+    - Saves accepted crops into crops_dir
+
+    Returns (kept_count, candidate_count).
+    """
+    from PIL import Image  # safe to import inside worker too
+
+    img = Image.open(img_path).convert("RGB")
+    w, h = img.size
+
+    xs = _compute_positions(w, patch_size, patch_size)
+    ys = _compute_positions(h, patch_size, patch_size)
+
+    stem = img_path.stem
+
+    kept = 0
+    cand = 0
+
+    for yi, y in enumerate(ys):
+        for xi, x in enumerate(xs):
+            box = (x, y, x + patch_size, y + patch_size)
+            patch = img.crop(box)
+            cand += 1
+
+            if not should_keep_patch(patch, stats):
+                continue
+
+            out_name = f"{stem}_y{yi:02d}_x{xi:02d}.png"
+            out_path = crops_dir / out_name
+            patch.save(out_path)
+            kept += 1
+
+    return kept, cand
+
 
 
 # ─────────────────────────────────────────────
@@ -128,10 +176,12 @@ def should_keep_patch(pil_img, stats: dict | None) -> bool:
 def ensure_ssl_crops_for_sample(sample_dir: Path, patch_size: int = PATCH_SIZE) -> Path:
     """
     Ensure we have a folder with 224×224 crops for this Sample.
-    If it doesn't exist (or is empty), create it from the full-size images.
+    If it doesn't exist (or is empty), create it from the full-size images
+    using parallel workers.
+
     Returns the path to the crops folder.
     """
-    sample_name = sample_dir.name               # e.g. "Sample 105"
+    sample_name = sample_dir.name  # e.g. "Sample 105"
     crops_dir = sample_dir / f"SSLCrops ({patch_size}x{patch_size}) for {sample_name}"
 
     # If crops already exist and contain images, reuse them
@@ -160,35 +210,44 @@ def ensure_ssl_crops_for_sample(sample_dir: Path, patch_size: int = PATCH_SIZE) 
     if not image_files:
         raise RuntimeError(f"No full-size images found in {sample_dir}")
 
-    crop_count = 0
-    cand_count = 0
+    # Parallel over images
+    total_kept = 0
+    total_cand = 0
 
-    for img_path in image_files:
-        img = Image.open(img_path).convert("RGB")
-        w, h = img.size
+    if NUM_PATCH_WORKERS <= 1 or len(image_files) == 1:
+        # fallback: single-process
+        for img_path in image_files:
+            kept, cand = _process_image_for_crops(
+                img_path,
+                crops_dir,
+                patch_size,
+                SUPERVISED_STATS,
+            )
+            total_kept += kept
+            total_cand += cand
+    else:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=NUM_PATCH_WORKERS) as ex:
+            futures = [
+                ex.submit(
+                    _process_image_for_crops,
+                    img_path,
+                    crops_dir,
+                    patch_size,
+                    SUPERVISED_STATS,
+                )
+                for img_path in image_files
+            ]
+            for fut in concurrent.futures.as_completed(futures):
+                kept, cand = fut.result()
+                total_kept += kept
+                total_cand += cand
 
-        xs = _compute_positions(w, patch_size, patch_size)
-        ys = _compute_positions(h, patch_size, patch_size)
-
-        stem = img_path.stem
-
-        for yi, y in enumerate(ys):
-            for xi, x in enumerate(xs):
-                box = (x, y, x + patch_size, y + patch_size)
-                patch = img.crop(box)
-                cand_count += 1
-
-                # NEW: filter based on supervised stats (if available)
-                if not should_keep_patch(patch, SUPERVISED_STATS):
-                    continue
-
-                out_name = f"{stem}_y{yi:02d}_x{xi:02d}.png"
-                out_path = crops_dir / out_name
-                patch.save(out_path)
-                crop_count += 1
-
-    print(f"[ensure_ssl_crops_for_sample] Saved {crop_count} / {cand_count} crops in {crops_dir}")
+    print(
+        f"[ensure_ssl_crops_for_sample] Saved {total_kept} / {total_cand} crops "
+        f"in {crops_dir} (workers={NUM_PATCH_WORKERS})"
+    )
     return crops_dir
+
 
 
 # ─────────────────────────────────────────────
