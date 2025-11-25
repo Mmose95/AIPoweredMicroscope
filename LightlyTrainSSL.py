@@ -38,6 +38,8 @@ def env_path(name: str, default: Path) -> Path:
     v = os.getenv(name, "").strip()
     return Path(v) if v else default
 
+REPO_ROOT = Path(__file__).resolve().parent
+
 
 # ─────────────────────────────────────────────
 # 2) Read SSL root + sample range from env
@@ -73,7 +75,7 @@ SUPERVISED_STATS = None  # filled by build_calibration_stats_if_needed()
 # Root where RFDETR supervised datasets live
 STAT_DATASETS_ROOT = env_path(
     "STAT_DATASETS_ROOT",
-    WORK_ROOT / "SOLO_Supervised_RFDETR" / "Stat_Dataset",
+    REPO_ROOT / "SOLO_Supervised_RFDETR" / "Stat_Dataset",
 )
 
 
