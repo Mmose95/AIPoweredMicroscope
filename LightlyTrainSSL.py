@@ -33,6 +33,12 @@ os.environ["USER_BASE_DIR"] = USER_BASE_DIR
 
 WORK_ROOT = Path("/work") / USER_BASE_DIR
 
+
+def env_path(name: str, default: Path) -> Path:
+    v = os.getenv(name, "").strip()
+    return Path(v) if v else default
+
+
 # ─────────────────────────────────────────────
 # 2) Read SSL root + sample range from env
 # ─────────────────────────────────────────────
@@ -56,64 +62,192 @@ print("SSL_TRAINING_ROOT:", SSL_TRAINING_ROOT)
 print(f"SSL sample range: {SSL_FIRST_SAMPLE}–{SSL_LAST_SAMPLE}")
 
 # ─────────────────────────────────────────────
-# 2b) Load supervised calibration stats (optional)
+# 2b) Calibration stats (epi + leu) from supervised datasets
 # ─────────────────────────────────────────────
 SSL_STATS_ROOT = WORK_ROOT / "SSL_Stats"
 CALIB_STATS_JSON = SSL_STATS_ROOT / "calib_patch_stats.json"
+SSL_STATS_ROOT.mkdir(parents=True, exist_ok=True)
 
-SUPERVISED_STATS = None
-if CALIB_STATS_JSON.exists():
-    SUPERVISED_STATS = json.loads(CALIB_STATS_JSON.read_text(encoding="utf-8"))
-    print("[SSL] Loaded supervised stats from:", CALIB_STATS_JSON)
-    print("[SSL] n_crops:", SUPERVISED_STATS.get("n_crops"))
-else:
-    print("[SSL][WARN] No calib stats JSON found at", CALIB_STATS_JSON,
-          "→ will NOT filter SSL patches.")
+SUPERVISED_STATS = None  # filled by build_calibration_stats_if_needed()
 
-def _process_image_for_crops(
-    img_path: Path,
-    crops_dir: Path,
-    patch_size: int,
-    stats: dict | None
-) -> tuple[int, int]:
+
+def _load_coco_split(dataset_dir: Path, split: str = "train"):
+    coco_path = dataset_dir / split / "_annotations.coco.json"
+    if not coco_path.exists():
+        raise FileNotFoundError(f"[CALIB] Missing COCO JSON: {coco_path}")
+    data = json.loads(coco_path.read_text(encoding="utf-8"))
+    images = {im["id"]: im for im in data.get("images", [])}
+    anns_by_img = {}
+    for ann in data.get("annotations", []):
+        img_id = ann["image_id"]
+        anns_by_img.setdefault(img_id, []).append(ann)
+    return images, anns_by_img
+
+
+def _resolve_coco_image_path(file_name: str, dataset_dir: Path) -> Path:
     """
-    Worker function:
-    - Opens one full-size image
-    - Generates all candidate 224×224 crops
-    - Filters them using supervised stats
-    - Saves accepted crops into crops_dir
-
-    Returns (kept_count, candidate_count).
+    Handle both:
+      - relative paths (e.g. 'Sample 37/patches/...png')
+      - absolute paths (if you've run RESOLVED datasets)
     """
-    from PIL import Image  # safe to import inside worker too
+    p = Path(file_name)
+    if p.is_absolute():
+        return p
+    train_root = dataset_dir / "train"
+    cand = train_root / file_name
+    if cand.exists():
+        return cand
+    if p.exists():
+        return p
+    raise FileNotFoundError(f"[CALIB] Could not resolve image path for: {file_name}")
 
-    img = Image.open(img_path).convert("RGB")
-    w, h = img.size
 
-    xs = _compute_positions(w, patch_size, patch_size)
-    ys = _compute_positions(h, patch_size, patch_size)
+def _clamp(v, lo, hi):
+    return max(lo, min(hi, v))
 
-    stem = img_path.stem
 
-    kept = 0
-    cand = 0
+def make_calib_crops_for_dataset(dataset_dir: Path, crops_dir: Path) -> list[Path]:
+    """
+    For each annotation in the train split of dataset_dir,
+    make one 224×224 crop centred on the bounding box.
+    """
+    print(f"[CALIB] Building calibration crops from {dataset_dir}")
+    images, anns_by_img = _load_coco_split(dataset_dir, split="train")
+    print(f"[CALIB]  Images: {len(images)}, anns: {sum(len(v) for v in anns_by_img.values())}")
 
-    for yi, y in enumerate(ys):
-        for xi, x in enumerate(xs):
-            box = (x, y, x + patch_size, y + patch_size)
+    crops_dir.mkdir(parents=True, exist_ok=True)
+
+    crop_paths: list[Path] = []
+
+    for img_id, im in images.items():
+        if img_id not in anns_by_img:
+            continue
+
+        file_name = im["file_name"]
+        try:
+            img_path = _resolve_coco_image_path(file_name, dataset_dir)
+        except FileNotFoundError as e:
+            print("[CALIB][WARN]", e)
+            continue
+
+        try:
+            img = Image.open(img_path).convert("RGB")
+        except Exception as e:
+            print("[CALIB][WARN] Failed to open", img_path, "error:", e)
+            continue
+
+        W, H = img.size
+        anns = anns_by_img[img_id]
+
+        for ann_idx, ann in enumerate(anns):
+            # COCO bbox is [x, y, w, h]
+            x, y, w, h = ann["bbox"]
+            cx = x + w / 2.0
+            cy = y + h / 2.0
+
+            half = PATCH_SIZE / 2.0
+            x0 = int(_clamp(cx - half, 0, W - PATCH_SIZE))
+            y0 = int(_clamp(cy - half, 0, H - PATCH_SIZE))
+            box = (x0, y0, x0 + PATCH_SIZE, y0 + PATCH_SIZE)
+
             patch = img.crop(box)
-            cand += 1
 
-            if not should_keep_patch(patch, stats):
-                continue
-
-            out_name = f"{stem}_y{yi:02d}_x{xi:02d}.png"
+            out_name = f"ds{dataset_dir.name}_img{img_id}_ann{ann_idx}.png"
             out_path = crops_dir / out_name
             patch.save(out_path)
-            kept += 1
+            crop_paths.append(out_path)
 
-    return kept, cand
+    print(f"[CALIB] Saved {len(crop_paths)} calibration crops to {crops_dir}")
+    return crop_paths
 
+
+def compute_stats_from_patch_paths(crop_paths: list[Path]) -> dict:
+    means, stds, laps = [], [], []
+
+    for p in crop_paths:
+        img = Image.open(p).convert("RGB")
+        arr = np.array(img)
+        gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+
+        means.append(float(gray.mean()))
+        stds.append(float(gray.std()))
+        lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        laps.append(lap_var)
+
+    def percentiles(vals, ps=(1, 5, 10, 50, 90, 95, 99)):
+        v = np.array(vals, dtype=np.float32)
+        return {f"p{p}": float(np.percentile(v, p)) for p in ps}
+
+    stats = {
+        "mean": percentiles(means),
+        "std": percentiles(stds),
+        "lap_var": percentiles(laps),
+        "n_crops": len(crop_paths),
+        "patch_size": PATCH_SIZE,
+    }
+    return stats
+
+
+def build_calibration_stats_if_needed():
+    """
+    If calib_patch_stats.json is missing, build it from BOTH
+    epithelial and leucocyte supervised datasets (if present),
+    using crops centred on annotated objects.
+    """
+    global SUPERVISED_STATS
+
+    if CALIB_STATS_JSON.exists():
+        SUPERVISED_STATS = json.loads(CALIB_STATS_JSON.read_text(encoding="utf-8"))
+        print("[SSL] Loaded supervised stats from:", CALIB_STATS_JSON)
+        print("[SSL] n_crops:", SUPERVISED_STATS.get("n_crops"))
+        return
+
+    print("[SSL CALIB] calib_patch_stats.json not found → building from supervised datasets")
+
+    # Defaults to your usual OVR datasets, but can be overridden with env vars
+    epi_dir = env_path(
+        "SUPERVISED_DATASET_DIR_EPI",
+        WORK_ROOT / "Stat_Dataset" / "QA-2025v1_SquamousEpithelialCell_OVR",
+    )
+    leu_dir = env_path(
+        "SUPERVISED_DATASET_DIR_LEU",
+        WORK_ROOT / "Stat_Dataset" / "QA-2025v1_Leucocyte_OVR",
+    )
+
+    dataset_dirs = [d for d in (epi_dir, leu_dir) if d.is_dir()]
+    if not dataset_dirs:
+        print("[SSL CALIB][WARN] No supervised datasets found (epi/leu). "
+              "Skipping calibration → no filtering will be applied.")
+        SUPERVISED_STATS = None
+        return
+
+    all_crops: list[Path] = []
+
+    for ds in dataset_dirs:
+        tag = ds.name
+        crops_dir = SSL_STATS_ROOT / f"CalibCrops_224_{tag}"
+        existing = list(crops_dir.glob("*.png"))
+        if existing:
+            print(f"[CALIB] Reusing {len(existing)} crops in {crops_dir}")
+            crop_paths = existing
+        else:
+            crop_paths = make_calib_crops_for_dataset(ds, crops_dir)
+        all_crops.extend(crop_paths)
+
+    if not all_crops:
+        print("[SSL CALIB][WARN] No calibration crops produced; skipping filtering.")
+        SUPERVISED_STATS = None
+        return
+
+    stats = compute_stats_from_patch_paths(all_crops)
+    CALIB_STATS_JSON.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+    SUPERVISED_STATS = stats
+    print("[SSL CALIB] Saved stats JSON →", CALIB_STATS_JSON)
+    print(json.dumps(stats, indent=2))
+
+
+# build / load stats on import
+build_calibration_stats_if_needed()
 
 
 # ─────────────────────────────────────────────
@@ -171,6 +305,51 @@ def should_keep_patch(pil_img, stats: dict | None) -> bool:
         return False
 
     return True
+
+
+def _process_image_for_crops(
+    img_path: Path,
+    crops_dir: Path,
+    patch_size: int,
+    stats: dict | None,
+) -> tuple[int, int]:
+    """
+    Worker function:
+    - Opens one full-size image
+    - Generates all candidate 224×224 crops
+    - Filters them using supervised stats
+    - Saves accepted crops into crops_dir
+
+    Returns (kept_count, candidate_count).
+    """
+    from PIL import Image as _Image  # safe to import inside worker too
+
+    img = _Image.open(img_path).convert("RGB")
+    w, h = img.size
+
+    xs = _compute_positions(w, patch_size, patch_size)
+    ys = _compute_positions(h, patch_size, patch_size)
+
+    stem = img_path.stem
+
+    kept = 0
+    cand = 0
+
+    for yi, y in enumerate(ys):
+        for xi, x in enumerate(xs):
+            box = (x, y, x + patch_size, y + patch_size)
+            patch = img.crop(box)
+            cand += 1
+
+            if not should_keep_patch(patch, stats):
+                continue
+
+            out_name = f"{stem}_y{yi:02d}_x{xi:02d}.png"
+            out_path = crops_dir / out_name
+            patch.save(out_path)
+            kept += 1
+
+    return kept, cand
 
 
 def ensure_ssl_crops_for_sample(sample_dir: Path, patch_size: int = PATCH_SIZE) -> Path:
@@ -247,7 +426,6 @@ def ensure_ssl_crops_for_sample(sample_dir: Path, patch_size: int = PATCH_SIZE) 
         f"in {crops_dir} (workers={NUM_PATCH_WORKERS})"
     )
     return crops_dir
-
 
 
 # ─────────────────────────────────────────────
