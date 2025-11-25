@@ -2,18 +2,24 @@
 import os, glob, os.path as op, shutil
 from pathlib import Path
 
-from PIL import Image
 from lightly_train import train as lightly_train
 
+from PIL import Image
 import json
 import numpy as np
 import cv2
 import concurrent.futures
+import re
+from collections import defaultdict
 
 PATCH_SIZE = 224
 
-# How many CPU workers to use for crop generation (can override via env)
+# How many CPU workers to use for crop generation
 NUM_PATCH_WORKERS = int(os.getenv("SSL_PATCH_WORKERS", "14"))
+
+# For resolving image paths from COCO JSONs
+VALID_EXTS = {".tif", ".tiff", ".png", ".jpg", ".jpeg"}
+WINDOWS_PATH_RE = re.compile(r"^[a-zA-Z]:\\")
 
 # ─────────────────────────────────────────────
 # 1) Detect USER_BASE_DIR (AAU / SDU style)
@@ -32,13 +38,12 @@ if not USER_BASE_DIR:
 os.environ["USER_BASE_DIR"] = USER_BASE_DIR
 
 WORK_ROOT = Path("/work") / USER_BASE_DIR
+REPO_ROOT = Path(__file__).resolve().parent  # e.g. /work/projects/myproj
 
 
 def env_path(name: str, default: Path) -> Path:
     v = os.getenv(name, "").strip()
     return Path(v) if v else default
-
-REPO_ROOT = Path(__file__).resolve().parent
 
 
 # ─────────────────────────────────────────────
@@ -63,6 +68,12 @@ print("USER_BASE_DIR:", USER_BASE_DIR)
 print("SSL_TRAINING_ROOT:", SSL_TRAINING_ROOT)
 print(f"SSL sample range: {SSL_FIRST_SAMPLE}–{SSL_LAST_SAMPLE}")
 
+# This is where the real microscopy images live on UCloud
+IMAGES_FALLBACK_ROOT = env_path(
+    "IMAGES_FALLBACK_ROOT",
+    SSL_TRAINING_ROOT,
+)
+
 # ─────────────────────────────────────────────
 # 2b) Calibration stats (epi + leu) from supervised datasets
 # ─────────────────────────────────────────────
@@ -78,6 +89,65 @@ STAT_DATASETS_ROOT = env_path(
     REPO_ROOT / "SOLO_Supervised_RFDETR" / "Stat_Dataset",
 )
 
+# ---------- helpers for resolving image paths ----------
+
+def _index_image_paths(root: Path):
+    """Index all images under root for fast lookup by relative path and basename."""
+    root = root.resolve()
+    by_rel = {}
+    by_name = defaultdict(list)
+    for p in root.rglob("*"):
+        if p.is_file() and p.suffix.lower() in VALID_EXTS:
+            rel = p.resolve().relative_to(root).as_posix()
+            by_rel[rel] = p
+            by_name[p.name].append(p)
+    return by_rel, by_name
+
+
+def _resolve_image_path(file_name: str,
+                        images_root: Path,
+                        by_rel: dict,
+                        by_name: dict) -> Path:
+    """
+    Resolve a COCO file_name to an actual image file on the mounted drive.
+    Handles cases like:
+      - 'Sample 24/Patches for Sample 24/...tif'
+      - old Windows-style absolute paths
+    """
+    # normalize slashes
+    rel = file_name.replace("\\", "/")
+
+    # direct under images_root
+    direct = images_root / rel
+    if direct.exists():
+        return direct
+
+    # lookup by relative key
+    if rel in by_rel:
+        return by_rel[rel]
+
+    # fallback: by basename
+    base = Path(rel).name
+    if base in by_name:
+        cands = by_name[base]
+        if len(cands) == 1:
+            return cands[0]
+        # if multiple, pick shortest path
+        cands.sort(key=lambda q: len(str(q)))
+        return cands[0]
+
+    # Windows absolute paths in JSON → keep basename only
+    if WINDOWS_PATH_RE.match(file_name):
+        if base in by_name:
+            cands = by_name[base]
+            cands.sort(key=lambda q: len(str(q)))
+            return cands[0]
+
+    raise FileNotFoundError(
+        f"[CALIB] Could not resolve image '{file_name}' under {images_root}"
+    )
+
+# ---------- COCO + calibration crop building ----------
 
 def _load_coco_split(dataset_dir: Path, split: str = "train"):
     coco_path = dataset_dir / split / "_annotations.coco.json"
@@ -92,29 +162,17 @@ def _load_coco_split(dataset_dir: Path, split: str = "train"):
     return images, anns_by_img
 
 
-def _resolve_coco_image_path(file_name: str, dataset_dir: Path) -> Path:
-    """
-    Handle both:
-      - relative paths (e.g. 'Sample 37/patches/...png')
-      - absolute paths (if you've run RESOLVED datasets)
-    """
-    p = Path(file_name)
-    if p.is_absolute():
-        return p
-    train_root = dataset_dir / "train"
-    cand = train_root / file_name
-    if cand.exists():
-        return cand
-    if p.exists():
-        return p
-    raise FileNotFoundError(f"[CALIB] Could not resolve image path for: {file_name}")
-
-
 def _clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
 
-def make_calib_crops_for_dataset(dataset_dir: Path, crops_dir: Path) -> list[Path]:
+def make_calib_crops_for_dataset(
+    dataset_dir: Path,
+    crops_dir: Path,
+    images_root: Path,
+    by_rel: dict,
+    by_name: dict,
+) -> list[Path]:
     """
     For each annotation in the train split of dataset_dir,
     make one 224×224 crop centred on the bounding box.
@@ -133,7 +191,7 @@ def make_calib_crops_for_dataset(dataset_dir: Path, crops_dir: Path) -> list[Pat
 
         file_name = im["file_name"]
         try:
-            img_path = _resolve_coco_image_path(file_name, dataset_dir)
+            img_path = _resolve_image_path(file_name, images_root, by_rel, by_name)
         except FileNotFoundError as e:
             print("[CALIB][WARN]", e)
             continue
@@ -207,7 +265,7 @@ def _autofind_dataset(root: Path, token: str) -> Path:
     cands = sorted(p for p in root.glob(f"*{token}*") if p.is_dir())
     if not cands:
         raise FileNotFoundError(f"[CALIB] No dataset dirs matching '{token}' under {root}")
-    return cands[-1]  # last one = newest by name
+    return cands[-1]  # newest by name
 
 
 def build_calibration_stats_if_needed():
@@ -226,7 +284,7 @@ def build_calibration_stats_if_needed():
 
     print("[SSL CALIB] calib_patch_stats.json not found → building from supervised datasets")
 
-    # 1) allow explicit override via env vars
+    # allow explicit override via env vars
     epi_env = os.getenv("SUPERVISED_DATASET_DIR_EPI", "").strip()
     leu_env = os.getenv("SUPERVISED_DATASET_DIR_LEU", "").strip()
 
@@ -256,6 +314,14 @@ def build_calibration_stats_if_needed():
         SUPERVISED_STATS = None
         return
 
+    # Build a global index over the real microscopy images
+    if not IMAGES_FALLBACK_ROOT.exists():
+        print("[SSL CALIB][WARN] IMAGES_FALLBACK_ROOT does not exist:", IMAGES_FALLBACK_ROOT)
+        SUPERVISED_STATS = None
+        return
+
+    by_rel, by_name = _index_image_paths(IMAGES_FALLBACK_ROOT)
+
     all_crops: list[Path] = []
 
     for ds in dataset_dirs:
@@ -266,7 +332,13 @@ def build_calibration_stats_if_needed():
             print(f"[CALIB] Reusing {len(existing)} crops in {crops_dir}")
             crop_paths = existing
         else:
-            crop_paths = make_calib_crops_for_dataset(ds, crops_dir)
+            crop_paths = make_calib_crops_for_dataset(
+                ds,
+                crops_dir,
+                IMAGES_FALLBACK_ROOT,
+                by_rel,
+                by_name,
+            )
         all_crops.extend(crop_paths)
 
     if not all_crops:
@@ -287,6 +359,7 @@ build_calibration_stats_if_needed()
 # ─────────────────────────────────────────────
 # 3) Helpers to generate 224×224 crops per sample
 # ─────────────────────────────────────────────
+
 def _compute_positions(length: int, patch: int, stride: int):
     """Return sorted start positions so we cover whole axis with last patch anchored at end."""
     positions = []
