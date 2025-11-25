@@ -546,12 +546,18 @@ def build_ssl_selection_dataset(
     """
     For each 'Sample XX' in [first_sample, last_sample]:
       - ensure we have 224×224 crops in 'SSLCrops (224x224) for Sample XX'
-      - then symlink/copy them into a flat temp dir used as Lightly 'data' root
+      - then symlink/copy them into a flat temp dir used as Lightly 'data' root.
+
+    If the temp dir already exists, we simply reuse it to avoid
+    expensive deletion/rebuild on UCloud.
     """
     tmp_root = ssl_root.parent / "SSL_LightlySelection_224crops"
+
     if tmp_root.exists():
-        print(f"[build_ssl_selection_dataset] Removing old temp dir: {tmp_root}")
-        shutil.rmtree(tmp_root)
+        print(f"[build_ssl_selection_dataset] Reusing existing temp dir: {tmp_root}")
+        return tmp_root
+
+    print(f"[build_ssl_selection_dataset] Creating new temp dir: {tmp_root}")
     tmp_root.mkdir(parents=True, exist_ok=True)
 
     exts = {".png", ".jpg", ".jpeg"}
@@ -590,6 +596,7 @@ def build_ssl_selection_dataset(
     return tmp_root
 
 
+
 # ─────────────────────────────────────────────
 # 5) Main: run Lightly DINOv2 SSL on the crops
 # ─────────────────────────────────────────────
@@ -604,81 +611,35 @@ if __name__ == "__main__":
     lightly_train(
         out="outputLightly",
         data=str(data_dir),
-        model="dinov2_vit/vitb14",  # DINOv2 ViT-B/14
+        model="dinov2/vitb14",   # Lightly's canonical name
         method="dinov2",
 
-        # ── Multi-GPU & performance ───────────────────────────────────
         accelerator="gpu",
-        devices="auto",  # use all visible GPUs (e.g. 8 on your node)
+        devices="auto",              # use all visible GPUs
         strategy="ddp_find_unused_parameters_false",
 
-        precision="bf16-mixed",  # fast + memory efficient on A100/V100 etc.
-        batch_size=32,  # per GPU → 32 * num_gpus effective batch
-        num_workers=8,  # dataloader workers per process
+        precision="bf16-mixed",
+        batch_size=32,               # per GPU
+        num_workers=8,
         loader_args=dict(
             persistent_workers=True,
             pin_memory=True,
             prefetch_factor=2,
         ),
 
-        # ── DINOv2 multi-crop config ─────────────────────────────────
-        transform_args=dict(
-            # Global crops base size
-            image_size=[PATCH_SIZE, PATCH_SIZE],  # 224×224
-
-            # Explicit global crops (2 views of full 224×224)
-            global_view=dict(
-                num_views=2,
-                view_size=[PATCH_SIZE, PATCH_SIZE],
-                random_resize=dict(
-                    min_scale=0.25,  # standard-ish for global crops
-                    max_scale=1.0,
-                ),
-                gaussian_blur=dict(
-                    prob=0.5,
-                    blur_limit=0,
-                    sigmas=[0.1, 2.0],
-                ),
-            ),
-
-            # Local crops (focus on smaller regions for fine detail)
-            local_view=dict(
-                num_views=6,  # 6 local views per image
-                view_size=[96, 96],
-                random_resize=dict(
-                    min_scale=0.05,
-                    max_scale=0.5,
-                ),
-                gaussian_blur=dict(
-                    prob=0.5,
-                    blur_limit=0,
-                    sigmas=[0.1, 2.0],
-                ),
-            ),
-        ),
-
-        # ── Trainer / checkpoint settings ─────────────────────────────
+        # Save an extra checkpoint every 5 epochs (on top of Lightly's own best/last)
         trainer_args=dict(
-            max_epochs=100,  # SSL run length
-            log_every_n_steps=50,
-            num_sanity_val_steps=0,  # no need for sanity val in SSL
-
-            # if you ever need grad accum, set accumulate_grad_batches>1
-            accumulate_grad_batches=1,
-
             callbacks=[
-                # Save a checkpoint every 10 epochs
                 dict(
                     class_path="pytorch_lightning.callbacks.ModelCheckpoint",
                     init_args=dict(
-                        save_top_k=-1,  # save ALL checkpoints
-                        every_n_epochs=5,  # epoch_010, 020, ...
-                        dirpath="outputLightly/checkpoints",
+                        dirpath="outputLightly/checkpoints_by_epoch",
                         filename="epoch_{epoch:03d}",
+                        save_top_k=-1,          # save ALL epochs that match the trigger
+                        every_n_epochs=5,
                         save_weights_only=True,
                     ),
                 ),
-                # (Optional) log LR curve etc.
                 dict(
                     class_path="pytorch_lightning.callbacks.LearningRateMonitor",
                     init_args=dict(
@@ -686,7 +647,14 @@ if __name__ == "__main__":
                     ),
                 ),
             ],
+            # optional: let Lightly keep auto-epochs; we don't override max_epochs here
+            # If you ever want a fixed length, add: max_epochs=100
         ),
+
+        # Let Lightly pick sensible default DINOv2 transforms
+        transform_args=None,
     )
+
+
 
 
