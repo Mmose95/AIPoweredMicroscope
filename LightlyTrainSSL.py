@@ -597,11 +597,12 @@ def build_ssl_selection_dataset(
 
 
 
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 # ─────────────────────────────────────────────
 # 5) Main: run Lightly DINOv2 SSL on the crops
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
-    # Build patch-only selection for the chosen sample range
+    # Build patch-only selection dataset
     data_dir = build_ssl_selection_dataset(
         SSL_TRAINING_ROOT,
         SSL_FIRST_SAMPLE,
@@ -609,17 +610,18 @@ if __name__ == "__main__":
     )
 
     lightly_train(
+        overwrite =True,
         out="outputLightly",
         data=str(data_dir),
-        model="dinov2/vitb14",   # Lightly's canonical name
+        model="dinov2/vitb14",
         method="dinov2",
 
         accelerator="gpu",
-        devices="auto",              # use all visible GPUs
+        devices="auto",
         strategy="ddp_find_unused_parameters_false",
 
         precision="bf16-mixed",
-        batch_size=32,               # per GPU
+        batch_size=32,
         num_workers=8,
         loader_args=dict(
             persistent_workers=True,
@@ -627,33 +629,26 @@ if __name__ == "__main__":
             prefetch_factor=2,
         ),
 
-        # Save an extra checkpoint every 5 epochs (on top of Lightly's own best/last)
-        trainer_args=dict(
-            callbacks=[
-                dict(
-                    class_path="pytorch_lightning.callbacks.ModelCheckpoint",
-                    init_args=dict(
-                        dirpath="outputLightly/checkpoints_by_epoch",
-                        filename="epoch_{epoch:03d}",
-                        save_top_k=-1,          # save ALL epochs that match the trigger
-                        every_n_epochs=5,
-                        save_weights_only=True,
-                    ),
-                ),
-                dict(
-                    class_path="pytorch_lightning.callbacks.LearningRateMonitor",
-                    init_args=dict(
-                        logging_interval="epoch",
-                    ),
-                ),
-            ],
-            # optional: let Lightly keep auto-epochs; we don't override max_epochs here
-            # If you ever want a fixed length, add: max_epochs=100
+        # ⭐️ ONLY save every 5 epochs, nothing else ⭐️
+        callbacks=dict(
+            model_checkpoint=dict(
+                filename="epoch_{epoch:03d}",
+                every_n_epochs=5,
+                save_top_k=-1,
+                save_weights_only=True,
+            ),
         ),
 
-        # Let Lightly pick sensible default DINOv2 transforms
+        trainer_args=dict(
+            max_epochs=100,
+        ),
+
+        # Use default DINOv2 transforms
         transform_args=None,
     )
+
+
+
 
 
 
