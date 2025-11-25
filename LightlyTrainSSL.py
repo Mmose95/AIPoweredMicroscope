@@ -5,6 +5,10 @@ from pathlib import Path
 from PIL import Image
 from lightly_train import train as lightly_train
 
+import json
+import numpy as np
+import cv2
+
 PATCH_SIZE = 224
 
 
@@ -48,6 +52,21 @@ print("USER_BASE_DIR:", USER_BASE_DIR)
 print("SSL_TRAINING_ROOT:", SSL_TRAINING_ROOT)
 print(f"SSL sample range: {SSL_FIRST_SAMPLE}–{SSL_LAST_SAMPLE}")
 
+# ─────────────────────────────────────────────
+# 2b) Load supervised calibration stats (optional)
+# ─────────────────────────────────────────────
+SSL_STATS_ROOT = WORK_ROOT / "SSL_Stats"
+CALIB_STATS_JSON = SSL_STATS_ROOT / "calib_patch_stats.json"
+
+SUPERVISED_STATS = None
+if CALIB_STATS_JSON.exists():
+    SUPERVISED_STATS = json.loads(CALIB_STATS_JSON.read_text(encoding="utf-8"))
+    print("[SSL] Loaded supervised stats from:", CALIB_STATS_JSON)
+    print("[SSL] n_crops:", SUPERVISED_STATS.get("n_crops"))
+else:
+    print("[SSL][WARN] No calib stats JSON found at", CALIB_STATS_JSON,
+          "→ will NOT filter SSL patches.")
+
 
 # ─────────────────────────────────────────────
 # 3) Helpers to generate 224×224 crops per sample
@@ -63,6 +82,47 @@ def _compute_positions(length: int, patch: int, stride: int):
     if last >= 0 and (not positions or positions[-1] != last):
         positions.append(last)
     return sorted(set(positions))
+
+
+def compute_patch_stats_from_pil(pil_img):
+    """Compute mean, std, and Laplacian variance on a 224×224 PIL patch."""
+    arr = np.array(pil_img.convert("RGB"))
+    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+    mean = float(gray.mean())
+    std = float(gray.std())
+    lap = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    return mean, std, lap
+
+
+def should_keep_patch(pil_img, stats: dict | None) -> bool:
+    """
+    Decide whether to keep a patch based on supervised 224×224 stats.
+    If stats is None → keep everything.
+    """
+    if stats is None:
+        return True
+
+    mean, std, lap = compute_patch_stats_from_pil(pil_img)
+
+    m_p1 = stats["mean"]["p1"]
+    m_p99 = stats["mean"]["p99"]
+    s_p10 = stats["std"]["p10"]
+    l_p10 = stats["lap_var"]["p10"]
+
+    # Slack margins so we don't over-filter
+    mean_margin = 5.0
+
+    # Filter extreme dark/bright patches
+    if not (m_p1 - mean_margin <= mean <= m_p99 + mean_margin):
+        return False
+
+    # Require at least some texture & focus, but not too strict
+    if std < 0.6 * s_p10:
+        return False
+    if lap < 0.6 * l_p10:
+        return False
+
+    return True
 
 
 def ensure_ssl_crops_for_sample(sample_dir: Path, patch_size: int = PATCH_SIZE) -> Path:
@@ -101,6 +161,7 @@ def ensure_ssl_crops_for_sample(sample_dir: Path, patch_size: int = PATCH_SIZE) 
         raise RuntimeError(f"No full-size images found in {sample_dir}")
 
     crop_count = 0
+    cand_count = 0
 
     for img_path in image_files:
         img = Image.open(img_path).convert("RGB")
@@ -115,12 +176,18 @@ def ensure_ssl_crops_for_sample(sample_dir: Path, patch_size: int = PATCH_SIZE) 
             for xi, x in enumerate(xs):
                 box = (x, y, x + patch_size, y + patch_size)
                 patch = img.crop(box)
+                cand_count += 1
+
+                # NEW: filter based on supervised stats (if available)
+                if not should_keep_patch(patch, SUPERVISED_STATS):
+                    continue
+
                 out_name = f"{stem}_y{yi:02d}_x{xi:02d}.png"
                 out_path = crops_dir / out_name
                 patch.save(out_path)
                 crop_count += 1
 
-    print(f"[ensure_ssl_crops_for_sample] Saved {crop_count} crops in {crops_dir}")
+    print(f"[ensure_ssl_crops_for_sample] Saved {crop_count} / {cand_count} crops in {crops_dir}")
     return crops_dir
 
 
