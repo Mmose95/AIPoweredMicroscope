@@ -604,27 +604,51 @@ if __name__ == "__main__":
     lightly_train(
         out="outputLightly",
         data=str(data_dir),
-        model="dinov2_vit/vitb14",   # you can change to dinov2_vit/vits14 if needed
+        model="dinov2_vit/vitb14",  # DINOv2 ViT-B/14
         method="dinov2",
 
+        # ── Multi-GPU & performance ───────────────────────────────────
         accelerator="gpu",
-        devices="auto",              # let Lightning pick available GPUs
+        devices="auto",  # use all visible GPUs (e.g. 8 on your node)
         strategy="ddp_find_unused_parameters_false",
 
-        precision="bf16-mixed",
-        batch_size=32,               # per GPU
-        num_workers=6,
+        precision="bf16-mixed",  # fast + memory efficient on A100/V100 etc.
+        batch_size=32,  # per GPU → 32 * num_gpus effective batch
+        num_workers=8,  # dataloader workers per process
         loader_args=dict(
             persistent_workers=True,
             pin_memory=True,
             prefetch_factor=2,
         ),
+
+        # ── DINOv2 multi-crop config ─────────────────────────────────
         transform_args=dict(
-            image_size=[PATCH_SIZE, PATCH_SIZE],  # 224×224 crops
-            local_view=dict(
+            # Global crops base size
+            image_size=[PATCH_SIZE, PATCH_SIZE],  # 224×224
+
+            # Explicit global crops (2 views of full 224×224)
+            global_view=dict(
                 num_views=2,
-                view_size=[98, 98],
-                random_resize=dict(min_scale=0.05, max_scale=0.32),
+                view_size=[PATCH_SIZE, PATCH_SIZE],
+                random_resize=dict(
+                    min_scale=0.25,  # standard-ish for global crops
+                    max_scale=1.0,
+                ),
+                gaussian_blur=dict(
+                    prob=0.5,
+                    blur_limit=0,
+                    sigmas=[0.1, 2.0],
+                ),
+            ),
+
+            # Local crops (focus on smaller regions for fine detail)
+            local_view=dict(
+                num_views=6,  # 6 local views per image
+                view_size=[96, 96],
+                random_resize=dict(
+                    min_scale=0.05,
+                    max_scale=0.5,
+                ),
                 gaussian_blur=dict(
                     prob=0.5,
                     blur_limit=0,
@@ -632,4 +656,37 @@ if __name__ == "__main__":
                 ),
             ),
         ),
+
+        # ── Trainer / checkpoint settings ─────────────────────────────
+        trainer_args=dict(
+            max_epochs=100,  # SSL run length
+            log_every_n_steps=50,
+            num_sanity_val_steps=0,  # no need for sanity val in SSL
+
+            # if you ever need grad accum, set accumulate_grad_batches>1
+            accumulate_grad_batches=1,
+
+            callbacks=[
+                # Save a checkpoint every 10 epochs
+                dict(
+                    class_path="pytorch_lightning.callbacks.ModelCheckpoint",
+                    init_args=dict(
+                        save_top_k=-1,  # save ALL checkpoints
+                        every_n_epochs=5,  # epoch_010, 020, ...
+                        dirpath="outputLightly/checkpoints",
+                        filename="epoch_{epoch:03d}",
+                        save_weights_only=True,
+                    ),
+                ),
+                # (Optional) log LR curve etc.
+                dict(
+                    class_path="pytorch_lightning.callbacks.LearningRateMonitor",
+                    init_args=dict(
+                        logging_interval="epoch",
+                    ),
+                ),
+            ],
+        ),
     )
+
+
