@@ -12,7 +12,7 @@ import concurrent.futures
 
 PATCH_SIZE = 224
 
-# How many CPU workers to use for crop generation
+# How many CPU workers to use for crop generation (can override via env)
 NUM_PATCH_WORKERS = int(os.getenv("SSL_PATCH_WORKERS", "14"))
 
 # ─────────────────────────────────────────────
@@ -69,6 +69,12 @@ CALIB_STATS_JSON = SSL_STATS_ROOT / "calib_patch_stats.json"
 SSL_STATS_ROOT.mkdir(parents=True, exist_ok=True)
 
 SUPERVISED_STATS = None  # filled by build_calibration_stats_if_needed()
+
+# Root where RFDETR supervised datasets live
+STAT_DATASETS_ROOT = env_path(
+    "STAT_DATASETS_ROOT",
+    WORK_ROOT / "SOLO_Supervised_RFDETR" / "Stat_Dataset",
+)
 
 
 def _load_coco_split(dataset_dir: Path, split: str = "train"):
@@ -188,6 +194,20 @@ def compute_stats_from_patch_paths(crop_paths: list[Path]) -> dict:
     return stats
 
 
+def _autofind_dataset(root: Path, token: str) -> Path:
+    """
+    Find the *latest* directory under `root` whose name contains `token`.
+    E.g. token='Leucocyte_OVR' will match:
+      QA-2025v1_Leucocyte_OVR_20251122-145858
+    """
+    if not root.is_dir():
+        raise FileNotFoundError(f"[CALIB] STAT_DATASETS_ROOT does not exist: {root}")
+    cands = sorted(p for p in root.glob(f"*{token}*") if p.is_dir())
+    if not cands:
+        raise FileNotFoundError(f"[CALIB] No dataset dirs matching '{token}' under {root}")
+    return cands[-1]  # last one = newest by name
+
+
 def build_calibration_stats_if_needed():
     """
     If calib_patch_stats.json is missing, build it from BOTH
@@ -204,17 +224,30 @@ def build_calibration_stats_if_needed():
 
     print("[SSL CALIB] calib_patch_stats.json not found → building from supervised datasets")
 
-    # Defaults to your usual OVR datasets, but can be overridden with env vars
-    epi_dir = env_path(
-        "SUPERVISED_DATASET_DIR_EPI",
-        WORK_ROOT / "Stat_Dataset" / "QA-2025v1_SquamousEpithelialCell_OVR",
-    )
-    leu_dir = env_path(
-        "SUPERVISED_DATASET_DIR_LEU",
-        WORK_ROOT / "Stat_Dataset" / "QA-2025v1_Leucocyte_OVR",
-    )
+    # 1) allow explicit override via env vars
+    epi_env = os.getenv("SUPERVISED_DATASET_DIR_EPI", "").strip()
+    leu_env = os.getenv("SUPERVISED_DATASET_DIR_LEU", "").strip()
 
-    dataset_dirs = [d for d in (epi_dir, leu_dir) if d.is_dir()]
+    if epi_env:
+        epi_dir = Path(epi_env)
+    else:
+        try:
+            epi_dir = _autofind_dataset(STAT_DATASETS_ROOT, "SquamousEpithelialCell_OVR")
+        except FileNotFoundError as e:
+            print("[SSL CALIB][WARN]", e)
+            epi_dir = None
+
+    if leu_env:
+        leu_dir = Path(leu_env)
+    else:
+        try:
+            leu_dir = _autofind_dataset(STAT_DATASETS_ROOT, "Leucocyte_OVR")
+        except FileNotFoundError as e:
+            print("[SSL CALIB][WARN]", e)
+            leu_dir = None
+
+    dataset_dirs = [d for d in (epi_dir, leu_dir) if d is not None and d.is_dir()]
+
     if not dataset_dirs:
         print("[SSL CALIB][WARN] No supervised datasets found (epi/leu). "
               "Skipping calibration → no filtering will be applied.")
@@ -248,7 +281,6 @@ def build_calibration_stats_if_needed():
 
 # build / load stats on import
 build_calibration_stats_if_needed()
-
 
 # ─────────────────────────────────────────────
 # 3) Helpers to generate 224×224 crops per sample
