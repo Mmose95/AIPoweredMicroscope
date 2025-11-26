@@ -556,7 +556,7 @@ SEARCH_EPI = {
     "GAUSS_BLUR":      [0.20],
 
     # fixed best SSL backbone
-    "ENCODER_CKPT":    [BEST_SSL_CKPT],
+    #"ENCODER_CKPT":    [BEST_SSL_CKPT],
 
     # NEW: how much of the *train* split to use
     "TRAIN_FRACTION":  [0.25, 0.50, 0.75, 1.00],
