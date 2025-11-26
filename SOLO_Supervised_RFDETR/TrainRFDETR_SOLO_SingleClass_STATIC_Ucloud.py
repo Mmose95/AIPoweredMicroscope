@@ -11,7 +11,7 @@ import os, json, glob, os.path as op, itertools, time, csv, multiprocessing as m
 # "epi"  -> only Squamous Epithelial Cell
 # "all"  -> both
 
-HPO_TARGET = "all"   # DETERMINES WHAT TO RUN IN THE HPO!
+HPO_TARGET = "epi"   # DETERMINES WHAT TO RUN IN THE HPO!
 
 # ───────────────────────────────────────────────────────────────────────────────
 # UCloud-friendly path detection
