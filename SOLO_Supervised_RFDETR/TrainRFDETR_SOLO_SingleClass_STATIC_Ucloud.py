@@ -30,7 +30,28 @@ WORK_ROOT = Path("/work") / USER_BASE_DIR if USER_BASE_DIR else Path.cwd()
 def env_path(name: str, default: Path) -> Path:
     v = os.getenv(name, "").strip()
     return Path(v) if v else default
+
+# ───────────────────────────────────────────────────────────────────────────────
+# SSL backbones to probe (encoder checkpoints)
+SSL_CKPT_ROOT = env_path(
+    "SSL_CKPT_ROOT",
+    WORK_ROOT / "SSL_Checkpoints",
+)
+
+SSL_BACKBONES = [
+    SSL_CKPT_ROOT / "epoch_epoch-004.ckpt",
+    SSL_CKPT_ROOT / "epoch_epoch-009.ckpt",
+    SSL_CKPT_ROOT / "epoch_epoch-014.ckpt",
+    SSL_CKPT_ROOT / "last.ckpt",
+]
+
+print("[SSL BACKBONES]")
+for p in SSL_BACKBONES:
+    print("  ", p)
+
 # ───────────────────────────────────────────────
+
+
 
 import re
 from collections import defaultdict
@@ -261,7 +282,8 @@ def train_one_run(target_name: str,
                   rot_deg: float,
                   color_jitter: float,
                   gauss_blur_prob: float,
-                  aug_copies: int,          # kept only for logging; ignored
+                  aug_copies: int,
+                  backbone_ckpt: str | None = None,   # <-- NEW
                   seed: int = 42,
                   num_workers: int = 8,
                   pin_memory: bool = True,
@@ -302,8 +324,9 @@ def train_one_run(target_name: str,
         run_test=True,
     )
 
+
     def maybe(name, value):
-        if name in can:
+        if name in can and value is not None:
             kwargs[name] = value
 
     # ---- augmentations: copy local setup ---- not used in rfdetr
@@ -322,6 +345,11 @@ def train_one_run(target_name: str,
     maybe("hue", 0.02)
 
     maybe("gaussian_blur_prob", gauss_blur_prob)  # 0.2'''
+
+    # Backbone / encoder checkpoint from SSL
+    # Try both possible argument names to be safe
+    maybe("encoder_name", backbone_ckpt)
+    maybe("pretrained_backbone", backbone_ckpt)
 
     # resizing behaviour: these are used in rfdetr so we need to keep them
     maybe("square_resize_div_64", True)
@@ -442,26 +470,31 @@ SEARCH_LEUCO = {
     "GAUSS_BLUR":      [0.20],
 }'''
 
-#full search
 SEARCH_EPI = {
-    # Model & input
+    # Model & input (fixed from best HPO run)
     "MODEL_CLS":       ["RFDETRLarge"],
-    "RESOLUTION":      [672],          # or 672 if you want, both are fine here
+    "RESOLUTION":      [672],
     "EPOCHS":          [80],
-    # Optimizer / schedule
-    "LR":              [5e-5, 1e-4, 2e-4],
-    "LR_ENCODER_MULT": [1.0],          # still ignored in current pipeline
+
+    # Optimizer / schedule  (fixed to best run: LR=5e-5, no warmup)
+    "LR":              [5e-5],
+    "LR_ENCODER_MULT": [1.0],
     "BATCH":           [8],
-    "WARMUP_STEPS":    [0, 4000],      # no warmup vs. moderate warmup
-    # Detector capacity
-    "NUM_QUERIES":     [200, 250],     # 25×max cells is already overkill
-    # Augmentation / regularization (fixed to match your good run)
+    "WARMUP_STEPS":    [0],
+
+    # Detector capacity (fixed)
+    "NUM_QUERIES":     [250],
+
+    # Augmentation / regularization (fixed to that run)
     "AUG_COPIES":      [0],
     "SCALE_RANGE":     [(0.9, 1.1)],
     "ROT_DEG":         [5.0],
     "COLOR_JITTER":    [0.20],
     "GAUSS_BLUR":      [0.20],
+
+    "ENCODER_CKPT":    [str(p) for p in SSL_BACKBONES],
 }
+
 
 
 def grid(space: dict):
@@ -551,6 +584,8 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
         run_dir = out_root / f"HPO_Config_{run_idx:03d}"
         run_dir.mkdir(parents=True, exist_ok=True)
 
+        backbone_ckpt = cfg.get("ENCODER_CKPT")
+
         t0 = time.time()
         try_cfg = dict(cfg)
         try:
@@ -571,11 +606,13 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
                 color_jitter=try_cfg["COLOR_JITTER"],
                 gauss_blur_prob=try_cfg["GAUSS_BLUR"],
                 aug_copies=try_cfg["AUG_COPIES"],
+                backbone_ckpt=backbone_ckpt,
                 seed=SEED,
                 num_workers=NUM_WORKERS,
                 pin_memory=True,
                 persistent_workers=True,
             )
+
         except RuntimeError as e:
             msg = str(e)
             if "CUDA out of memory" in msg or "CUDNN_STATUS_ALLOC_FAILED" in msg:
