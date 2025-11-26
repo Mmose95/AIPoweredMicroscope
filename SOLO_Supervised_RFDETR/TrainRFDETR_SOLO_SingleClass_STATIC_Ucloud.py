@@ -10,8 +10,8 @@ import os, json, glob, os.path as op, itertools, time, csv, multiprocessing as m
 # "leu"  -> only Leucocyte
 # "epi"  -> only Squamous Epithelial Cell
 # "all"  -> both
-HPO_TARGET = os.environ.get("RFDETR_HPO_TARGET", "all").lower()
-print(f"[HPO] Target classes: {HPO_TARGET!r} (env RFDETR_HPO_TARGET)")
+
+HPO_TARGET = "all"   # DETERMINES WHAT TO RUN IN THE HPO!
 
 # ───────────────────────────────────────────────────────────────────────────────
 # UCloud-friendly path detection
@@ -180,6 +180,80 @@ def build_resolved_static_dataset(src_dir: Path, dst_dir: Path) -> Path:
     ok_marker.write_text("ok", encoding="utf-8")
     return dst_dir
 
+import random
+
+def build_fractional_train_split(resolved_root: Path,
+                                 frac: float,
+                                 cache_root: Path,
+                                 seed: int = 42) -> Path:
+    """
+    Create a dataset copy where only a fraction of TRAIN images are kept.
+    'valid' and 'test' remain unchanged.
+    """
+    if frac >= 0.999:
+        return resolved_root  # use full data
+
+    frac_tag = f"trainfrac_{int(frac*100):02d}"
+    dst_root = cache_root / f"{resolved_root.name}_{frac_tag}"
+    ok_marker = dst_root / ".FRACTION_OK"
+
+    if ok_marker.exists():
+        print(f"[FRACTION] Using cached {frac_tag} dataset: {dst_root}")
+        return dst_root
+
+    print(f"[FRACTION] Building {frac_tag} dataset under {dst_root}")
+    dst_root.mkdir(parents=True, exist_ok=True)
+
+    # copy val + test JSONs as-is
+    for split in ("valid", "test"):
+        src = resolved_root / split / "_annotations.coco.json"
+        if not src.exists():
+            continue
+        out_dir = dst_root / split
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "_annotations.coco.json").write_text(
+            src.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+
+    # subsample TRAIN
+    src_train = resolved_root / "train" / "_annotations.coco.json"
+    if not src_train.exists():
+        raise FileNotFoundError(f"No train split found at {src_train}")
+
+    data = json.loads(src_train.read_text(encoding="utf-8"))
+    images = data.get("images", [])
+    anns   = data.get("annotations", [])
+    cats   = data.get("categories", [])
+
+    rng = random.Random(seed)
+    n_keep = max(1, int(round(len(images) * frac)))
+    indices = list(range(len(images)))
+    rng.shuffle(indices)
+    keep_idx = set(indices[:n_keep])
+
+    kept_images = [im for i, im in enumerate(images) if i in keep_idx]
+    kept_ids    = {im["id"] for im in kept_images}
+    kept_anns   = [a for a in anns if a["image_id"] in kept_ids]
+
+    out_train_dir = dst_root / "train"
+    out_train_dir.mkdir(parents=True, exist_ok=True)
+    out_train = out_train_dir / "_annotations.coco.json"
+    out_train.write_text(
+        json.dumps({
+            "images": kept_images,
+            "annotations": kept_anns,
+            "categories": cats,
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    print(f"[FRACTION] train: kept {len(kept_images)}/{len(images)} images "
+          f"({frac:.2f}), anns={len(kept_anns)}")
+
+    ok_marker.write_text("ok", encoding="utf-8")
+    return dst_root
+
+
 
 # Auto-detect GPU count and set MAX_PARALLEL
 # ───────────────────────────────────────────────
@@ -284,6 +358,7 @@ def train_one_run(target_name: str,
                   gauss_blur_prob: float,
                   aug_copies: int,
                   backbone_ckpt: str | None = None,   # <-- NEW
+                  train_fraction: float = 1.0, # <--- NEW controls percentage of data
                   seed: int = 42,
                   num_workers: int = 8,
                   pin_memory: bool = True,
@@ -291,6 +366,16 @@ def train_one_run(target_name: str,
 
     # No offline AUG – just use the static OVR dataset directory
     data_dir = get_or_build_aug_cache(target_name, dataset_dir, OUTPUT_ROOT, aug_copies)
+
+    # Optionally reduce the TRAIN split size
+    if train_fraction < 0.999:
+        data_dir = build_fractional_train_split(
+            resolved_root=data_dir,
+            frac=train_fraction,
+            cache_root=OUTPUT_ROOT,
+            seed=seed,
+        )
+
 
     model = model_cls()
     sig = signature(model.train)
@@ -358,6 +443,7 @@ def train_one_run(target_name: str,
 
     # Log meta
     meta = out_dir / "run_meta"; meta.mkdir(parents=True, exist_ok=True)
+    kwargs["train_fraction"] = float(train_fraction)
     (meta / "train_kwargs.json").write_text(json.dumps(kwargs, indent=2), encoding="utf-8")
     (meta / "dataset_info.json").write_text(json.dumps({
         "dataset_dir": str(dataset_dir),
@@ -449,51 +535,33 @@ SEARCH_LEUCO = {
 }
 
 
-#skinny search
-'''SEARCH_EPI = {
-    # Model & input
-    "MODEL_CLS":       ["RFDETRLarge"],
-    "RESOLUTION":      [672],          # or 672 if you want, both are fine here
-    "EPOCHS":          [80],
-    # Optimizer / schedule
-    "LR":              [5e-5],
-    "LR_ENCODER_MULT": [1.0],          # still ignored in current pipeline
-    "BATCH":           [8],
-    "WARMUP_STEPS":    [0],      # no warmup vs. moderate warmup
-    # Detector capacity
-    "NUM_QUERIES":     [200, 250],     # 25×max cells is already overkill
-    # Augmentation / regularization (fixed to match your good run)
-    "AUG_COPIES":      [0],
-    "SCALE_RANGE":     [(0.9, 1.1)],
-    "ROT_DEG":         [5.0],
-    "COLOR_JITTER":    [0.20],
-    "GAUSS_BLUR":      [0.20],
-}'''
+BEST_SSL_CKPT = str(SSL_CKPT_ROOT / "epoch_epoch-014.ckpt")  # <- adjust to winner
 
 SEARCH_EPI = {
-    # Model & input (fixed from best HPO run)
     "MODEL_CLS":       ["RFDETRLarge"],
     "RESOLUTION":      [672],
     "EPOCHS":          [80],
 
-    # Optimizer / schedule  (fixed to best run: LR=5e-5, no warmup)
     "LR":              [5e-5],
     "LR_ENCODER_MULT": [1.0],
     "BATCH":           [8],
     "WARMUP_STEPS":    [0],
 
-    # Detector capacity (fixed)
     "NUM_QUERIES":     [250],
 
-    # Augmentation / regularization (fixed to that run)
     "AUG_COPIES":      [0],
     "SCALE_RANGE":     [(0.9, 1.1)],
     "ROT_DEG":         [5.0],
     "COLOR_JITTER":    [0.20],
     "GAUSS_BLUR":      [0.20],
 
-    "ENCODER_CKPT":    [str(p) for p in SSL_BACKBONES],
+    # fixed best SSL backbone
+    "ENCODER_CKPT":    [BEST_SSL_CKPT],
+
+    # NEW: how much of the *train* split to use
+    "TRAIN_FRACTION":  [0.25, 0.50, 0.75, 1.00],
 }
+
 
 
 
@@ -585,6 +653,7 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
         run_dir.mkdir(parents=True, exist_ok=True)
 
         backbone_ckpt = cfg.get("ENCODER_CKPT")
+        train_fraction = float(cfg.get("TRAIN_FRACTION", 1.0))
 
         t0 = time.time()
         try_cfg = dict(cfg)
@@ -607,6 +676,7 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
                 gauss_blur_prob=try_cfg["GAUSS_BLUR"],
                 aug_copies=try_cfg["AUG_COPIES"],
                 backbone_ckpt=backbone_ckpt,
+                train_fraction=train_fraction,
                 seed=SEED,
                 num_workers=NUM_WORKERS,
                 pin_memory=True,
