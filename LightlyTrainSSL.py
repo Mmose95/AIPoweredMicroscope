@@ -15,6 +15,8 @@ import random  # NEW
 
 PATCH_SIZE = 224
 
+FORCE_REBUILD_SSL_CROPS = os.getenv("SSL_FORCE_REBUILD", "0") == "1"
+
 # How many CPU workers to use for crop generation
 NUM_PATCH_WORKERS = int(os.getenv("SSL_PATCH_WORKERS", "14"))
 
@@ -516,21 +518,18 @@ def _process_image_for_crops(
 
 
 def ensure_ssl_crops_for_sample(sample_dir: Path, patch_size: int = PATCH_SIZE) -> Path:
-    """
-    Ensure we have a folder with 224×224 crops for this Sample.
-    If it doesn't exist (or is empty), create it from the full-size images
-    using parallel workers.
-
-    Returns the path to the crops folder.
-    """
-    sample_name = sample_dir.name  # e.g. "Sample 105"
+    sample_name = sample_dir.name
     crops_dir = sample_dir / f"SSLCrops ({patch_size}x{patch_size}) for {sample_name}"
 
-    # If crops already exist and contain images, reuse them
+    # NEW: force delete existing crop dir
+    if FORCE_REBUILD_SSL_CROPS and crops_dir.exists():
+        print(f"[ensure_ssl_crops_for_sample] FORCE_REBUILD enabled → removing {crops_dir}")
+        shutil.rmtree(crops_dir, ignore_errors=True)
+
+    # If crops exist and not forcing rebuild, reuse them
     if crops_dir.exists():
         num_existing = sum(
-            1
-            for p in crops_dir.rglob("*")
+            1 for p in crops_dir.rglob("*")
             if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg"}
         )
         if num_existing > 0:
@@ -538,6 +537,7 @@ def ensure_ssl_crops_for_sample(sample_dir: Path, patch_size: int = PATCH_SIZE) 
             return crops_dir
     else:
         crops_dir.mkdir(parents=True, exist_ok=True)
+
 
     print(f"[ensure_ssl_crops_for_sample] Creating crops in {crops_dir}")
 
@@ -664,11 +664,11 @@ if __name__ == "__main__":
         SSL_FIRST_SAMPLE,
         SSL_LAST_SAMPLE,
     )
-
     lightly_train(
-        overwrite =True,
+        overwrite=True,
         out="outputLightly",
         data=str(data_dir),
+
         model="dinov2/vitb14",
         method="dinov2",
 
@@ -685,20 +685,20 @@ if __name__ == "__main__":
             prefetch_factor=2,
         ),
 
-        # ⭐️ ONLY save every 5 epochs, nothing else ⭐️
+        # save every 5 epochs
         callbacks=dict(
             model_checkpoint=dict(
                 filename="epoch_{epoch:03d}",
-                every_n_epochs=5,
+                every_n_epochs=10,
                 save_top_k=-1,
                 save_weights_only=True,
             ),
         ),
 
-        trainer_args=dict(
-            max_epochs=100,
-        ),
+        # 🔑 Let Lightly / Lightning know the number of epochs explicitly
+        epochs=100,
 
-        # Use default DINOv2 transforms
+        # default DINOv2 transforms
         transform_args=None,
     )
+
