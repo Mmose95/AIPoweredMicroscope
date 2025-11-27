@@ -749,7 +749,7 @@ SEARCH_LEUCO = {
     "COLOR_JITTER":    [0.20],
     "GAUSS_BLUR":      [0.10],
 }
-
+'''
 SEARCH_EPI = {
     "MODEL_CLS":       ["RFDETRLarge"],
     "RESOLUTION":      [672],      # ignored in patch mode (forced to 224)
@@ -773,7 +773,39 @@ SEARCH_EPI = {
 
     # Data-cost curve
     "TRAIN_FRACTION":  [0.25, 0.50, 0.75, 1.00],
+}'''
+
+# Best supervised RFDETR HPO space for 224×224 patches (EPI)
+#224
+SEARCH_EPI = {
+    # Model & input
+    "MODEL_CLS":       ["RFDETRLarge"],   # keep Large, patches are smaller so this is fine
+    "RESOLUTION":      [224],             # in PATCH mode this will be forced to 224 anyway
+    "EPOCHS":          [80],              # let early stopping decide
+
+    # Optimizer / schedule
+    "LR":              [3e-5, 5e-5, 8e-5],  # a bit wider around your previous good LR
+    "LR_ENCODER_MULT": [1.0],              # still ignored for now
+    "BATCH":           [8, 16],            # 16 should be feasible with 224×224, OOM-backoff will save us
+    "WARMUP_STEPS":    [0, 2000],          # no warmup vs modest warmup
+
+    # Detector capacity — per 224×224 patch there are few cells
+    "NUM_QUERIES":     [150, 200],         # plenty for “few objects per patch”
+
+    # Augmentation / regularization
+    "AUG_COPIES":      [0],                # still no offline aug (RFDETR has its own online aug)
+    "SCALE_RANGE":     [(0.9, 1.1)],
+    "ROT_DEG":         [5.0],
+    "COLOR_JITTER":    [0.20],
+    "GAUSS_BLUR":      [0.20],
+
+    # Supervised baseline only → NO SSL backbone here
+    # "ENCODER_CKPT":  [...]               # intentionally omitted
+
+    # For this HPO: always use full train split
+    "TRAIN_FRACTION":  [1.0],
 }
+
 
 def grid(space: dict):
     keys = list(space.keys())
