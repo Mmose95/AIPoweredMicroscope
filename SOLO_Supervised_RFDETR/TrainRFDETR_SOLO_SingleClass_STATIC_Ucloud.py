@@ -1,20 +1,34 @@
-# train_hpo_both_static_ovr.py
 from __future__ import annotations
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
 from inspect import signature
 import os, json, glob, os.path as op, itertools, time, csv, multiprocessing as mp
+import re
+import random
+from collections import defaultdict as ddict
+from PIL import Image
+import numpy as np
 
+# ───────────────────────────────────────────────────────────────────────────────
+# TOGGLES
+# ───────────────────────────────────────────────────────────────────────────────
 # Which classes to train in this HPO run:
-# "leu"  -> only Leucocyte
-# "epi"  -> only Squamous Epithelial Cell
-# "all"  -> both
+#  - "leu"  -> only Leucocyte
+#  - "epi"  -> only Squamous Epithelial Cell
+#  - "all"  -> both
+HPO_TARGET = os.environ.get("RFDETR_HPO_TARGET", "epi").lower()
 
-HPO_TARGET = "epi"   # DETERMINES WHAT TO RUN IN THE HPO!
+# Toggle to use 224×224 patchified dataset instead of full 640×640 images
+USE_PATCH_224 = bool(int(os.getenv("RFDETR_USE_PATCH_224", "1")))
+PATCH_SIZE = int(os.getenv("RFDETR_PATCH_SIZE", "224"))
+
+print(f"[HPO] Target classes: {HPO_TARGET!r} (env RFDETR_HPO_TARGET)")
+print(f"[PATCH MODE] USE_PATCH_224={USE_PATCH_224}  PATCH_SIZE={PATCH_SIZE}")
 
 # ───────────────────────────────────────────────────────────────────────────────
 # UCloud-friendly path detection
+# ───────────────────────────────────────────────────────────────────────────────
 def _detect_user_base() -> str | None:
     aau = glob.glob("/work/Member Files:*")
     if aau:
@@ -33,6 +47,7 @@ def env_path(name: str, default: Path) -> Path:
 
 # ───────────────────────────────────────────────────────────────────────────────
 # SSL backbones to probe (encoder checkpoints)
+# ───────────────────────────────────────────────────────────────────────────────
 SSL_CKPT_ROOT = env_path(
     "SSL_CKPT_ROOT",
     WORK_ROOT / "SSL_Checkpoints",
@@ -49,20 +64,18 @@ print("[SSL BACKBONES]")
 for p in SSL_BACKBONES:
     print("  ", p)
 
+BEST_SSL_CKPT = str(SSL_CKPT_ROOT / "epoch_epoch-014.ckpt")  # <- adjust to winner if needed
+
 # ───────────────────────────────────────────────
-
-
-
-import re
-from collections import defaultdict
-
+# Path resolution helpers for COCO
+# ───────────────────────────────────────────────
 VALID_EXTS = {".tif", ".tiff", ".png", ".jpg", ".jpeg"}
 WINDOWS_PATH_RE = re.compile(r"^[a-zA-Z]:\\")  # detect old Windows-style paths
 
 def _index_image_paths(root: Path):
-    """Index all images under IMAGES_FALLBACK_ROOT for fast lookup."""
+    """Index all images under root for fast lookup."""
     by_rel = {}
-    by_name = defaultdict(list)
+    by_name = ddict(list)
     root = root.resolve()
     for p in root.rglob("*"):
         if p.is_file() and p.suffix.lower() in VALID_EXTS:
@@ -82,7 +95,7 @@ def _resolve_image_path(file_name: str, images_root: Path,
     # normalize slashes
     rel = file_name.replace("\\", "/")
 
-    # direct relative match: "Sample 25/..." under images_root
+    # direct relative match under images_root
     direct = (images_root / rel)
     if direct.exists():
         return direct
@@ -109,6 +122,7 @@ def _resolve_image_path(file_name: str, images_root: Path,
             return cands[0]
 
     raise FileNotFoundError(f"Could not resolve image '{file_name}' under {images_root}")
+
 
 def build_resolved_static_dataset(src_dir: Path, dst_dir: Path) -> Path:
     """
@@ -180,8 +194,9 @@ def build_resolved_static_dataset(src_dir: Path, dst_dir: Path) -> Path:
     ok_marker.write_text("ok", encoding="utf-8")
     return dst_dir
 
-import random
-
+# ───────────────────────────────────────────────
+# FRACTIONAL TRAIN SPLIT (for cost curves)
+# ───────────────────────────────────────────────
 def build_fractional_train_split(resolved_root: Path,
                                  frac: float,
                                  cache_root: Path,
@@ -253,8 +268,205 @@ def build_fractional_train_split(resolved_root: Path,
     ok_marker.write_text("ok", encoding="utf-8")
     return dst_root
 
+# ───────────────────────────────────────────────
+# PATCHIFY DATASET (640×640 → 224×224 crops, no resizing)
+# ───────────────────────────────────────────────
+
+def _compute_positions(length: int, patch: int, stride: int):
+    """Return sorted start positions so we cover whole axis with last patch anchored at end."""
+    positions = []
+    x = 0
+    while x + patch <= length:
+        positions.append(x)
+        x += stride
+    last = length - patch
+    if last >= 0 and (not positions or positions[-1] != last):
+        positions.append(last)
+    return sorted(set(positions))
 
 
+def _patchify_split(
+    src_json: Path,
+    dst_json: Path,
+    split_images_dir: Path,
+    patch_size: int,
+    stride: int,
+    start_img_id: int,
+    start_ann_id: int,
+) -> tuple[int, int, int, int]:
+    """
+    Build a patchified COCO split:
+      - loads src_json (already resolved with absolute file_name)
+      - crops each image into overlapping patch_size×patch_size tiles
+      - recomputes bboxes for each patch (no resizing)
+    Returns (next_img_id, next_ann_id, n_new_images, n_new_anns).
+    """
+    data = json.loads(src_json.read_text(encoding="utf-8"))
+    images = data.get("images", [])
+    anns   = data.get("annotations", [])
+    cats   = data.get("categories", [])
+
+    anns_by_img = ddict(list)
+    for a in anns:
+        anns_by_img[a["image_id"]].append(a)
+
+    new_images = []
+    new_anns = []
+
+    img_id = start_img_id
+    ann_id = start_ann_id
+
+    split_images_dir.mkdir(parents=True, exist_ok=True)
+
+    for im in images:
+        fname = im["file_name"]
+        img_path = Path(fname)
+
+        try:
+            img = Image.open(img_path).convert("RGB")
+        except Exception as e:
+            print(f"[PATCHIFY][WARN] Failed to open {img_path}: {e}")
+            continue
+
+        W, H = img.size
+        xs = _compute_positions(W, patch_size, stride)
+        ys = _compute_positions(H, patch_size, stride)
+
+        img_anns = anns_by_img.get(im["id"], [])
+
+        stem = Path(fname).stem
+
+        for yi, y0 in enumerate(ys):
+            for xi, x0 in enumerate(xs):
+                x1 = x0 + patch_size
+                y1 = y0 + patch_size
+                box = (x0, y0, x1, y1)
+
+                patch = img.crop(box)
+                out_name = f"{stem}_y{yi:02d}_x{xi:02d}.png"
+                out_path = split_images_dir / out_name
+                patch.save(out_path)
+
+                this_img_id = img_id
+                img_id += 1
+
+                new_images.append({
+                    "id": this_img_id,
+                    "file_name": str(out_path),
+                    "width": patch_size,
+                    "height": patch_size,
+                    # optional: track original
+                    "original_image_id": im["id"],
+                })
+
+                # re-map bboxes
+                for a in img_anns:
+                    x, y, w, h = a["bbox"]
+                    x2 = x + w
+                    y2 = y + h
+
+                    # intersection with patch
+                    ix0 = max(x0, x)
+                    iy0 = max(y0, y)
+                    ix1 = min(x1, x2)
+                    iy1 = min(y1, y2)
+
+                    if ix1 <= ix0 or iy1 <= iy0:
+                        continue  # no overlap
+
+                    inter_w = ix1 - ix0
+                    inter_h = iy1 - iy0
+                    inter_area = inter_w * inter_h
+                    orig_area = w * h if w > 0 and h > 0 else 1.0
+
+                    # keep only if sufficient overlap (e.g. at least 25% of original box)
+                    if inter_area / orig_area < 0.25:
+                        continue
+
+                    # coords relative to patch
+                    nx = ix0 - x0
+                    ny = iy0 - y0
+                    nw = inter_w
+                    nh = inter_h
+
+                    if nw <= 1 or nh <= 1:
+                        continue
+
+                    na = dict(a)
+                    na["id"] = ann_id
+                    na["image_id"] = this_img_id
+                    na["bbox"] = [float(nx), float(ny), float(nw), float(nh)]
+                    na["area"] = float(nw * nh)
+                    ann_id += 1
+                    new_anns.append(na)
+
+    out = {
+        "images": new_images,
+        "annotations": new_anns,
+        "categories": cats,
+    }
+    dst_json.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+
+    print(f"[PATCHIFY] {src_json.parent.name}: {len(new_images)} images, {len(new_anns)} anns → {dst_json}")
+    return img_id, ann_id, len(new_images), len(new_anns)
+
+
+def build_patchified_dataset(resolved_root: Path,
+                             cache_root: Path,
+                             patch_size: int = 224,
+                             stride: int | None = None) -> Path:
+    """
+    Build a patchified COCO dataset (224×224 crops, no resizing) from a
+    *resolved* dataset (file_name = absolute paths).
+    """
+    if stride is None:
+        stride = patch_size  # can change if you want more overlap
+
+    tag = f"PATCH{patch_size}"
+    dst_root = cache_root / f"{resolved_root.name}_{tag}"
+    ok_marker = dst_root / ".PATCH_OK"
+
+    if ok_marker.exists():
+        print(f"[PATCHIFY] Using cached patchified dataset: {dst_root}")
+        return dst_root
+
+    print(f"[PATCHIFY] Building patchified dataset {tag} → {dst_root}")
+    dst_root.mkdir(parents=True, exist_ok=True)
+
+    next_img_id = 1
+    next_ann_id = 1
+
+    total_imgs = 0
+    total_anns = 0
+
+    for split in ("train", "valid", "test"):
+        src_json = resolved_root / split / "_annotations.coco.json"
+        if not src_json.exists():
+            continue
+
+        split_dir = dst_root / split
+        split_dir.mkdir(parents=True, exist_ok=True)
+        split_images_dir = split_dir / "images"
+
+        dst_json = split_dir / "_annotations.coco.json"
+
+        next_img_id, next_ann_id, n_imgs, n_anns = _patchify_split(
+            src_json,
+            dst_json,
+            split_images_dir,
+            patch_size=patch_size,
+            stride=stride,
+            start_img_id=next_img_id,
+            start_ann_id=next_ann_id,
+        )
+        total_imgs += n_imgs
+        total_anns += n_anns
+
+    print(f"[PATCHIFY] TOTAL: {total_imgs} images, {total_anns} annotations in {dst_root}")
+    ok_marker.write_text("ok", encoding="utf-8")
+    return dst_root
+
+# ───────────────────────────────────────────────
 # Auto-detect GPU count and set MAX_PARALLEL
 # ───────────────────────────────────────────────
 def detect_visible_gpus() -> list[int]:
@@ -278,8 +490,7 @@ VISIBLE_GPUS = detect_visible_gpus()
 MAX_PARALLEL = int(os.getenv("MAX_PARALLEL", str(len(VISIBLE_GPUS) if VISIBLE_GPUS else 1)))
 print(f"[GPU DETECT] Visible GPUs: {VISIBLE_GPUS}  |  MAX_PARALLEL={MAX_PARALLEL}")
 
-# Where the **real images** live (on your drive) – not actually used now,
-# RFDETR will read paths directly from the static COCO JSONs.
+# Where the **real images** live (on your drive)
 IMAGES_FALLBACK_ROOT = env_path(
     "IMAGES_FALLBACK_ROOT",
     WORK_ROOT / "CellScanData" / "Zoom10x - Quality Assessment_Cleaned",
@@ -287,6 +498,7 @@ IMAGES_FALLBACK_ROOT = env_path(
 
 # ───────────────────────────────────────────────────────────────────────────────
 # ====== STATIC OVR DATASETS (jsons live in repo / project tree) ======
+# ───────────────────────────────────────────────────────────────────────────────
 REPO_ROOT = Path.cwd()  # you usually run this from /work/projects/myproj
 DEFAULT_ROOT = env_path(
     "STAT_DATASETS_ROOT",
@@ -313,7 +525,7 @@ if not DATASET_LEUCO.exists():
 if not DATASET_EPI.exists():
     DATASET_EPI = _autofind_dataset(DEFAULT_ROOT, "SquamousEpithelialCell_OVR")
 
-# Where to put all outputs (HPO runs + leaderboards + final selections) → on the drive
+# Where to put all outputs (HPO runs + leaderboards + final selections)
 OUTPUT_ROOT = env_path("OUTPUT_ROOT", WORK_ROOT / "RFDETR_SOLO_OUTPUT" / "HPO_BOTH_OVR")
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -321,26 +533,37 @@ OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 HPO_SESSION_ID: str | None = None
 SESSION_ROOT: Path | None = None
 
-
 NUM_WORKERS = int(os.getenv("NUM_WORKERS", "8"))
 SEED        = int(os.getenv("SEED", "42"))
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Offline augmentation DISABLED: just return original dataset_dir
+# Offline augmentation / resolving / patchifying
 # ───────────────────────────────────────────────────────────────────────────────
 def get_or_build_aug_cache(target_name: str, dataset_dir: Path, root_out: Path, aug_copies: int) -> Path:
     """
-    Offline augmentation is disabled.
-    We only build a 'resolved' dataset where file_name paths point to the
-    mounted CellScanData tree. No image copying, no aug.
+    We:
+      1) build a 'resolved' dataset where file_name paths are absolute
+      2) if USE_PATCH_224, build a 224×224 patchified dataset on top of that
     """
-    # one resolved dataset per original dataset_dir
-    cache_dir = root_out / f"{dataset_dir.name}_RESOLVED"
-    return build_resolved_static_dataset(dataset_dir, cache_dir)
+    # step 1: resolved dataset
+    resolved_cache = root_out / f"{dataset_dir.name}_RESOLVED"
+    resolved_dir = build_resolved_static_dataset(dataset_dir, resolved_cache)
 
+    if not USE_PATCH_224:
+        return resolved_dir
+
+    # step 2: patchified dataset (no resizing)
+    patch_dir = build_patchified_dataset(
+        resolved_root=resolved_dir,
+        cache_root=root_out,
+        patch_size=PATCH_SIZE,
+        stride=PATCH_SIZE,   # change if you want more overlap
+    )
+    return patch_dir
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Training (single run). Called in worker processes.
+# ───────────────────────────────────────────────────────────────────────────────
 def train_one_run(target_name: str,
                   dataset_dir: Path,
                   out_dir: Path,
@@ -357,14 +580,14 @@ def train_one_run(target_name: str,
                   color_jitter: float,
                   gauss_blur_prob: float,
                   aug_copies: int,
-                  backbone_ckpt: str | None = None,   # <-- NEW
-                  train_fraction: float = 1.0, # <--- NEW controls percentage of data
+                  backbone_ckpt: str | None = None,
+                  train_fraction: float = 1.0,
                   seed: int = 42,
                   num_workers: int = 8,
                   pin_memory: bool = True,
                   persistent_workers: bool = True) -> dict:
 
-    # No offline AUG – just use the static OVR dataset directory
+    # Build resolved / optional patchified dataset
     data_dir = get_or_build_aug_cache(target_name, dataset_dir, OUTPUT_ROOT, aug_copies)
 
     # Optionally reduce the TRAIN split size
@@ -376,12 +599,15 @@ def train_one_run(target_name: str,
             seed=seed,
         )
 
+    # If we are in patch mode, force resolution to patch size and disable square resizing
+    if USE_PATCH_224:
+        resolution = PATCH_SIZE
 
     model = model_cls()
     sig = signature(model.train)
     can = set(sig.parameters.keys())
 
-    # ---- base kwargs: match local OVR training ----
+    # ---- base kwargs ----
     kwargs = dict(
         dataset_dir=str(data_dir),
         output_dir=str(out_dir),
@@ -389,7 +615,7 @@ def train_one_run(target_name: str,
 
         resolution=resolution,
         batch_size=batch_size,
-        grad_accum_steps=8,          # LOCAL: 8
+        grad_accum_steps=8,
         epochs=epochs,
         lr=lr,
         weight_decay=5e-4,
@@ -404,50 +630,41 @@ def train_one_run(target_name: str,
         persistent_workers=persistent_workers,
 
         seed=seed,
-        early_stopping=True,         # same flag as local
+        early_stopping=True,
         checkpoint_interval=10,
         run_test=True,
     )
-
 
     def maybe(name, value):
         if name in can and value is not None:
             kwargs[name] = value
 
-    # ---- augmentations: copy local setup ---- not used in rfdetr
-    '''maybe("hflip_prob", 0.5)
-    maybe("flip_prob", 0.5)
-
-    maybe("rotation_degrees", rot_deg)      # 5.0
-    maybe("translate", 0.05)
-    maybe("scale_range", scale_range)       # (0.9, 1.1)
-    maybe("random_affine_prob", 0.5)
-
-    maybe("color_jitter", color_jitter)     # 0.2
-    maybe("brightness", 0.2)
-    maybe("contrast", 0.2)
-    maybe("saturation", 0.2)
-    maybe("hue", 0.02)
-
-    maybe("gaussian_blur_prob", gauss_blur_prob)  # 0.2'''
-
     # Backbone / encoder checkpoint from SSL
-    # Try both possible argument names to be safe
     maybe("encoder_name", backbone_ckpt)
     maybe("pretrained_backbone", backbone_ckpt)
 
-    # resizing behaviour: these are used in rfdetr so we need to keep them
-    maybe("square_resize_div_64", True)
-    maybe("do_random_resize_via_padding", False)
-    maybe("random_resize_via_padding", False)  # if this is the accepted name
+    # resizing behaviour: IMPORTANT
+    if USE_PATCH_224:
+        # patches are already square 224×224; do NOT resize
+        maybe("square_resize_div_64", False)
+        maybe("do_random_resize_via_padding", False)
+        maybe("random_resize_via_padding", False)
+    else:
+        # previous behaviour
+        maybe("square_resize_div_64", True)
+        maybe("do_random_resize_via_padding", False)
+        maybe("random_resize_via_padding", False)
 
     # Log meta
-    meta = out_dir / "run_meta"; meta.mkdir(parents=True, exist_ok=True)
+    meta = out_dir / "run_meta"
+    meta.mkdir(parents=True, exist_ok=True)
     kwargs["train_fraction"] = float(train_fraction)
+    kwargs["use_patch_224"] = USE_PATCH_224
+    kwargs["patch_size"] = PATCH_SIZE if USE_PATCH_224 else None
     (meta / "train_kwargs.json").write_text(json.dumps(kwargs, indent=2), encoding="utf-8")
     (meta / "dataset_info.json").write_text(json.dumps({
-        "dataset_dir": str(dataset_dir),
-        "dataset_dir_aug": str(data_dir),
+        "dataset_dir_original": str(dataset_dir),
+        "dataset_dir_effective": str(data_dir),
         "target_name": target_name
     }, indent=2), encoding="utf-8")
 
@@ -458,7 +675,7 @@ def train_one_run(target_name: str,
     (out_dir / "val_best_summary.json").write_text(json.dumps(best, indent=2), encoding="utf-8")
     return best
 
-
+# ───────────────────────────────────────────────────────────────────────────────
 def find_best_val(output_dir: Path) -> dict:
     # 1) prefer RFDETR results.json if present
     p = output_dir / "results.json"
@@ -507,24 +724,23 @@ def find_best_val(output_dir: Path) -> dict:
                 continue
     return {"best_epoch": None, "map50": None, "map5095": None, "source": "not_found"}
 
-
 # ───────────────────────────────────────────────────────────────────────────────
-# HPO spaces (compact) — MODEL_CLS will be resolved inside the worker
-
+# HPO spaces (compact)
+# ───────────────────────────────────────────────────────────────────────────────
 SEARCH_LEUCO = {
     # Model & input
     "MODEL_CLS":       ["RFDETRLarge"],
-    "RESOLUTION":      [672],
-    "EPOCHS":          [80],          # let early stopping decide
+    "RESOLUTION":      [672],      # ignored in patch mode (forced to 224)
+    "EPOCHS":          [80],
 
     # Optimizer / schedule
-    "LR":              [5e-5, 8e-5],  # around your good EPI LR
-    "LR_ENCODER_MULT": [1.0],         # still ignored, keep for future
-    "BATCH":           [4],           # safer than 8 with large model + many queries
-    "WARMUP_STEPS":    [0, 4000],     # no warmup vs. moderate warmup
+    "LR":              [5e-5, 8e-5],
+    "LR_ENCODER_MULT": [1.0],
+    "BATCH":           [4],
+    "WARMUP_STEPS":    [0, 4000],
 
     # Detector capacity
-    "NUM_QUERIES":     [384, 512],    # 1.1–1.5× max #leu per image
+    "NUM_QUERIES":     [384, 512],
 
     # Aug / regularization (we’re using RFDETR defaults; these are just logged)
     "AUG_COPIES":      [0],
@@ -534,12 +750,9 @@ SEARCH_LEUCO = {
     "GAUSS_BLUR":      [0.10],
 }
 
-
-BEST_SSL_CKPT = str(SSL_CKPT_ROOT / "epoch_epoch-014.ckpt")  # <- adjust to winner
-
 SEARCH_EPI = {
     "MODEL_CLS":       ["RFDETRLarge"],
-    "RESOLUTION":      [672],
+    "RESOLUTION":      [672],      # ignored in patch mode (forced to 224)
     "EPOCHS":          [80],
 
     "LR":              [5e-5],
@@ -555,15 +768,12 @@ SEARCH_EPI = {
     "COLOR_JITTER":    [0.20],
     "GAUSS_BLUR":      [0.20],
 
-    # fixed best SSL backbone
-    #"ENCODER_CKPT":    [BEST_SSL_CKPT],
+    # Example: fixed best SSL backbone; uncomment when you want SSL
+    # "ENCODER_CKPT":    [BEST_SSL_CKPT],
 
-    # NEW: how much of the *train* split to use
+    # Data-cost curve
     "TRAIN_FRACTION":  [0.25, 0.50, 0.75, 1.00],
 }
-
-
-
 
 def grid(space: dict):
     keys = list(space.keys())
@@ -573,6 +783,7 @@ def grid(space: dict):
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Trial-level parallel launcher with allocator + OOM backoff
+# ───────────────────────────────────────────────────────────────────────────────
 def _get_visible_gpu_ids() -> list[int]:
     vis = os.getenv("CUDA_VISIBLE_DEVICES", "").strip()
     if vis:
@@ -587,7 +798,6 @@ def _get_visible_gpu_ids() -> list[int]:
         return []
 
 def _configure_allocator_env():
-    """Configure safe allocator options *only if not set by user*."""
     conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
     if conf.strip() == "":
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -727,6 +937,8 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
             "metrics_source": best.get("source"),
             "output_dir": str(run_dir),
             "seconds": dur,
+            "use_patch_224": USE_PATCH_224,
+            "patch_size": PATCH_SIZE if USE_PATCH_224 else None,
         }
         (run_dir / "hpo_record.json").write_text(json.dumps(row, indent=2), encoding="utf-8")
         result_q.put(("ok", row))
@@ -735,7 +947,6 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
 
 # ───────────────────────────────────────────────────────────────────────────────
 def run_hpo_all_classes(session_root: Path) -> dict:
-
     """
     Multi-class HPO launcher.
     - Uses ALL visible GPUs as a shared pool.
@@ -891,8 +1102,6 @@ def run_hpo_all_classes(session_root: Path) -> dict:
 def main():
     global HPO_SESSION_ID, SESSION_ROOT
 
-    global HPO_SESSION_ID, SESSION_ROOT
-
     print("[WORK_ROOT]", WORK_ROOT)
     print("[DATASETS]")
     print("  Leucocyte:", DATASET_LEUCO)
@@ -914,6 +1123,8 @@ def main():
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "session_id": HPO_SESSION_ID,
         "work_root": str(WORK_ROOT),
+        "use_patch_224": USE_PATCH_224,
+        "patch_size": PATCH_SIZE if USE_PATCH_224 else None,
     }
 
     if "Leucocyte" in res_all:

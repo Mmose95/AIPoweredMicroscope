@@ -11,11 +11,31 @@ import cv2
 import concurrent.futures
 import re
 from collections import defaultdict
+import random  # NEW
 
 PATCH_SIZE = 224
 
 # How many CPU workers to use for crop generation
 NUM_PATCH_WORKERS = int(os.getenv("SSL_PATCH_WORKERS", "14"))
+
+# NEW: sampling behaviour knobs (all env-configurable)
+PATCH_STRIDE_FACTOR = float(os.getenv("SSL_PATCH_STRIDE_FACTOR", "1.0"))
+# 1.0  → non-overlapping (old behaviour)
+# 0.5  → 50% overlap, more variety
+
+EXTRA_RANDOM_PATCHES = int(os.getenv("SSL_EXTRA_RANDOM_PER_IMAGE", "4"))
+# How many extra random crops per full image (after grid). 0 = disable.
+
+# Filtering knobs
+BORDERLINE_KEEP_PROB = float(os.getenv("SSL_BORDERLINE_KEEP_PROB", "0.2"))
+MEAN_MARGIN_STRICT   = float(os.getenv("SSL_MEAN_MARGIN_STRICT", "5.0"))
+MEAN_MARGIN_LOOSE    = float(os.getenv("SSL_MEAN_MARGIN_LOOSE", "10.0"))
+
+STRICT_STD_FACTOR = float(os.getenv("SSL_STRICT_STD_FACTOR", "0.6"))
+STRICT_LAP_FACTOR = float(os.getenv("SSL_STRICT_LAP_FACTOR", "0.6"))
+
+LOOSE_STD_FACTOR  = float(os.getenv("SSL_LOOSE_STD_FACTOR", "0.3"))
+LOOSE_LAP_FACTOR  = float(os.getenv("SSL_LOOSE_LAP_FACTOR", "0.3"))
 
 # For resolving image paths from COCO JSONs
 VALID_EXTS = {".tif", ".tiff", ".png", ".jpg", ".jpeg"}
@@ -383,35 +403,47 @@ def compute_patch_stats_from_pil(pil_img):
     return mean, std, lap
 
 
-def should_keep_patch(pil_img, stats: dict | None) -> bool:
+def should_keep_patch(pil_img, stats: dict | None, rng: random.Random | None = None) -> bool:
     """
     Decide whether to keep a patch based on supervised 224×224 stats.
     If stats is None → keep everything.
+
+    NEW:
+    - "Strict" region: keep everything that looks like typical annotated crops.
+    - "Borderline" region: keep with probability BORDERLINE_KEEP_PROB to add variation
+      (background, mucus, weird texture) without flooding with noise.
     """
     if stats is None:
         return True
 
+    if rng is None:
+        rng = random
+
     mean, std, lap = compute_patch_stats_from_pil(pil_img)
 
-    m_p1 = stats["mean"]["p1"]
+    m_p1  = stats["mean"]["p1"]
     m_p99 = stats["mean"]["p99"]
     s_p10 = stats["std"]["p10"]
     l_p10 = stats["lap_var"]["p10"]
 
-    # Slack margins so we don't over-filter
-    mean_margin = 5.0
+    # 1) Strict: well-behaved patches near annotated stats → always keep
+    if (m_p1 - MEAN_MARGIN_STRICT <= mean <= m_p99 + MEAN_MARGIN_STRICT and
+        std >= STRICT_STD_FACTOR * s_p10 and
+        lap >= STRICT_LAP_FACTOR * l_p10):
+        return True
 
-    # Filter extreme dark/bright patches
-    if not (m_p1 - mean_margin <= mean <= m_p99 + mean_margin):
-        return False
+    # 2) Borderline band: a bit darker/brighter / lower texture,
+    # but still not completely empty → keep with some probability
+    in_loose_mean = (m_p1 - MEAN_MARGIN_LOOSE <= mean <= m_p99 + MEAN_MARGIN_LOOSE)
+    in_loose_std  = std >= LOOSE_STD_FACTOR * s_p10
+    in_loose_lap  = lap >= LOOSE_LAP_FACTOR * l_p10
 
-    # Require at least some texture & focus, but not too strict
-    if std < 0.6 * s_p10:
-        return False
-    if lap < 0.6 * l_p10:
-        return False
+    if in_loose_mean and in_loose_std and in_loose_lap:
+        if rng.random() < BORDERLINE_KEEP_PROB:
+            return True
 
-    return True
+    # 3) Everything else: discard (likely too bright/dark/flat/blurry)
+    return False
 
 
 def _process_image_for_crops(
@@ -423,7 +455,8 @@ def _process_image_for_crops(
     """
     Worker function:
     - Opens one full-size image
-    - Generates all candidate 224×224 crops
+    - Generates grid 224×224 crops (with configurable stride)
+    - Adds a few random 224×224 crops per image
     - Filters them using supervised stats
     - Saves accepted crops into crops_dir
 
@@ -434,24 +467,47 @@ def _process_image_for_crops(
     img = _Image.open(img_path).convert("RGB")
     w, h = img.size
 
-    xs = _compute_positions(w, patch_size, patch_size)
-    ys = _compute_positions(h, patch_size, patch_size)
+    # NEW: stride factor for overlap
+    stride = max(1, int(round(patch_size * PATCH_STRIDE_FACTOR)))
+    xs = _compute_positions(w, patch_size, stride)
+    ys = _compute_positions(h, patch_size, stride)
 
     stem = img_path.stem
 
     kept = 0
     cand = 0
 
+    # NEW: deterministic RNG per image to make selection reproducible
+    rng = random.Random(stem)
+
+    # --- grid-based patches ---
     for yi, y in enumerate(ys):
         for xi, x in enumerate(xs):
             box = (x, y, x + patch_size, y + patch_size)
             patch = img.crop(box)
             cand += 1
 
-            if not should_keep_patch(patch, stats):
+            if not should_keep_patch(patch, stats, rng=rng):
                 continue
 
             out_name = f"{stem}_y{yi:02d}_x{xi:02d}.png"
+            out_path = crops_dir / out_name
+            patch.save(out_path)
+            kept += 1
+
+    # --- extra random patches for more variation ---
+    if EXTRA_RANDOM_PATCHES > 0 and w >= patch_size and h >= patch_size:
+        for j in range(EXTRA_RANDOM_PATCHES):
+            x = rng.randint(0, w - patch_size)
+            y = rng.randint(0, h - patch_size)
+            box = (x, y, x + patch_size, y + patch_size)
+            patch = img.crop(box)
+            cand += 1
+
+            if not should_keep_patch(patch, stats, rng=rng):
+                continue
+
+            out_name = f"{stem}_rand{j:02d}.png"
             out_path = crops_dir / out_name
             patch.save(out_path)
             kept += 1
@@ -646,10 +702,3 @@ if __name__ == "__main__":
         # Use default DINOv2 transforms
         transform_args=None,
     )
-
-
-
-
-
-
-
