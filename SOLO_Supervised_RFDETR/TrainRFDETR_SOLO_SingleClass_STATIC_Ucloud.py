@@ -803,7 +803,7 @@ SEARCH_EPI = {
     # "ENCODER_CKPT":  [...]               # intentionally omitted
 
     # For this HPO: always use full train split
-    "TRAIN_FRACTION":  [0.25, 0.5, 0.75, 1.0],
+    "TRAIN_FRACTION":  [0.125, 0.0625, 0.03],
 }
 
 
