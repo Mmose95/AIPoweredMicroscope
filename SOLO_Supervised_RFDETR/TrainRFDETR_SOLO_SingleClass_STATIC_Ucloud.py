@@ -804,7 +804,7 @@ SEARCH_EPI = {
     "ENCODER_CKPT":  [BEST_SSL_CKPT],               # intentionally omitted
 
     # For this HPO: always use full train split
-    "TRAIN_FRACTION":  [0.125, 0.0625, 0.03],
+    "TRAIN_FRACTION":  [0.125, 0.03, 1],
 }
 
 
