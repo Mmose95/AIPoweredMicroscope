@@ -15,7 +15,7 @@ import random  # NEW
 
 PATCH_SIZE = 224
 
-FORCE_REBUILD_SSL_CROPS = os.getenv("SSL_FORCE_REBUILD", "1") == "1"
+FORCE_REBUILD_SSL_CROPS = os.getenv("SSL_FORCE_REBUILD", "0") == "1"
 
 # How many CPU workers to use for crop generation
 NUM_PATCH_WORKERS = int(os.getenv("SSL_PATCH_WORKERS", "14"))
