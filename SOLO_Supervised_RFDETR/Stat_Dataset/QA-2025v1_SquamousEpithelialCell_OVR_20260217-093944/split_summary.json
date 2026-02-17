@@ -1,0 +1,57 @@
+{
+  "dataset_name": "QA-2025v1_SquamousEpithelialCell_OVR_20260217-093944",
+  "source_coco": "D:\\PHD\\PhdData\\CellScanData\\Annotation_Backups\\Quality Assessment Backups\\02-11-2026\\annotations\\instances_default.json",
+  "images_root": "D:/PHD/PhdData/CellScanData/Zoom10x - Quality Assessment_Cleaned",
+  "target_class": "Squamous Epithelial Cell",
+  "seed": 42,
+  "split_ratio": {
+    "train": 0.6,
+    "valid": 0.2,
+    "test": 0.2
+  },
+  "file_name_mode": "relative",
+  "samples": {
+    "train": [
+      "Sample 16",
+      "Sample 17",
+      "Sample 18",
+      "Sample 21",
+      "Sample 23",
+      "Sample 25",
+      "Sample 27",
+      "Sample 30",
+      "Sample 31",
+      "Sample 32",
+      "Sample 34"
+    ],
+    "valid": [
+      "Sample 13",
+      "Sample 14",
+      "Sample 24"
+    ],
+    "test": [
+      "Sample 12",
+      "Sample 15",
+      "Sample 19",
+      "Sample 20",
+      "Sample 36"
+    ]
+  },
+  "counts": {
+    "train": {
+      "n_samples": 11,
+      "n_images": 267,
+      "n_target_boxes": 842
+    },
+    "valid": {
+      "n_samples": 3,
+      "n_images": 110,
+      "n_target_boxes": 272
+    },
+    "test": {
+      "n_samples": 5,
+      "n_images": 59,
+      "n_target_boxes": 567
+    }
+  }
+}

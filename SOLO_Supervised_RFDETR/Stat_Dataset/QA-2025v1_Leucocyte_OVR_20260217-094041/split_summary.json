@@ -1,0 +1,55 @@
+{
+  "dataset_name": "QA-2025v1_Leucocyte_OVR_20260217-094041",
+  "source_coco": "D:\\PHD\\PhdData\\CellScanData\\Annotation_Backups\\Quality Assessment Backups\\02-11-2026\\annotations\\instances_default.json",
+  "images_root": "D:/PHD/PhdData/CellScanData/Zoom10x - Quality Assessment_Cleaned",
+  "target_class": "Leucocyte",
+  "seed": 42,
+  "split_ratio": {
+    "train": 0.6,
+    "valid": 0.2,
+    "test": 0.2
+  },
+  "file_name_mode": "relative",
+  "samples": {
+    "train": [
+      "Sample 13",
+      "Sample 19",
+      "Sample 22",
+      "Sample 23",
+      "Sample 25",
+      "Sample 27",
+      "Sample 28",
+      "Sample 32",
+      "Sample 33",
+      "Sample 35"
+    ],
+    "valid": [
+      "Sample 14",
+      "Sample 31",
+      "Sample 36"
+    ],
+    "test": [
+      "Sample 12",
+      "Sample 15",
+      "Sample 18",
+      "Sample 30"
+    ]
+  },
+  "counts": {
+    "train": {
+      "n_samples": 10,
+      "n_images": 63,
+      "n_target_boxes": 1581
+    },
+    "valid": {
+      "n_samples": 3,
+      "n_images": 11,
+      "n_target_boxes": 773
+    },
+    "test": {
+      "n_samples": 4,
+      "n_images": 33,
+      "n_target_boxes": 987
+    }
+  }
+}
