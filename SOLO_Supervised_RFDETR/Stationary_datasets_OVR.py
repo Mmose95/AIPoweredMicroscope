@@ -6,10 +6,10 @@ from datetime import datetime
 import json, re, random, sys
 
 # ======= USER CONFIG =======
-ALL_COCO_JSON = Path(r"D:/PHD/PhdData/CellScanData/Annotation_Backups/Quality Assessment Backups/28-10-2025/annotations/instances_default.json")
+ALL_COCO_JSON = Path(r"D:/PHD/PhdData/CellScanData/Annotation_Backups/Quality Assessment Backups/02-11-2026/annotations/instances_default.json")
 IMAGES_DIR    = Path(r"D:/PHD/PhdData/CellScanData/Zoom10x - Quality Assessment_Cleaned")
 OUT_ROOT      = Path(r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\SOLO_Supervised_RFDETR/Stat_Dataset")
-TARGET_CLASS  = "Squamous Epithelial Cell"            # "Squamous Epithelial Cell" or "Leucocyte"
+TARGET_CLASS  = "Leucocyte"            # "Squamous Epithelial Cell" or "Leucocyte"
 SPLIT         = (0.60, 0.20, 0.20)
 SEED          = 42
 VALID_EXTS    = {".tif", ".tiff", ".jpg", ".jpeg", ".png"}

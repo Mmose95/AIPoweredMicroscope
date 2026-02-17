@@ -111,6 +111,58 @@ STAT_DATASETS_ROOT = env_path(
     REPO_ROOT / "SOLO_Supervised_RFDETR" / "Stat_Dataset",
 )
 
+import hashlib
+from datetime import datetime
+
+CALIB_MANIFEST_JSONL = SSL_STATS_ROOT / "calib_patch_manifest.jsonl"
+
+def _sha1_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    h = hashlib.sha1()
+    with path.open("rb") as f:
+        while True:
+            b = f.read(chunk_size)
+            if not b:
+                break
+            h.update(b)
+    return h.hexdigest()
+
+def write_calib_manifest(
+    crop_paths: list[Path],
+    manifest_path: Path = CALIB_MANIFEST_JSONL,
+    include_hash: bool = False,   # set True if you want maximum traceability
+) -> dict:
+    """
+    Writes a JSONL manifest: one line per crop used for calibration.
+    Returns a small summary dict you can embed into calib_patch_stats.json.
+    """
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Deterministic ordering = reproducibility
+    crop_paths_sorted = sorted([p.resolve() for p in crop_paths])
+
+    with manifest_path.open("w", encoding="utf-8") as f:
+        for p in crop_paths_sorted:
+            st = p.stat()
+            rec = {
+                "path": str(p),
+                "size_bytes": int(st.st_size),
+                "mtime_utc": datetime.utcfromtimestamp(st.st_mtime).isoformat() + "Z",
+            }
+            if include_hash:
+                rec["sha1"] = _sha1_file(p)
+            f.write(json.dumps(rec) + "\n")
+
+    # Also compute a hash of the manifest content itself (fast integrity check)
+    manifest_sha1 = _sha1_file(manifest_path)
+
+    return {
+        "manifest_path": str(manifest_path),
+        "manifest_sha1": manifest_sha1,
+        "n_entries": len(crop_paths_sorted),
+        "include_hash": bool(include_hash),
+    }
+
+
 # ---------- helpers for resolving image paths ----------
 
 def _index_image_paths(root: Path):
@@ -369,10 +421,22 @@ def build_calibration_stats_if_needed():
         return
 
     stats = compute_stats_from_patch_paths(all_crops)
+
+    # NEW: write manifest of the crops used to compute these stats
+    provenance = write_calib_manifest(
+        all_crops,
+        manifest_path=CALIB_MANIFEST_JSONL,
+        include_hash=False,   # flip to True if you want strongest backtracking
+    )
+
+    stats["provenance"] = provenance
+    stats["source_datasets"] = [str(d.resolve()) for d in dataset_dirs]
+
     CALIB_STATS_JSON.write_text(json.dumps(stats, indent=2), encoding="utf-8")
     SUPERVISED_STATS = stats
     print("[SSL CALIB] Saved stats JSON →", CALIB_STATS_JSON)
-    print(json.dumps(stats, indent=2))
+    print("[SSL CALIB] Saved manifest   →", provenance["manifest_path"])
+
 
 
 # build / load stats on import
@@ -521,10 +585,18 @@ def ensure_ssl_crops_for_sample(sample_dir: Path, patch_size: int = PATCH_SIZE) 
     sample_name = sample_dir.name
     crops_dir = sample_dir / f"SSLCrops ({patch_size}x{patch_size}) for {sample_name}"
 
-    # NEW: force delete existing crop dir
+    #Save old stats with a timestamp to make it auditable.
+    from datetime import datetime
+
     if FORCE_REBUILD_SSL_CROPS and crops_dir.exists():
-        print(f"[ensure_ssl_crops_for_sample] FORCE_REBUILD enabled → removing {crops_dir}")
-        shutil.rmtree(crops_dir, ignore_errors=True)
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup_dir = crops_dir.with_name(crops_dir.name + f"__backup_{ts}")
+        print(f"[ensure_ssl_crops_for_sample] FORCE_REBUILD enabled → moving {crops_dir} → {backup_dir}")
+        try:
+            crops_dir.rename(backup_dir)
+        except Exception:
+            # If rename fails for any reason, fall back to leaving it as-is (non-destructive)
+            print("[ensure_ssl_crops_for_sample][WARN] Could not rename existing crops dir; leaving it in place.")
 
     # If crops exist and not forcing rebuild, reuse them
     if crops_dir.exists():
