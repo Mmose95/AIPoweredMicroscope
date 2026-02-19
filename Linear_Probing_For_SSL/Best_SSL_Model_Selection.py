@@ -708,12 +708,24 @@ def run_probe_for_class(session_root: Path, target_name: str, dataset_dir: Path)
 
     return {"best": best_row, "leaderboard": leaderboard, "out_dir": str(out_root), "dataset_effective": str(data_dir_effective)}
 
-REPO_ROOT = Path.cwd()
-DEFAULT_ROOT = env_path("STAT_DATASETS_ROOT", REPO_ROOT / "Stat_Dataset")
+DEFAULT_ROOT = Path("/work/projects/myproj/SOLO_Supervised_RFDETR/Stat_Dataset")
 
-DATASET_LEUCO = Path(os.getenv("DATASET_LEUCO", str(DEFAULT_ROOT / "QA-2025v2_Leucocyte_OVR")))
-DATASET_EPI   = Path(os.getenv("DATASET_EPI",   str(DEFAULT_ROOT / "QA-2025v2_SquamousEpithelialCell_OVR")))
+def find_latest_dataset(root: Path, prefix: str) -> Path:
+    candidates = sorted(
+        [p for p in root.iterdir() if p.is_dir() and p.name.startswith(prefix)]
+    )
+    if not candidates:
+        raise FileNotFoundError(
+            f"No dataset starting with '{prefix}' found in {root}"
+        )
+    return candidates[-1]  # newest lexicographically (timestamped folders)
 
+DATASET_LEUCO = find_latest_dataset(DEFAULT_ROOT, "QA-2025v2_Leucocyte_OVR")
+DATASET_EPI   = find_latest_dataset(DEFAULT_ROOT, "QA-2025v2_SquamousEpithelialCell_OVR")
+
+print("[DATASETS]")
+print("  Leucocyte:", DATASET_LEUCO)
+print("  Epithelial:", DATASET_EPI)
 
 def main():
 
