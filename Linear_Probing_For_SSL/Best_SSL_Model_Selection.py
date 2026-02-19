@@ -97,12 +97,13 @@ if not DATASET_EPI.exists():
 # ───────────────────────────────────────────────────────────────────────────────
 # OUTPUT ROOT (selection runs)
 # ───────────────────────────────────────────────────────────────────────────────
-# Base output root (stable)
-OUTPUT_BASE = env_path("OUTPUT_BASE", WORK_ROOT / "RFDETR_SOLO_OUTPUT" / "SSL_SELECTION")
-OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
 
 # One timestamped session per script run
 SESSION_ID   = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+OUTPUT_BASE = env_path("OUTPUT_BASE", WORK_ROOT / "Linear_Probing_For_SSL" / f"SSL_SELECTION_{SESSION_ID}")
+OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
+
 SESSION_ROOT = OUTPUT_BASE / f"session_{SESSION_ID}"
 SESSION_ROOT.mkdir(parents=True, exist_ok=False)
 
