@@ -11,7 +11,13 @@ import cv2
 import concurrent.futures
 import re
 from collections import defaultdict
-import random  # NEW
+import random
+
+''' How to introduce new labels and trigger new statistics + crops to be made:
+ Use 'Stationary_datasets_OVR.py' (easiest locally) to make new datasets. upload them to CVAT along with the new 
+ .xlsx and corresponding folders from CVAT, Move the old statistics into a folder 
+ (inside the "SSL_Stats" folder already on ucloud (give it an appropriate name), and then run the code. The missing stats
+ file will trigger generating a new based on the new objets from CVAT'''
 
 PATCH_SIZE = 224
 
@@ -744,6 +750,7 @@ if __name__ == "__main__":
         model="dinov2/vitb14",
         method="dinov2",
 
+        #Gpu args: ddp = distributed (all gpus help each other)
         accelerator="gpu",
         devices="auto",
         strategy="ddp_find_unused_parameters_false",
@@ -766,11 +773,10 @@ if __name__ == "__main__":
                 save_weights_only=True,
             ),
         ),
-
-        # 🔑 Let Lightly / Lightning know the number of epochs explicitly
+        #Set number of epochs to train for
         epochs=100,
 
-        # default DINOv2 transforms
+        # no args = default DINOv2 transforms
         transform_args=None,
     )
 
