@@ -1,10 +1,15 @@
+# ===========================
+# FILE: Best_SSL_Model_Selection.py
+# ===========================
 from __future__ import annotations
+
 from pathlib import Path
 from datetime import datetime
 from inspect import signature
 import os, json, glob, os.path as op, time, csv, re, random
-from collections import defaultdict as ddict, defaultdict
+from collections import defaultdict as ddict
 from PIL import Image
+
 
 # ───────────────────────────────────────────────────────────────────────────────
 # TOGGLES
@@ -17,11 +22,11 @@ PROBE_TARGET = os.environ.get("RFDETR_PROBE_TARGET", "epi").lower()
 
 # Patchified dataset mode (same behaviour as your HPO script)
 USE_PATCH_224 = bool(int(os.getenv("RFDETR_USE_PATCH_224", "1")))
-PATCH_SIZE = int(os.getenv("RFDETR_PATCH_SIZE", "224"))
+PATCH_SIZE    = int(os.getenv("RFDETR_PATCH_SIZE", "224"))
 
 # Fraction of TRAIN split to use for *all* runs (must be same across ckpts)
 TRAIN_FRACTION = float(os.getenv("RFDETR_TRAIN_FRACTION", "0.125"))
-FRACTION_SEED  = int(os.getenv("RFDETR_FRACTION_SEED", "42"))  # must be fixed
+FRACTION_SEED  = int(os.getenv("RFDETR_FRACTION_SEED", "42"))
 
 # Static training seed for RFDETR
 SEED = int(os.getenv("SEED", "42"))
@@ -29,6 +34,7 @@ SEED = int(os.getenv("SEED", "42"))
 print(f"[PROBE] Target classes: {PROBE_TARGET!r} (env RFDETR_PROBE_TARGET)")
 print(f"[PATCH MODE] USE_PATCH_224={USE_PATCH_224}  PATCH_SIZE={PATCH_SIZE}")
 print(f"[PROBE] TRAIN_FRACTION={TRAIN_FRACTION}  FRACTION_SEED={FRACTION_SEED}  SEED={SEED}")
+
 
 # ───────────────────────────────────────────────────────────────────────────────
 # UCloud-friendly path detection
@@ -40,14 +46,17 @@ def _detect_user_base() -> str | None:
     sdu = [d for d in glob.glob("/work/*#*") if op.isdir(d)]
     return op.basename(sdu[0]) if sdu else None
 
+
 USER_BASE_DIR = os.environ.get("USER_BASE_DIR") or _detect_user_base() or ""
 if USER_BASE_DIR:
     os.environ["USER_BASE_DIR"] = USER_BASE_DIR
 WORK_ROOT = Path("/work") / USER_BASE_DIR if USER_BASE_DIR else Path.cwd()
 
+
 def env_path(name: str, default: Path) -> Path:
     v = os.getenv(name, "").strip()
     return Path(v) if v else default
+
 
 # Where the **real images** live (on your drive) for resolving COCO file_name paths
 IMAGES_FALLBACK_ROOT = env_path(
@@ -55,64 +64,22 @@ IMAGES_FALLBACK_ROOT = env_path(
     WORK_ROOT / "CellScanData" / "Zoom10x - Quality Assessment_Cleaned",
 )
 
-SSL_CKPT_ROOT = env_path(
-    "SSL_CKPT_ROOT",
-    WORK_ROOT / "SSL_Checkpoints",
-)
-
-SSL_BACKBONES = [
-    SSL_CKPT_ROOT / "epoch_epoch-004.ckpt",
-    SSL_CKPT_ROOT / "epoch_epoch-009.ckpt",
-    SSL_CKPT_ROOT / "epoch_epoch-014.ckpt",
-    SSL_CKPT_ROOT / "epoch_epoch-029.ckpt", #This one is the "best" from long SSL training.
-    SSL_CKPT_ROOT / "last.ckpt",
-]
-
-print("[SSL BACKBONES]")
-for p in SSL_BACKBONES:
-    print("  ", p)
-
-BEST_SSL_CKPT = str(SSL_CKPT_ROOT / "epoch_epoch-029.ckpt")  # <- adjust to winner if needed
-
-# ───────────────────────────────────────────────────────────────────────────────
-# ====== STATIC OVR DATASETS (jsons live in repo / project tree) ======
-# ───────────────────────────────────────────────────────────────────────────────
-REPO_ROOT = Path.cwd()
-DEFAULT_ROOT = env_path("STAT_DATASETS_ROOT", REPO_ROOT / "Stat_Dataset")
-
-DATASET_LEUCO = Path(os.getenv("DATASET_LEUCO", str(DEFAULT_ROOT / "QA-2025v1_Leucocyte_OVR")))
-DATASET_EPI   = Path(os.getenv("DATASET_EPI",   str(DEFAULT_ROOT / "QA-2025v1_SquamousEpithelialCell_OVR")))
-
-def _autofind_dataset(root: Path, token: str) -> Path:
-    cands = sorted([p for p in root.glob(f"*{token}*") if p.is_dir()])
-    if not cands:
-        raise FileNotFoundError(f"Could not find dataset for token '{token}' under {root}")
-    return cands[-1]
-
-if not DATASET_LEUCO.exists():
-    DATASET_LEUCO = _autofind_dataset(DEFAULT_ROOT, "Leucocyte_OVR")
-if not DATASET_EPI.exists():
-    DATASET_EPI = _autofind_dataset(DEFAULT_ROOT, "SquamousEpithelialCell_OVR")
-
 # ───────────────────────────────────────────────────────────────────────────────
 # OUTPUT ROOT (selection runs)
+#   - One timestamped session per script run
+#   - OUTPUT_ROOT is an alias used for caches + run outputs
 # ───────────────────────────────────────────────────────────────────────────────
-
-# One timestamped session per script run
-SESSION_ID   = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-OUTPUT_BASE = env_path("OUTPUT_BASE", WORK_ROOT / "Linear_Probing_For_SSL" / f"SSL_SELECTION_{SESSION_ID}")
+OUTPUT_BASE = env_path("OUTPUT_BASE", WORK_ROOT / "Linear_Probing_For_SSL" / "SSL_SELECTION")
 OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
 
+SESSION_ID   = datetime.now().strftime("%Y%m%d_%H%M%S")
 SESSION_ROOT = OUTPUT_BASE / f"session_{SESSION_ID}"
 SESSION_ROOT.mkdir(parents=True, exist_ok=False)
 
-print(f"[PROBE] Session root: {SESSION_ROOT}")
+OUTPUT_ROOT = SESSION_ROOT  # compatibility alias
 
-# Backwards-compatible alias used by the rest of the script
-OUTPUT_ROOT = SESSION_ROOT
-
-print(f"[PROBE] Session root: {SESSION_ROOT}")
+print(f"[PROBE] OUTPUT_BASE : {OUTPUT_BASE}")
+print(f"[PROBE] SESSION_ROOT: {SESSION_ROOT}")
 
 # ───────────────────────────────────────────────────────────────────────────────
 # SSL CHECKPOINT SWEEP
@@ -120,12 +87,12 @@ print(f"[PROBE] Session root: {SESSION_ROOT}")
 SSL_CKPT_ROOT = env_path("SSL_CKPT_ROOT", WORK_ROOT / "SSL_Checkpoints")
 
 # Option A: provide explicit list via env (comma-separated)
-#   export SSL_CKPTS="epoch_epoch-009.ckpt,epoch_epoch-019.ckpt,last.ckpt"
+#   export SSL_CKPTS="epoch_epoch-004.ckpt,epoch_epoch-014.ckpt,last.ckpt"
 _ssl_list = os.getenv("SSL_CKPTS", "").strip()
 
+
 def _find_ssl_ckpts(root: Path) -> list[Path]:
-    # common suffixes
-    cands = []
+    cands: list[Path] = []
     for ext in ("*.ckpt", "*.pth", "*.pt"):
         cands += list(root.glob(ext))
 
@@ -147,6 +114,7 @@ def _find_ssl_ckpts(root: Path) -> list[Path]:
     cands.sort(key=sort_key)
     return cands
 
+
 if _ssl_list:
     SSL_BACKBONES = [SSL_CKPT_ROOT / s.strip() for s in _ssl_list.split(",") if s.strip()]
 else:
@@ -157,10 +125,11 @@ for p in SSL_BACKBONES:
     print("  ", p)
 
 # ───────────────────────────────────────────────
-# Path resolution helpers for COCO (same as your HPO script)
+# Path resolution helpers for COCO
 # ───────────────────────────────────────────────
 VALID_EXTS = {".tif", ".tiff", ".png", ".jpg", ".jpeg"}
 WINDOWS_PATH_RE = re.compile(r"^[a-zA-Z]:\\")  # detect old Windows-style paths
+
 
 def _index_image_paths(root: Path):
     by_rel = {}
@@ -172,6 +141,7 @@ def _index_image_paths(root: Path):
             by_rel[rel] = p
             by_name[p.name].append(p)
     return by_rel, by_name
+
 
 def _resolve_image_path(file_name: str, images_root: Path, by_rel: dict, by_name: dict) -> Path:
     rel = file_name.replace("\\", "/")
@@ -193,6 +163,7 @@ def _resolve_image_path(file_name: str, images_root: Path, by_rel: dict, by_name
             cands.sort(key=lambda q: len(str(q)))
             return cands[0]
     raise FileNotFoundError(f"Could not resolve image '{file_name}' under {images_root}")
+
 
 def build_resolved_static_dataset(src_dir: Path, dst_dir: Path) -> Path:
     ok_marker = dst_dir / ".RESOLVED_OK"
@@ -250,6 +221,7 @@ def build_resolved_static_dataset(src_dir: Path, dst_dir: Path) -> Path:
 
     ok_marker.write_text("ok", encoding="utf-8")
     return dst_dir
+
 
 # ───────────────────────────────────────────────
 # FRACTIONAL TRAIN SPLIT (deterministic + cached)
@@ -310,41 +282,207 @@ def build_fractional_train_split(resolved_root: Path, frac: float, cache_root: P
     ok_marker.write_text("ok", encoding="utf-8")
     return dst_root
 
-# ───────────────────────────────────────────────
-# PATCHIFY DATASET (optional) — keep your existing approach
-# NOTE: For brevity, patchify is not reprinted here. If you need it, paste your
-# build_patchified_dataset(...) + helpers from your HPO script and reuse.
-# ───────────────────────────────────────────────
-# >>> If you want patch mode identical to HPO, paste:
-#     - _compute_positions
-#     - _patchify_split
-#     - build_patchified_dataset
-# and then use it below in get_or_build_probe_dataset().
 
-def get_or_build_probe_dataset(target_name: str, dataset_dir: Path, root_out: Path) -> Path:
+# ───────────────────────────────────────────────
+# PATCHIFY DATASET (640×640 → 224×224 crops, no resizing)
+# (copied from your HPO script)
+# ───────────────────────────────────────────────
+def _compute_positions(length: int, patch: int, stride: int):
+    positions = []
+    x = 0
+    while x + patch <= length:
+        positions.append(x)
+        x += stride
+    last = length - patch
+    if last >= 0 and (not positions or positions[-1] != last):
+        positions.append(last)
+    return sorted(set(positions))
+
+
+def _patchify_split(
+    src_json: Path,
+    dst_json: Path,
+    split_images_dir: Path,
+    patch_size: int,
+    stride: int,
+    start_img_id: int,
+    start_ann_id: int,
+) -> tuple[int, int, int, int]:
+    data = json.loads(src_json.read_text(encoding="utf-8"))
+    images = data.get("images", [])
+    anns   = data.get("annotations", [])
+    cats   = data.get("categories", [])
+
+    anns_by_img = ddict(list)
+    for a in anns:
+        anns_by_img[a["image_id"]].append(a)
+
+    new_images = []
+    new_anns = []
+
+    img_id = start_img_id
+    ann_id = start_ann_id
+
+    split_images_dir.mkdir(parents=True, exist_ok=True)
+
+    for im in images:
+        fname = im["file_name"]
+        img_path = Path(fname)
+
+        try:
+            img = Image.open(img_path).convert("RGB")
+        except Exception as e:
+            print(f"[PATCHIFY][WARN] Failed to open {img_path}: {e}")
+            continue
+
+        W, H = img.size
+        xs = _compute_positions(W, patch_size, stride)
+        ys = _compute_positions(H, patch_size, stride)
+
+        img_anns = anns_by_img.get(im["id"], [])
+
+        stem = Path(fname).stem
+
+        for yi, y0 in enumerate(ys):
+            for xi, x0 in enumerate(xs):
+                x1 = x0 + patch_size
+                y1 = y0 + patch_size
+                box = (x0, y0, x1, y1)
+
+                patch = img.crop(box)
+                out_name = f"{stem}_y{yi:02d}_x{xi:02d}.png"
+                out_path = split_images_dir / out_name
+                patch.save(out_path)
+
+                this_img_id = img_id
+                img_id += 1
+
+                new_images.append({
+                    "id": this_img_id,
+                    "file_name": str(out_path),
+                    "width": patch_size,
+                    "height": patch_size,
+                    "original_image_id": im["id"],
+                })
+
+                # re-map bboxes
+                for a in img_anns:
+                    x, y, w, h = a["bbox"]
+                    x2 = x + w
+                    y2 = y + h
+
+                    # intersection with patch
+                    ix0 = max(x0, x)
+                    iy0 = max(y0, y)
+                    ix1 = min(x1, x2)
+                    iy1 = min(y1, y2)
+
+                    if ix1 <= ix0 or iy1 <= iy0:
+                        continue
+
+                    inter_w = ix1 - ix0
+                    inter_h = iy1 - iy0
+                    inter_area = inter_w * inter_h
+                    orig_area = w * h if w > 0 and h > 0 else 1.0
+
+                    if inter_area / orig_area < 0.25:
+                        continue
+
+                    nx = ix0 - x0
+                    ny = iy0 - y0
+                    nw = inter_w
+                    nh = inter_h
+
+                    if nw <= 1 or nh <= 1:
+                        continue
+
+                    na = dict(a)
+                    na["id"] = ann_id
+                    na["image_id"] = this_img_id
+                    na["bbox"] = [float(nx), float(ny), float(nw), float(nh)]
+                    na["area"] = float(nw * nh)
+                    ann_id += 1
+                    new_anns.append(na)
+
+    out = {"images": new_images, "annotations": new_anns, "categories": cats}
+    dst_json.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+
+    print(f"[PATCHIFY] {src_json.parent.name}: {len(new_images)} images, {len(new_anns)} anns → {dst_json}")
+    return img_id, ann_id, len(new_images), len(new_anns)
+
+
+def build_patchified_dataset(
+    resolved_root: Path,
+    cache_root: Path,
+    patch_size: int = 224,
+    stride: int | None = None
+) -> Path:
+    if stride is None:
+        stride = patch_size
+
+    tag = f"PATCH{patch_size}"
+    dst_root = cache_root / f"{resolved_root.name}_{tag}"
+    ok_marker = dst_root / ".PATCH_OK"
+
+    if ok_marker.exists():
+        print(f"[PATCHIFY] Using cached patchified dataset: {dst_root}")
+        return dst_root
+
+    print(f"[PATCHIFY] Building patchified dataset {tag} → {dst_root}")
+    dst_root.mkdir(parents=True, exist_ok=True)
+
+    next_img_id = 1
+    next_ann_id = 1
+    total_imgs = 0
+    total_anns = 0
+
+    for split in ("train", "valid", "test"):
+        src_json = resolved_root / split / "_annotations.coco.json"
+        if not src_json.exists():
+            continue
+
+        split_dir = dst_root / split
+        split_dir.mkdir(parents=True, exist_ok=True)
+        split_images_dir = split_dir / "images"
+
+        dst_json = split_dir / "_annotations.coco.json"
+
+        next_img_id, next_ann_id, n_imgs, n_anns = _patchify_split(
+            src_json,
+            dst_json,
+            split_images_dir,
+            patch_size=patch_size,
+            stride=stride,
+            start_img_id=next_img_id,
+            start_ann_id=next_ann_id,
+        )
+        total_imgs += n_imgs
+        total_anns += n_anns
+
+    print(f"[PATCHIFY] TOTAL: {total_imgs} images, {total_anns} annotations in {dst_root}")
+    ok_marker.write_text("ok", encoding="utf-8")
+    return dst_root
+
+
+def get_or_build_probe_dataset(dataset_dir: Path, root_out: Path) -> Path:
     """
     Build the *single* dataset that ALL checkpoints will train on for this class:
       1) resolved dataset (absolute file_name)
-      2) optional patchified dataset (if you paste + enable it)
+      2) optional patchified dataset (no resizing)
       3) deterministic fractional TRAIN split (cached)
     """
-    # step 1: resolved
     resolved_cache = root_out / f"{dataset_dir.name}_RESOLVED"
     resolved_dir = build_resolved_static_dataset(dataset_dir, resolved_cache)
 
-    # step 2: patchify (optional)
     data_dir = resolved_dir
     if USE_PATCH_224:
-        # If you pasted build_patchified_dataset from your HPO script, enable this:
-        # data_dir = build_patchified_dataset(resolved_root=resolved_dir, cache_root=root_out,
-        #                                    patch_size=PATCH_SIZE, stride=PATCH_SIZE)
-        #
-        # If you *don’t* paste it, we still force resolution to 224 during training (but images remain 640).
-        # That’s not what you want for “no resizing”. So: strongly recommended to paste patchify.
-        print("[WARN] USE_PATCH_224=1 but patchify builder not included in this script.")
-        print("       Paste your build_patchified_dataset() here for identical behaviour.")
+        data_dir = build_patchified_dataset(
+            resolved_root=resolved_dir,
+            cache_root=root_out,
+            patch_size=PATCH_SIZE,
+            stride=PATCH_SIZE,
+        )
 
-    # step 3: fixed fractional split (this is the key for identical data)
     data_dir = build_fractional_train_split(
         resolved_root=data_dir,
         frac=TRAIN_FRACTION,
@@ -352,6 +490,7 @@ def get_or_build_probe_dataset(target_name: str, dataset_dir: Path, root_out: Pa
         seed=FRACTION_SEED,
     )
     return data_dir
+
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Metrics extraction (reuse your find_best_val)
@@ -388,27 +527,30 @@ def find_best_val(output_dir: Path) -> dict:
                 continue
             try:
                 js = json.loads(p.read_text(encoding="utf-8"))
+
                 def pick(keys):
                     for k in keys:
                         if k in js and js[k] is not None:
                             return float(js[k])
+
                 return {
                     "best_epoch": js.get("best") or js.get("best_epoch") or js.get("epoch"),
-                    "map50":      pick(["map50","mAP50","ap50","AP50","bbox/AP50"]),
-                    "map5095":    pick(["map","mAP","mAP5095","bbox/mAP"]),
+                    "map50":      pick(["map50", "mAP50", "ap50", "AP50", "bbox/AP50"]),
+                    "map5095":    pick(["map", "mAP", "mAP5095", "bbox/mAP"]),
                     "source":     name,
                 }
             except Exception:
                 continue
     return {"best_epoch": None, "map50": None, "map5095": None, "source": "not_found"}
 
+
 # ───────────────────────────────────────────────────────────────────────────────
 # STATIC RF-DETR TRAINING CONFIG (ONLY SSL CKPT CHANGES)
 # ───────────────────────────────────────────────────────────────────────────────
 STATIC_CFG = dict(
     MODEL_CLS="RFDETRLarge",
-    RESOLUTION=224 if USE_PATCH_224 else 672,   # if patchify exists, set 224
-    EPOCHS=40,                                 # keep fixed for fair comparison
+    RESOLUTION=224 if USE_PATCH_224 else 672,
+    EPOCHS=40,
     LR=5e-5,
     LR_ENCODER_MULT=1.0,
     BATCH=16 if USE_PATCH_224 else 4,
@@ -423,11 +565,8 @@ STATIC_CFG = dict(
 
 NUM_WORKERS = int(os.getenv("NUM_WORKERS", "8"))
 
-# ───────────────────────────────────────────────────────────────────────────────
+
 def train_one_run(target_name: str, dataset_dir_effective: Path, out_dir: Path, backbone_ckpt: str) -> dict:
-    """
-    Single run with static params. Only backbone_ckpt changes.
-    """
     from rfdetr import RFDETRSmall, RFDETRMedium, RFDETRLarge
     name2cls = {"RFDETRSmall": RFDETRSmall, "RFDETRMedium": RFDETRMedium, "RFDETRLarge": RFDETRLarge}
     model_cls = name2cls[STATIC_CFG["MODEL_CLS"]]
@@ -436,10 +575,7 @@ def train_one_run(target_name: str, dataset_dir_effective: Path, out_dir: Path, 
     sig = signature(model.train)
     can = set(sig.parameters.keys())
 
-    # Force resolution in patch mode
-    resolution = STATIC_CFG["RESOLUTION"]
-    if USE_PATCH_224:
-        resolution = PATCH_SIZE
+    resolution = PATCH_SIZE if USE_PATCH_224 else STATIC_CFG["RESOLUTION"]
 
     kwargs = dict(
         dataset_dir=str(dataset_dir_effective),
@@ -463,7 +599,7 @@ def train_one_run(target_name: str, dataset_dir_effective: Path, out_dir: Path, 
         persistent_workers=True,
 
         seed=SEED,
-        early_stopping=True,          # you can set False if you want strict fairness; otherwise keep True but identical
+        early_stopping=True,
         checkpoint_interval=10,
         run_test=True,
     )
@@ -472,11 +608,9 @@ def train_one_run(target_name: str, dataset_dir_effective: Path, out_dir: Path, 
         if name in can and value is not None:
             kwargs[name] = value
 
-    # SSL backbone checkpoint
     maybe("encoder_name", backbone_ckpt)
     maybe("pretrained_backbone", backbone_ckpt)
 
-    # resizing behaviour
     if USE_PATCH_224:
         maybe("square_resize_div_64", False)
         maybe("do_random_resize_via_padding", False)
@@ -498,6 +632,7 @@ def train_one_run(target_name: str, dataset_dir_effective: Path, out_dir: Path, 
         "use_patch_224": USE_PATCH_224,
         "patch_size": PATCH_SIZE if USE_PATCH_224 else None,
         "seed": SEED,
+        "session_root": str(SESSION_ROOT),
     }, indent=2), encoding="utf-8")
 
     print(f"[TRAIN] {model.__class__.__name__} — {target_name} — SSL={Path(backbone_ckpt).name} → {out_dir}")
@@ -507,22 +642,18 @@ def train_one_run(target_name: str, dataset_dir_effective: Path, out_dir: Path, 
     (out_dir / "val_best_summary.json").write_text(json.dumps(best, indent=2), encoding="utf-8")
     return best
 
-# ───────────────────────────────────────────────────────────────────────────────
+
 def run_probe_for_class(session_root: Path, target_name: str, dataset_dir: Path) -> dict:
-    """
-    Build the *single* dataset once, then sweep SSL checkpoints.
-    """
     class_token = (
         "Epithelial" if "Epithelial" in target_name else
         "Leucocytes" if "Leucocyte" in target_name else
         target_name.replace(" ", "")
     )
-
-    out_root = session_root / class_token  # <- includes date+timestamp via session_root
+    out_root = session_root / class_token
     out_root.mkdir(parents=True, exist_ok=True)
 
-    # Build identical dataset once
-    data_dir_effective = get_or_build_probe_dataset(target_name, dataset_dir, OUTPUT_ROOT)
+    # Build identical dataset once (cached under OUTPUT_ROOT)
+    data_dir_effective = get_or_build_probe_dataset(dataset_dir, OUTPUT_ROOT)
 
     leaderboard = []
     for i, ckpt in enumerate(SSL_BACKBONES, start=1):
@@ -559,7 +690,6 @@ def run_probe_for_class(session_root: Path, target_name: str, dataset_dir: Path)
 
         print(f"[PROBE] {target_name} — {ckpt.name} — AP50={row['val_AP50']}  mAP={row['val_mAP5095']}")
 
-    # sort and save leaderboard
     def sort_key(r):
         a = r["val_AP50"]; b = r["val_mAP5095"]
         return (-(a if a is not None else -1), -(b if b is not None else -1))
@@ -578,25 +708,33 @@ def run_probe_for_class(session_root: Path, target_name: str, dataset_dir: Path)
 
     return {"best": best_row, "leaderboard": leaderboard, "out_dir": str(out_root), "dataset_effective": str(data_dir_effective)}
 
-# ───────────────────────────────────────────────────────────────────────────────
+REPO_ROOT = Path.cwd()
+DEFAULT_ROOT = env_path("STAT_DATASETS_ROOT", REPO_ROOT / "Stat_Dataset")
+
+DATASET_LEUCO = Path(os.getenv("DATASET_LEUCO", str(DEFAULT_ROOT / "QA-2025v2_Leucocyte_OVR")))
+DATASET_EPI   = Path(os.getenv("DATASET_EPI",   str(DEFAULT_ROOT / "QA-2025v2_SquamousEpithelialCell_OVR")))
+
+
 def main():
+
     # sanity: dataset splits exist
+    # NOTE: we only require train+valid, like your HPO script
+    #       (test may exist but not required)
     for p in (DATASET_LEUCO, DATASET_EPI):
         for part in ("train", "valid"):
             if not (p / part / "_annotations.coco.json").exists():
                 raise FileNotFoundError(f"Missing {part} split in {p}")
 
-    session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    session_root = OUTPUT_ROOT / f"session_{session_id}"
-    session_root.mkdir(parents=True, exist_ok=False)
-    print(f"[PROBE] Session root: {session_root}")
+    # IMPORTANT: do NOT create a new session root here.
+    # Use the already-created SESSION_ROOT/SESSION_ID at top of file.
+    session_root = SESSION_ROOT
+    session_id   = SESSION_ID
 
-    selected = []
+    selected: list[tuple[str, Path]] = []
     if PROBE_TARGET in ("leu", "all"):
         selected.append(("Leucocyte", DATASET_LEUCO))
     if PROBE_TARGET in ("epi", "all"):
         selected.append(("Squamous Epithelial Cell", DATASET_EPI))
-
     if not selected:
         raise RuntimeError("RFDETR_PROBE_TARGET must be one of: leu, epi, all")
 
@@ -607,6 +745,7 @@ def main():
     final = {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "session_id": session_id,
+        "session_root": str(session_root),
         "work_root": str(WORK_ROOT),
         "ssl_ckpt_root": str(SSL_CKPT_ROOT),
         "ssl_ckpts": [str(p) for p in SSL_BACKBONES],
@@ -623,6 +762,7 @@ def main():
     summary_path.write_text(json.dumps(final, indent=2), encoding="utf-8")
     print("\n[FINAL] Summary →", summary_path)
     print(json.dumps(final, indent=2))
+
 
 if __name__ == "__main__":
     main()
