@@ -299,6 +299,12 @@ def _compute_positions(length: int, patch: int, stride: int):
     return sorted(set(positions))
 
 
+from __future__ import annotations
+from pathlib import Path
+import json
+import time
+from PIL import Image
+
 def _patchify_split(
     src_json: Path,
     dst_json: Path,
@@ -307,107 +313,131 @@ def _patchify_split(
     stride: int,
     start_img_id: int,
     start_ann_id: int,
+    progress_every_images: int = 25,
 ) -> tuple[int, int, int, int]:
+    """
+    Build a patchified COCO split:
+      - src_json must already have absolute 'file_name' paths
+      - crops each image into patch_size×patch_size tiles with given stride
+      - remaps bboxes into each patch and filters by overlap threshold
+    Returns (next_img_id, next_ann_id, n_new_images, n_new_anns)
+    """
+
+    t0 = time.time()
+
     data = json.loads(src_json.read_text(encoding="utf-8"))
     images = data.get("images", [])
     anns   = data.get("annotations", [])
     cats   = data.get("categories", [])
 
+    # group annotations per original image id
     anns_by_img = ddict(list)
     for a in anns:
         anns_by_img[a["image_id"]].append(a)
 
-    new_images = []
-    new_anns = []
+    new_images: list[dict] = []
+    new_anns: list[dict] = []
 
     img_id = start_img_id
     ann_id = start_ann_id
 
     split_images_dir.mkdir(parents=True, exist_ok=True)
 
-    for im in images:
-        fname = im["file_name"]
-        img_path = Path(fname)
+    n_src = len(images)
+    split_name = src_json.parent.name
+
+    for idx, im in enumerate(images, start=1):
+        if progress_every_images and (idx == 1 or idx % progress_every_images == 0):
+            print(f"[PATCHIFY] {split_name}: {idx}/{n_src} source images... (new_imgs={len(new_images)}, new_anns={len(new_anns)})")
+
+        img_path = Path(im["file_name"])
+        img_anns = anns_by_img.get(im["id"], [])
+        stem = img_path.stem
 
         try:
-            img = Image.open(img_path).convert("RGB")
+            # context manager ensures file handle is closed
+            with Image.open(img_path) as _img:
+                img = _img.convert("RGB")
+                W, H = img.size
+
+                xs = _compute_positions(W, patch_size, stride)
+                ys = _compute_positions(H, patch_size, stride)
+
+                for yi, y0 in enumerate(ys):
+                    for xi, x0 in enumerate(xs):
+                        x1 = x0 + patch_size
+                        y1 = y0 + patch_size
+
+                        out_name = f"{stem}_y{yi:02d}_x{xi:02d}.png"
+                        out_path = split_images_dir / out_name
+
+                        # crop + save patch
+                        patch = img.crop((x0, y0, x1, y1))
+                        patch.save(out_path)
+
+                        this_img_id = img_id
+                        img_id += 1
+
+                        new_images.append({
+                            "id": this_img_id,
+                            "file_name": str(out_path),
+                            "width": patch_size,
+                            "height": patch_size,
+                            "original_image_id": im["id"],
+                        })
+
+                        # remap bboxes into patch coordinates
+                        for a in img_anns:
+                            x, y, w, h = a["bbox"]
+                            if w <= 0 or h <= 0:
+                                continue
+
+                            x2 = x + w
+                            y2 = y + h
+
+                            ix0 = max(x0, x)
+                            iy0 = max(y0, y)
+                            ix1 = min(x1, x2)
+                            iy1 = min(y1, y2)
+
+                            if ix1 <= ix0 or iy1 <= iy0:
+                                continue
+
+                            inter_w = ix1 - ix0
+                            inter_h = iy1 - iy0
+                            inter_area = inter_w * inter_h
+                            orig_area = w * h
+
+                            # keep only if sufficient overlap of original bbox
+                            if (inter_area / orig_area) < 0.25:
+                                continue
+
+                            nx = ix0 - x0
+                            ny = iy0 - y0
+                            nw = inter_w
+                            nh = inter_h
+
+                            if nw <= 1 or nh <= 1:
+                                continue
+
+                            na = dict(a)
+                            na["id"] = ann_id
+                            na["image_id"] = this_img_id
+                            na["bbox"] = [float(nx), float(ny), float(nw), float(nh)]
+                            na["area"] = float(nw * nh)
+                            ann_id += 1
+                            new_anns.append(na)
+
         except Exception as e:
-            print(f"[PATCHIFY][WARN] Failed to open {img_path}: {e}")
+            print(f"[PATCHIFY][WARN] Failed to open/process {img_path}: {e}")
             continue
-
-        W, H = img.size
-        xs = _compute_positions(W, patch_size, stride)
-        ys = _compute_positions(H, patch_size, stride)
-
-        img_anns = anns_by_img.get(im["id"], [])
-
-        stem = Path(fname).stem
-
-        for yi, y0 in enumerate(ys):
-            for xi, x0 in enumerate(xs):
-                x1 = x0 + patch_size
-                y1 = y0 + patch_size
-                box = (x0, y0, x1, y1)
-
-                patch = img.crop(box)
-                out_name = f"{stem}_y{yi:02d}_x{xi:02d}.png"
-                out_path = split_images_dir / out_name
-                patch.save(out_path)
-
-                this_img_id = img_id
-                img_id += 1
-
-                new_images.append({
-                    "id": this_img_id,
-                    "file_name": str(out_path),
-                    "width": patch_size,
-                    "height": patch_size,
-                    "original_image_id": im["id"],
-                })
-
-                # re-map bboxes
-                for a in img_anns:
-                    x, y, w, h = a["bbox"]
-                    x2 = x + w
-                    y2 = y + h
-
-                    # intersection with patch
-                    ix0 = max(x0, x)
-                    iy0 = max(y0, y)
-                    ix1 = min(x1, x2)
-                    iy1 = min(y1, y2)
-
-                    if ix1 <= ix0 or iy1 <= iy0:
-                        continue
-
-                    inter_w = ix1 - ix0
-                    inter_h = iy1 - iy0
-                    inter_area = inter_w * inter_h
-                    orig_area = w * h if w > 0 and h > 0 else 1.0
-
-                    if inter_area / orig_area < 0.25:
-                        continue
-
-                    nx = ix0 - x0
-                    ny = iy0 - y0
-                    nw = inter_w
-                    nh = inter_h
-
-                    if nw <= 1 or nh <= 1:
-                        continue
-
-                    na = dict(a)
-                    na["id"] = ann_id
-                    na["image_id"] = this_img_id
-                    na["bbox"] = [float(nx), float(ny), float(nw), float(nh)]
-                    na["area"] = float(nw * nh)
-                    ann_id += 1
-                    new_anns.append(na)
 
     out = {"images": new_images, "annotations": new_anns, "categories": cats}
     dst_json.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
 
-    print(f"[PATCHIFY] {src_json.parent.name}: {len(new_images)} images, {len(new_anns)} anns → {dst_json}")
+    dt = round(time.time() - t0, 2)
+    print(f"[PATCHIFY] {split_name}: wrote {len(new_images)} patch-images, {len(new_anns)} anns → {dst_json}  ({dt}s)")
+
     return img_id, ann_id, len(new_images), len(new_anns)
 
 
@@ -415,20 +445,31 @@ def build_patchified_dataset(
     resolved_root: Path,
     cache_root: Path,
     patch_size: int = 224,
-    stride: int | None = None
+    stride: int | None = None,
+    progress_every_images: int = 25,
 ) -> Path:
+    """
+    Build a patchified COCO dataset from a *resolved* dataset (absolute file_name paths).
+    Produces:
+      dst_root/{train,valid,test}/images/*.png
+      dst_root/{train,valid,test}/_annotations.coco.json
+    """
+
     if stride is None:
         stride = patch_size
 
-    tag = f"PATCH{patch_size}"
+    tag = f"PATCH{patch_size}_STRIDE{stride}"
     dst_root = cache_root / f"{resolved_root.name}_{tag}"
     ok_marker = dst_root / ".PATCH_OK"
+
+    print("[PATCHIFY] Starting patch generation...")
+    print(f"[PATCHIFY] resolved_root={resolved_root}")
+    print(f"[PATCHIFY] dst_root={dst_root}")
 
     if ok_marker.exists():
         print(f"[PATCHIFY] Using cached patchified dataset: {dst_root}")
         return dst_root
 
-    print(f"[PATCHIFY] Building patchified dataset {tag} → {dst_root}")
     dst_root.mkdir(parents=True, exist_ok=True)
 
     next_img_id = 1
@@ -439,29 +480,32 @@ def build_patchified_dataset(
     for split in ("train", "valid", "test"):
         src_json = resolved_root / split / "_annotations.coco.json"
         if not src_json.exists():
+            print(f"[PATCHIFY] {split}: skip (no _annotations.coco.json)")
             continue
 
         split_dir = dst_root / split
         split_dir.mkdir(parents=True, exist_ok=True)
-        split_images_dir = split_dir / "images"
 
+        split_images_dir = split_dir / "images"
         dst_json = split_dir / "_annotations.coco.json"
 
         next_img_id, next_ann_id, n_imgs, n_anns = _patchify_split(
-            src_json,
-            dst_json,
-            split_images_dir,
+            src_json=src_json,
+            dst_json=dst_json,
+            split_images_dir=split_images_dir,
             patch_size=patch_size,
             stride=stride,
             start_img_id=next_img_id,
             start_ann_id=next_ann_id,
+            progress_every_images=progress_every_images,
         )
         total_imgs += n_imgs
         total_anns += n_anns
 
-    print(f"[PATCHIFY] TOTAL: {total_imgs} images, {total_anns} annotations in {dst_root}")
+    print(f"[PATCHIFY] TOTAL: {total_imgs} patch-images, {total_anns} annotations in {dst_root}")
     ok_marker.write_text("ok", encoding="utf-8")
     return dst_root
+
 
 
 def get_or_build_probe_dataset(dataset_dir: Path, root_out: Path) -> Path:
