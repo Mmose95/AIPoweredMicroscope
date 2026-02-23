@@ -760,7 +760,10 @@ def run_probe_for_class(session_root: Path, target_name: str, dataset_dir: Path)
         (run_dir / "probe_record.json").write_text(json.dumps(row, indent=2), encoding="utf-8")
         leaderboard.append(row)
 
-        print(f"[PROBE] {target_name} — {ckpt.name} — AP50={row['val_AP50']}  mAP={row['val_mAP5095']}")
+        print(
+            f"[DONE] {target_name} {i}/{len(SSL_BACKBONES)} "
+            f"SSL={ckpt.name}  sec={dur:.1f}  AP50={row['val_AP50']}  mAP50-95={row['val_mAP5095']}"
+        )
 
     def sort_key(r):
         a = r["val_AP50"]; b = r["val_mAP5095"]
