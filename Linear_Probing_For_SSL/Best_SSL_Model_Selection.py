@@ -727,6 +727,7 @@ def run_probe_for_class(session_root: Path, target_name: str, dataset_dir: Path)
 
     leaderboard = []
     for i, ckpt in enumerate(SSL_BACKBONES, start=1):
+        print(f"\n[RUN] {target_name}: checkpoint {i}/{len(SSL_BACKBONES)} -> {ckpt.name}")
         run_dir = out_root / f"SSL_{i:02d}__{ckpt.stem}"
         run_dir.mkdir(parents=True, exist_ok=True)
 
