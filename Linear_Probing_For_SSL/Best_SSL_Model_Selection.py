@@ -94,7 +94,16 @@ print(f"[PROBE] SESSION_ROOT: {SESSION_ROOT}")
 # ───────────────────────────────────────────────────────────────────────────────
 SSL_CKPT_ROOT = env_path("SSL_CKPT_ROOT", WORK_ROOT / "SSL_Checkpoints")
 if not SSL_CKPT_ROOT.exists():
-    raise FileNotFoundError(f"SSL_CKPT_ROOT does not exist: {SSL_CKPT_ROOT}")
+    fallback_ckpt_root = WORK_ROOT / "Checkpoints"
+    if fallback_ckpt_root.exists():
+        print(f"[WARN] SSL_CKPT_ROOT does not exist: {SSL_CKPT_ROOT}")
+        print(f"[WARN] Falling back to: {fallback_ckpt_root}")
+        SSL_CKPT_ROOT = fallback_ckpt_root
+    else:
+        raise FileNotFoundError(
+            f"SSL_CKPT_ROOT does not exist: {SSL_CKPT_ROOT}\n"
+            f"Also checked fallback: {fallback_ckpt_root}"
+        )
 
 # Option A: provide explicit list via env (comma-separated)
 #   export SSL_CKPTS="epoch_epoch-004.ckpt,epoch_epoch-014.ckpt,last.ckpt"
