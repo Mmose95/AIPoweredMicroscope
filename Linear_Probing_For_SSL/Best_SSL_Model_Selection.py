@@ -6,7 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 from datetime import datetime
 from inspect import signature
-import os, json, glob, os.path as op, time, csv, re, random
+import os, sys, json, glob, os.path as op, time, csv, re, random, subprocess
 from collections import defaultdict as ddict
 from PIL import Image
 
@@ -30,10 +30,12 @@ FRACTION_SEED  = int(os.getenv("RFDETR_FRACTION_SEED", "42"))
 
 # Static training seed for RFDETR
 SEED = int(os.getenv("SEED", "42"))
+PARALLEL_GPUS = int(os.getenv("RFDETR_PARALLEL_GPUS", "1"))
 
 print(f"[PROBE] Target classes: {PROBE_TARGET!r} (env RFDETR_PROBE_TARGET)")
 print(f"[PATCH MODE] USE_PATCH_224={USE_PATCH_224}  PATCH_SIZE={PATCH_SIZE}")
 print(f"[PROBE] TRAIN_FRACTION={TRAIN_FRACTION}  FRACTION_SEED={FRACTION_SEED}  SEED={SEED}")
+print(f"[PROBE] RFDETR_PARALLEL_GPUS={PARALLEL_GPUS}")
 
 if not (0.0 < TRAIN_FRACTION <= 1.0):
     raise ValueError(f"RFDETR_TRAIN_FRACTION must be in (0, 1], got {TRAIN_FRACTION}")
@@ -80,9 +82,15 @@ IMAGES_FALLBACK_ROOT = env_path(
 OUTPUT_BASE = env_path("OUTPUT_BASE", WORK_ROOT / "Linear_Probing_For_SSL" / "SSL_SELECTION")
 OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
 
-SESSION_ID   = datetime.now().strftime("%Y%m%d_%H%M%S")
-SESSION_ROOT = OUTPUT_BASE / f"session_{SESSION_ID}"
-SESSION_ROOT.mkdir(parents=True, exist_ok=False)
+SESSION_ROOT_ENV = os.getenv("RFDETR_SESSION_ROOT", "").strip()
+if SESSION_ROOT_ENV:
+    SESSION_ROOT = Path(SESSION_ROOT_ENV)
+    SESSION_ROOT.mkdir(parents=True, exist_ok=True)
+    SESSION_ID = os.getenv("RFDETR_SESSION_ID", "").strip() or SESSION_ROOT.name.replace("session_", "")
+else:
+    SESSION_ID   = datetime.now().strftime("%Y%m%d_%H%M%S")
+    SESSION_ROOT = OUTPUT_BASE / f"session_{SESSION_ID}"
+    SESSION_ROOT.mkdir(parents=True, exist_ok=False)
 
 OUTPUT_ROOT = SESSION_ROOT  # compatibility alias
 
@@ -636,6 +644,58 @@ STATIC_CFG = dict(
 NUM_WORKERS = int(os.getenv("NUM_WORKERS", "8"))
 
 
+def _detect_visible_gpu_ids() -> list[str]:
+    visible = os.getenv("CUDA_VISIBLE_DEVICES", "").strip()
+    if visible:
+        ids = [t.strip() for t in visible.split(",") if t.strip()]
+        return ids
+    try:
+        import torch
+        n = int(torch.cuda.device_count())
+        return [str(i) for i in range(n)] if n > 0 else []
+    except Exception:
+        return []
+
+
+def _gpu_slots_for_parallel() -> list[str | None]:
+    ids = _detect_visible_gpu_ids()
+    if not ids:
+        return [None]
+    n = max(1, min(PARALLEL_GPUS, len(ids)))
+    return ids[:n]
+
+
+def _build_probe_row(
+    *,
+    idx: int,
+    total: int,
+    target_name: str,
+    ckpt: Path,
+    run_dir: Path,
+    best: dict,
+    dur: float,
+    dataset_dir_effective: Path,
+) -> dict:
+    return {
+        "idx": idx,
+        "total": total,
+        "target": target_name,
+        "ssl_ckpt": str(ckpt),
+        "ssl_name": ckpt.name,
+        "dataset_dir_effective": str(dataset_dir_effective),
+        "val_AP50": best.get("map50"),
+        "val_mAP5095": best.get("map5095"),
+        "metrics_source": best.get("source"),
+        "output_dir": str(run_dir),
+        "seconds": dur,
+        "train_fraction": TRAIN_FRACTION,
+        "fraction_seed": FRACTION_SEED,
+        "seed": SEED,
+        "use_patch_224": USE_PATCH_224,
+        "patch_size": PATCH_SIZE if USE_PATCH_224 else None,
+    }
+
+
 def train_one_run(target_name: str, dataset_dir_effective: Path, out_dir: Path, backbone_ckpt: str) -> dict:
     from rfdetr import RFDETRSmall, RFDETRMedium, RFDETRLarge
     name2cls = {"RFDETRSmall": RFDETRSmall, "RFDETRMedium": RFDETRMedium, "RFDETRLarge": RFDETRLarge}
@@ -713,58 +773,7 @@ def train_one_run(target_name: str, dataset_dir_effective: Path, out_dir: Path, 
     return best
 
 
-def run_probe_for_class(session_root: Path, target_name: str, dataset_dir: Path) -> dict:
-    class_token = (
-        "Epithelial" if "Epithelial" in target_name else
-        "Leucocytes" if "Leucocyte" in target_name else
-        target_name.replace(" ", "")
-    )
-    out_root = session_root / class_token
-    out_root.mkdir(parents=True, exist_ok=True)
-
-    # Build identical dataset once (cached under OUTPUT_ROOT)
-    data_dir_effective = get_or_build_probe_dataset(dataset_dir, OUTPUT_ROOT)
-
-    leaderboard = []
-    for i, ckpt in enumerate(SSL_BACKBONES, start=1):
-        print(f"\n[RUN] {target_name}: checkpoint {i}/{len(SSL_BACKBONES)} -> {ckpt.name}")
-        run_dir = out_root / f"SSL_{i:02d}__{ckpt.stem}"
-        run_dir.mkdir(parents=True, exist_ok=True)
-
-        t0 = time.time()
-        best = train_one_run(
-            target_name=target_name,
-            dataset_dir_effective=data_dir_effective,
-            out_dir=run_dir,
-            backbone_ckpt=str(ckpt),
-        )
-        dur = round(time.time() - t0, 2)
-
-        row = {
-            "idx": i,
-            "target": target_name,
-            "ssl_ckpt": str(ckpt),
-            "ssl_name": ckpt.name,
-            "dataset_dir_effective": str(data_dir_effective),
-            "val_AP50": best.get("map50"),
-            "val_mAP5095": best.get("map5095"),
-            "metrics_source": best.get("source"),
-            "output_dir": str(run_dir),
-            "seconds": dur,
-            "train_fraction": TRAIN_FRACTION,
-            "fraction_seed": FRACTION_SEED,
-            "seed": SEED,
-            "use_patch_224": USE_PATCH_224,
-            "patch_size": PATCH_SIZE if USE_PATCH_224 else None,
-        }
-        (run_dir / "probe_record.json").write_text(json.dumps(row, indent=2), encoding="utf-8")
-        leaderboard.append(row)
-
-        print(
-            f"[DONE] {target_name} {i}/{len(SSL_BACKBONES)} "
-            f"SSL={ckpt.name}  sec={dur:.1f}  AP50={row['val_AP50']}  mAP50-95={row['val_mAP5095']}"
-        )
-
+def _write_class_outputs(out_root: Path, leaderboard: list[dict]) -> dict | None:
     def sort_key(r):
         a = r["val_AP50"]; b = r["val_mAP5095"]
         return (-(a if a is not None else -1), -(b if b is not None else -1))
@@ -780,6 +789,163 @@ def run_probe_for_class(session_root: Path, target_name: str, dataset_dir: Path)
 
     best_row = leaderboard[0] if leaderboard else None
     (out_root / "ssl_probe_best.json").write_text(json.dumps(best_row, indent=2), encoding="utf-8")
+    return best_row
+
+
+def _run_worker_from_env() -> int:
+    target_name = os.environ["RFDETR_WORKER_TARGET_NAME"]
+    dataset_dir_effective = Path(os.environ["RFDETR_WORKER_DATASET_DIR"])
+    out_dir = Path(os.environ["RFDETR_WORKER_OUT_DIR"])
+    ckpt = Path(os.environ["RFDETR_WORKER_BACKBONE_CKPT"])
+    run_idx = int(os.environ.get("RFDETR_WORKER_RUN_IDX", "1"))
+    run_total = int(os.environ.get("RFDETR_WORKER_RUN_TOTAL", "1"))
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[RUN] {target_name}: checkpoint {run_idx}/{run_total} -> {ckpt.name}")
+
+    t0 = time.time()
+    best = train_one_run(
+        target_name=target_name,
+        dataset_dir_effective=dataset_dir_effective,
+        out_dir=out_dir,
+        backbone_ckpt=str(ckpt),
+    )
+    dur = round(time.time() - t0, 2)
+
+    row = _build_probe_row(
+        idx=run_idx,
+        total=run_total,
+        target_name=target_name,
+        ckpt=ckpt,
+        run_dir=out_dir,
+        best=best,
+        dur=dur,
+        dataset_dir_effective=dataset_dir_effective,
+    )
+    (out_dir / "probe_record.json").write_text(json.dumps(row, indent=2), encoding="utf-8")
+    print(
+        f"[DONE] {target_name} {run_idx}/{run_total} "
+        f"SSL={ckpt.name}  sec={dur:.1f}  AP50={row['val_AP50']}  mAP50-95={row['val_mAP5095']}"
+    )
+    return 0
+
+
+def _run_parallel_ckpt_jobs(target_name: str, dataset_dir_effective: Path, jobs: list[dict]) -> list[dict]:
+    slots = _gpu_slots_for_parallel()
+    print(f"[PARALLEL] {target_name}: GPU slots={slots}  jobs={len(jobs)}")
+    if len(slots) <= 1:
+        rows: list[dict] = []
+        total = len(jobs)
+        for j in jobs:
+            print(f"\n[RUN] {target_name}: checkpoint {j['idx']}/{total} -> {j['ckpt'].name}")
+            t0 = time.time()
+            best = train_one_run(
+                target_name=target_name,
+                dataset_dir_effective=dataset_dir_effective,
+                out_dir=j["run_dir"],
+                backbone_ckpt=str(j["ckpt"]),
+            )
+            dur = round(time.time() - t0, 2)
+            row = _build_probe_row(
+                idx=j["idx"],
+                total=total,
+                target_name=target_name,
+                ckpt=j["ckpt"],
+                run_dir=j["run_dir"],
+                best=best,
+                dur=dur,
+                dataset_dir_effective=dataset_dir_effective,
+            )
+            (j["run_dir"] / "probe_record.json").write_text(json.dumps(row, indent=2), encoding="utf-8")
+            rows.append(row)
+            print(
+                f"[DONE] {target_name} {j['idx']}/{total} "
+                f"SSL={j['ckpt'].name}  sec={dur:.1f}  AP50={row['val_AP50']}  mAP50-95={row['val_mAP5095']}"
+            )
+        return rows
+
+    queue = jobs[:]
+    active: dict[str | None, dict] = {}
+    failures: list[dict] = []
+
+    while queue or active:
+        # launch on free slots
+        for slot in slots:
+            if slot in active or not queue:
+                continue
+            j = queue.pop(0)
+            env = os.environ.copy()
+            env["RFDETR_WORKER_MODE"] = "1"
+            env["RFDETR_WORKER_TARGET_NAME"] = target_name
+            env["RFDETR_WORKER_DATASET_DIR"] = str(dataset_dir_effective)
+            env["RFDETR_WORKER_OUT_DIR"] = str(j["run_dir"])
+            env["RFDETR_WORKER_BACKBONE_CKPT"] = str(j["ckpt"])
+            env["RFDETR_WORKER_RUN_IDX"] = str(j["idx"])
+            env["RFDETR_WORKER_RUN_TOTAL"] = str(len(jobs))
+            env["RFDETR_SESSION_ROOT"] = str(SESSION_ROOT)
+            env["RFDETR_SESSION_ID"] = str(SESSION_ID)
+            if slot is not None:
+                env["CUDA_VISIBLE_DEVICES"] = str(slot)
+
+            print(f"[PARALLEL] launch slot={slot} run={j['idx']}/{len(jobs)} ckpt={j['ckpt'].name}")
+            p = subprocess.Popen(
+                [sys.executable, "-u", str(Path(__file__).resolve())],
+                cwd=str(Path(__file__).resolve().parent),
+                env=env,
+            )
+            active[slot] = {"proc": p, "job": j}
+
+        # poll completions
+        finished_slots = []
+        for slot, info in active.items():
+            rc = info["proc"].poll()
+            if rc is None:
+                continue
+            j = info["job"]
+            if rc != 0:
+                failures.append({"slot": slot, "job": j, "returncode": rc})
+                print(f"[PARALLEL][FAIL] slot={slot} run={j['idx']}/{len(jobs)} ckpt={j['ckpt'].name} rc={rc}")
+            else:
+                print(f"[PARALLEL][OK] slot={slot} run={j['idx']}/{len(jobs)} ckpt={j['ckpt'].name}")
+            finished_slots.append(slot)
+        for slot in finished_slots:
+            active.pop(slot, None)
+
+        if active:
+            time.sleep(2)
+
+    if failures:
+        raise RuntimeError(f"{len(failures)} parallel worker(s) failed")
+
+    rows: list[dict] = []
+    for j in jobs:
+        rec = j["run_dir"] / "probe_record.json"
+        if not rec.exists():
+            raise FileNotFoundError(f"Missing probe_record.json for run: {j['run_dir']}")
+        rows.append(json.loads(rec.read_text(encoding="utf-8")))
+    return rows
+
+
+def run_probe_for_class(session_root: Path, target_name: str, dataset_dir: Path) -> dict:
+    class_token = (
+        "Epithelial" if "Epithelial" in target_name else
+        "Leucocytes" if "Leucocyte" in target_name else
+        target_name.replace(" ", "")
+    )
+    out_root = session_root / class_token
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    # Build identical dataset once (cached under OUTPUT_ROOT)
+    data_dir_effective = get_or_build_probe_dataset(dataset_dir, OUTPUT_ROOT)
+
+    jobs = []
+    for i, ckpt in enumerate(SSL_BACKBONES, start=1):
+        run_dir = out_root / f"SSL_{i:02d}__{ckpt.stem}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        jobs.append({"idx": i, "ckpt": ckpt, "run_dir": run_dir})
+
+    leaderboard = _run_parallel_ckpt_jobs(target_name, data_dir_effective, jobs)
+    best_row = _write_class_outputs(out_root, leaderboard)
 
     return {"best": best_row, "leaderboard": leaderboard, "out_dir": str(out_root), "dataset_effective": str(data_dir_effective)}
 
@@ -813,6 +979,10 @@ def resolve_target_datasets() -> dict[str, Path]:
     }
 
 def main():
+    if os.getenv("RFDETR_WORKER_MODE", "").strip() == "1":
+        _run_worker_from_env()
+        return
+
     # IMPORTANT: do NOT create a new session root here.
     # Use the already-created SESSION_ROOT/SESSION_ID at top of file.
     session_root = SESSION_ROOT
@@ -843,6 +1013,7 @@ def main():
     print(f"[PLAN] SSL checkpoints: {len(SSL_BACKBONES)}")
     print(f"[PLAN] Targets: {[name for name, _ in selected]}")
     print(f"[PLAN] Total RF-DETR runs: {len(SSL_BACKBONES) * len(selected)}")
+    print(f"[PLAN] Parallel GPU slots: {_gpu_slots_for_parallel()}")
     print("[PLAN] Train subset is built once per target and reused for every SSL checkpoint.")
 
     results = {}
