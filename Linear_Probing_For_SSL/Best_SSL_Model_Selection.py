@@ -35,6 +35,9 @@ print(f"[PROBE] Target classes: {PROBE_TARGET!r} (env RFDETR_PROBE_TARGET)")
 print(f"[PATCH MODE] USE_PATCH_224={USE_PATCH_224}  PATCH_SIZE={PATCH_SIZE}")
 print(f"[PROBE] TRAIN_FRACTION={TRAIN_FRACTION}  FRACTION_SEED={FRACTION_SEED}  SEED={SEED}")
 
+if not (0.0 < TRAIN_FRACTION <= 1.0):
+    raise ValueError(f"RFDETR_TRAIN_FRACTION must be in (0, 1], got {TRAIN_FRACTION}")
+
 
 # ───────────────────────────────────────────────────────────────────────────────
 # UCloud-friendly path detection
@@ -56,6 +59,11 @@ WORK_ROOT = Path("/work") / USER_BASE_DIR if USER_BASE_DIR else Path.cwd()
 def env_path(name: str, default: Path) -> Path:
     v = os.getenv(name, "").strip()
     return Path(v) if v else default
+
+
+def env_str(name: str, default: str) -> str:
+    v = os.getenv(name, "").strip()
+    return v if v else default
 
 
 # Where the **real images** live (on your drive) for resolving COCO file_name paths
@@ -85,6 +93,8 @@ print(f"[PROBE] SESSION_ROOT: {SESSION_ROOT}")
 # SSL CHECKPOINT SWEEP
 # ───────────────────────────────────────────────────────────────────────────────
 SSL_CKPT_ROOT = env_path("SSL_CKPT_ROOT", WORK_ROOT / "SSL_Checkpoints")
+if not SSL_CKPT_ROOT.exists():
+    raise FileNotFoundError(f"SSL_CKPT_ROOT does not exist: {SSL_CKPT_ROOT}")
 
 # Option A: provide explicit list via env (comma-separated)
 #   export SSL_CKPTS="epoch_epoch-004.ckpt,epoch_epoch-014.ckpt,last.ckpt"
@@ -123,6 +133,15 @@ else:
 print("[SSL BACKBONES]")
 for p in SSL_BACKBONES:
     print("  ", p)
+
+STAT_DATASETS_ROOT = env_path(
+    "STAT_DATASETS_ROOT",
+    Path("/work/projects/myproj/SOLO_Supervised_RFDETR/Stat_Dataset"),
+)
+DATASET_PREFIX_LEU = env_str("DATASET_PREFIX_LEU", "QA-2025v2_Leucocyte_OVR")
+DATASET_PREFIX_EPI = env_str("DATASET_PREFIX_EPI", "QA-2025v2_SquamousEpithelialCell_OVR")
+DATASET_LEUCO_DIR_OVERRIDE = os.getenv("DATASET_LEUCO_DIR", "").strip()
+DATASET_EPI_DIR_OVERRIDE = os.getenv("DATASET_EPI_DIR", "").strip()
 
 # ───────────────────────────────────────────────
 # Path resolution helpers for COCO
@@ -259,6 +278,8 @@ def build_fractional_train_split(resolved_root: Path, frac: float, cache_root: P
     images = data.get("images", [])
     anns   = data.get("annotations", [])
     cats   = data.get("categories", [])
+    if not images:
+        raise ValueError(f"Train split has zero images at {src_train}")
 
     rng = random.Random(seed)
     n_keep = max(1, int(round(len(images) * frac)))
@@ -268,6 +289,8 @@ def build_fractional_train_split(resolved_root: Path, frac: float, cache_root: P
 
     kept_images = [im for i, im in enumerate(images) if i in keep_idx]
     kept_ids    = {im["id"] for im in kept_images}
+    if len(kept_images) != len(kept_ids):
+        raise ValueError(f"Duplicate image ids detected in train split: {src_train}")
     kept_anns   = [a for a in anns if a["image_id"] in kept_ids]
 
     out_train_dir = dst_root / "train"
@@ -298,12 +321,6 @@ def _compute_positions(length: int, patch: int, stride: int):
         positions.append(last)
     return sorted(set(positions))
 
-
-from __future__ import annotations
-from pathlib import Path
-import json
-import time
-from PIL import Image
 
 def _patchify_split(
     src_json: Path,
@@ -718,6 +735,7 @@ def run_probe_for_class(session_root: Path, target_name: str, dataset_dir: Path)
             "target": target_name,
             "ssl_ckpt": str(ckpt),
             "ssl_name": ckpt.name,
+            "dataset_dir_effective": str(data_dir_effective),
             "val_AP50": best.get("map50"),
             "val_mAP5095": best.get("map5095"),
             "metrics_source": best.get("source"),
@@ -752,9 +770,9 @@ def run_probe_for_class(session_root: Path, target_name: str, dataset_dir: Path)
 
     return {"best": best_row, "leaderboard": leaderboard, "out_dir": str(out_root), "dataset_effective": str(data_dir_effective)}
 
-DEFAULT_ROOT = Path("/work/projects/myproj/SOLO_Supervised_RFDETR/Stat_Dataset")
-
 def find_latest_dataset(root: Path, prefix: str) -> Path:
+    if not root.exists():
+        raise FileNotFoundError(f"STAT_DATASETS_ROOT does not exist: {root}")
     candidates = sorted(
         [p for p in root.iterdir() if p.is_dir() and p.name.startswith(prefix)]
     )
@@ -764,35 +782,55 @@ def find_latest_dataset(root: Path, prefix: str) -> Path:
         )
     return candidates[-1]  # newest lexicographically (timestamped folders)
 
-DATASET_LEUCO = find_latest_dataset(DEFAULT_ROOT, "QA-2025v2_Leucocyte_OVR")
-DATASET_EPI   = find_latest_dataset(DEFAULT_ROOT, "QA-2025v2_SquamousEpithelialCell_OVR")
 
-print("[DATASETS]")
-print("  Leucocyte:", DATASET_LEUCO)
-print("  Epithelial:", DATASET_EPI)
+def resolve_target_datasets() -> dict[str, Path]:
+    ds_leu = (
+        Path(DATASET_LEUCO_DIR_OVERRIDE)
+        if DATASET_LEUCO_DIR_OVERRIDE
+        else find_latest_dataset(STAT_DATASETS_ROOT, DATASET_PREFIX_LEU)
+    )
+    ds_epi = (
+        Path(DATASET_EPI_DIR_OVERRIDE)
+        if DATASET_EPI_DIR_OVERRIDE
+        else find_latest_dataset(STAT_DATASETS_ROOT, DATASET_PREFIX_EPI)
+    )
+    return {
+        "Leucocyte": ds_leu,
+        "Squamous Epithelial Cell": ds_epi,
+    }
 
 def main():
-
-    # sanity: dataset splits exist
-    # NOTE: we only require train+valid, like your HPO script
-    #       (test may exist but not required)
-    for p in (DATASET_LEUCO, DATASET_EPI):
-        for part in ("train", "valid"):
-            if not (p / part / "_annotations.coco.json").exists():
-                raise FileNotFoundError(f"Missing {part} split in {p}")
-
     # IMPORTANT: do NOT create a new session root here.
     # Use the already-created SESSION_ROOT/SESSION_ID at top of file.
     session_root = SESSION_ROOT
     session_id   = SESSION_ID
 
+    all_datasets = resolve_target_datasets()
+    print("[DATASETS]")
+    print("  STAT_DATASETS_ROOT:", STAT_DATASETS_ROOT)
+    print("  Leucocyte:", all_datasets["Leucocyte"])
+    print("  Epithelial:", all_datasets["Squamous Epithelial Cell"])
+
     selected: list[tuple[str, Path]] = []
     if PROBE_TARGET in ("leu", "all"):
-        selected.append(("Leucocyte", DATASET_LEUCO))
+        selected.append(("Leucocyte", all_datasets["Leucocyte"]))
     if PROBE_TARGET in ("epi", "all"):
-        selected.append(("Squamous Epithelial Cell", DATASET_EPI))
+        selected.append(("Squamous Epithelial Cell", all_datasets["Squamous Epithelial Cell"]))
     if not selected:
         raise RuntimeError("RFDETR_PROBE_TARGET must be one of: leu, epi, all")
+
+    # sanity: dataset splits exist for selected targets
+    # NOTE: we only require train+valid, like your HPO script
+    #       (test may exist but not required)
+    for _, p in selected:
+        for part in ("train", "valid"):
+            if not (p / part / "_annotations.coco.json").exists():
+                raise FileNotFoundError(f"Missing {part} split in {p}")
+
+    print(f"[PLAN] SSL checkpoints: {len(SSL_BACKBONES)}")
+    print(f"[PLAN] Targets: {[name for name, _ in selected]}")
+    print(f"[PLAN] Total RF-DETR runs: {len(SSL_BACKBONES) * len(selected)}")
+    print("[PLAN] Train subset is built once per target and reused for every SSL checkpoint.")
 
     results = {}
     for target_name, ds in selected:
@@ -805,6 +843,11 @@ def main():
         "work_root": str(WORK_ROOT),
         "ssl_ckpt_root": str(SSL_CKPT_ROOT),
         "ssl_ckpts": [str(p) for p in SSL_BACKBONES],
+        "stat_datasets_root": str(STAT_DATASETS_ROOT),
+        "dataset_prefix_leu": DATASET_PREFIX_LEU,
+        "dataset_prefix_epi": DATASET_PREFIX_EPI,
+        "dataset_leuco_override": DATASET_LEUCO_DIR_OVERRIDE or None,
+        "dataset_epi_override": DATASET_EPI_DIR_OVERRIDE or None,
         "static_cfg": STATIC_CFG,
         "train_fraction": TRAIN_FRACTION,
         "fraction_seed": FRACTION_SEED,
