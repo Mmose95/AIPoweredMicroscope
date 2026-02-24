@@ -19,12 +19,34 @@ import numpy as np
 #  - "all"  -> both
 HPO_TARGET = os.environ.get("RFDETR_HPO_TARGET", "epi").lower()
 
+def _resolve_input_mode() -> tuple[bool, str]:
+    mode_raw = os.getenv("RFDETR_INPUT_MODE", "").strip().lower()
+    if mode_raw:
+        if mode_raw in {"224", "224x224", "patch", "patch224", "patch_224"}:
+            return True, "224"
+        if mode_raw in {"640", "640x640", "full", "full640", "full_640"}:
+            return False, "640"
+        raise ValueError(
+            f"Invalid RFDETR_INPUT_MODE={mode_raw!r}. Use one of: "
+            f"224, patch224, 640, full640"
+        )
+
+    # Backward-compatible path: keep old env behavior if RFDETR_INPUT_MODE is unset.
+    use_patch = bool(int(os.getenv("RFDETR_USE_PATCH_224", "1")))
+    return use_patch, ("224" if use_patch else "640")
+
 # Toggle to use 224×224 patchified dataset instead of full 640×640 images
-USE_PATCH_224 = bool(int(os.getenv("RFDETR_USE_PATCH_224", "1")))
+USE_PATCH_224, INPUT_MODE = _resolve_input_mode()
 PATCH_SIZE = int(os.getenv("RFDETR_PATCH_SIZE", "224"))
+FULL_RESOLUTION = int(os.getenv("RFDETR_FULL_RESOLUTION", "640"))
 
 print(f"[HPO] Target classes: {HPO_TARGET!r} (env RFDETR_HPO_TARGET)")
-print(f"[PATCH MODE] USE_PATCH_224={USE_PATCH_224}  PATCH_SIZE={PATCH_SIZE}")
+print(f"[INPUT MODE] RFDETR_INPUT_MODE={INPUT_MODE}  USE_PATCH_224={USE_PATCH_224}")
+print(f"[INPUT SIZE] PATCH_SIZE={PATCH_SIZE}  FULL_RESOLUTION={FULL_RESOLUTION}")
+if PATCH_SIZE <= 0:
+    raise ValueError(f"RFDETR_PATCH_SIZE must be > 0, got {PATCH_SIZE}")
+if FULL_RESOLUTION <= 0:
+    raise ValueError(f"RFDETR_FULL_RESOLUTION must be > 0, got {FULL_RESOLUTION}")
 
 # ───────────────────────────────────────────────────────────────────────────────
 # UCloud-friendly path detection
@@ -600,9 +622,11 @@ def train_one_run(target_name: str,
             seed=seed,
         )
 
-    # If we are in patch mode, force resolution to patch size and disable square resizing
+    # Force resolution from selected input mode for consistent runs.
     if USE_PATCH_224:
         resolution = PATCH_SIZE
+    else:
+        resolution = FULL_RESOLUTION
 
     model = model_cls()
     sig = signature(model.train)
@@ -660,8 +684,10 @@ def train_one_run(target_name: str,
     meta = out_dir / "run_meta"
     meta.mkdir(parents=True, exist_ok=True)
     kwargs["train_fraction"] = float(train_fraction)
+    kwargs["input_mode"] = INPUT_MODE
     kwargs["use_patch_224"] = USE_PATCH_224
     kwargs["patch_size"] = PATCH_SIZE if USE_PATCH_224 else None
+    kwargs["full_resolution"] = None if USE_PATCH_224 else FULL_RESOLUTION
     (meta / "train_kwargs.json").write_text(json.dumps(kwargs, indent=2), encoding="utf-8")
     (meta / "dataset_info.json").write_text(json.dumps({
         "dataset_dir_original": str(dataset_dir),
@@ -728,10 +754,12 @@ def find_best_val(output_dir: Path) -> dict:
 # ───────────────────────────────────────────────────────────────────────────────
 # HPO spaces (compact)
 # ───────────────────────────────────────────────────────────────────────────────
+SEARCH_RESOLUTION = PATCH_SIZE if USE_PATCH_224 else FULL_RESOLUTION
+
 SEARCH_LEUCO = {
     # Model & input
     "MODEL_CLS":       ["RFDETRLarge"],
-    "RESOLUTION":      [672],      # ignored in patch mode (forced to 224)
+    "RESOLUTION":      [SEARCH_RESOLUTION],  # mode-fixed (224 patch or full resolution)
     "EPOCHS":          [80],
 
     # Optimizer / schedule
@@ -781,7 +809,7 @@ SEARCH_EPI = {
 SEARCH_EPI = {
     # Model & input
     "MODEL_CLS":       ["RFDETRLarge"],   # keep Large, patches are smaller so this is fine
-    "RESOLUTION":      [224],             # in PATCH mode this will be forced to 224 anyway
+    "RESOLUTION":      [SEARCH_RESOLUTION],  # mode-fixed (224 patch or full resolution)
     "EPOCHS":          [80],              # let early stopping decide
 
     # Optimizer / schedule
@@ -970,8 +998,10 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
             "metrics_source": best.get("source"),
             "output_dir": str(run_dir),
             "seconds": dur,
+            "input_mode": INPUT_MODE,
             "use_patch_224": USE_PATCH_224,
             "patch_size": PATCH_SIZE if USE_PATCH_224 else None,
+            "full_resolution": None if USE_PATCH_224 else FULL_RESOLUTION,
         }
         (run_dir / "hpo_record.json").write_text(json.dumps(row, indent=2), encoding="utf-8")
         result_q.put(("ok", row))
@@ -1008,6 +1038,7 @@ def run_hpo_all_classes(session_root: Path) -> dict:
         raise RuntimeError("No visible GPUs. Set CUDA_VISIBLE_DEVICES or ensure CUDA is available.")
     max_parallel = max(1, min(MAX_PARALLEL, len(gpu_ids)))
     print(f"[HPO] Visible GPUs: {gpu_ids}  |  MAX_PARALLEL={max_parallel}")
+    print(f"[HPO] Input mode: {INPUT_MODE} (patch={USE_PATCH_224}, full_resolution={FULL_RESOLUTION})")
 
     jobs = []
     for target_name, dataset_dir, search_space in selected:
@@ -1156,8 +1187,10 @@ def main():
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "session_id": HPO_SESSION_ID,
         "work_root": str(WORK_ROOT),
+        "input_mode": INPUT_MODE,
         "use_patch_224": USE_PATCH_224,
         "patch_size": PATCH_SIZE if USE_PATCH_224 else None,
+        "full_resolution": None if USE_PATCH_224 else FULL_RESOLUTION,
     }
 
     if "Leucocyte" in res_all:

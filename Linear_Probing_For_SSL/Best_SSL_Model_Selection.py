@@ -20,9 +20,26 @@ from PIL import Image
 #  - "all"  -> both
 PROBE_TARGET = os.environ.get("RFDETR_PROBE_TARGET", "epi").lower()
 
-# Patchified dataset mode (same behaviour as your HPO script)
-USE_PATCH_224 = bool(int(os.getenv("RFDETR_USE_PATCH_224", "1")))
-PATCH_SIZE    = int(os.getenv("RFDETR_PATCH_SIZE", "224"))
+def _resolve_input_mode() -> tuple[bool, str]:
+    mode_raw = os.getenv("RFDETR_INPUT_MODE", "").strip().lower()
+    if mode_raw:
+        if mode_raw in {"224", "224x224", "patch", "patch224", "patch_224"}:
+            return True, "224"
+        if mode_raw in {"640", "640x640", "full", "full640", "full_640"}:
+            return False, "640"
+        raise ValueError(
+            f"Invalid RFDETR_INPUT_MODE={mode_raw!r}. Use one of: "
+            f"224, patch224, 640, full640"
+        )
+
+    # Backward-compatible path: keep old env behavior if RFDETR_INPUT_MODE is unset.
+    use_patch = bool(int(os.getenv("RFDETR_USE_PATCH_224", "1")))
+    return use_patch, ("224" if use_patch else "640")
+
+
+USE_PATCH_224, INPUT_MODE = _resolve_input_mode()
+PATCH_SIZE = int(os.getenv("RFDETR_PATCH_SIZE", "224"))
+FULL_RESOLUTION = int(os.getenv("RFDETR_FULL_RESOLUTION", "640"))
 
 # Fraction of TRAIN split to use for *all* runs (must be same across ckpts)
 TRAIN_FRACTION = float(os.getenv("RFDETR_TRAIN_FRACTION", "0.125"))
@@ -33,12 +50,17 @@ SEED = int(os.getenv("SEED", "42"))
 PARALLEL_GPUS = int(os.getenv("RFDETR_PARALLEL_GPUS", "1"))
 
 print(f"[PROBE] Target classes: {PROBE_TARGET!r} (env RFDETR_PROBE_TARGET)")
-print(f"[PATCH MODE] USE_PATCH_224={USE_PATCH_224}  PATCH_SIZE={PATCH_SIZE}")
+print(f"[INPUT MODE] RFDETR_INPUT_MODE={INPUT_MODE}  USE_PATCH_224={USE_PATCH_224}")
+print(f"[INPUT SIZE] PATCH_SIZE={PATCH_SIZE}  FULL_RESOLUTION={FULL_RESOLUTION}")
 print(f"[PROBE] TRAIN_FRACTION={TRAIN_FRACTION}  FRACTION_SEED={FRACTION_SEED}  SEED={SEED}")
 print(f"[PROBE] RFDETR_PARALLEL_GPUS={PARALLEL_GPUS}")
 
 if not (0.0 < TRAIN_FRACTION <= 1.0):
     raise ValueError(f"RFDETR_TRAIN_FRACTION must be in (0, 1], got {TRAIN_FRACTION}")
+if PATCH_SIZE <= 0:
+    raise ValueError(f"RFDETR_PATCH_SIZE must be > 0, got {PATCH_SIZE}")
+if FULL_RESOLUTION <= 0:
+    raise ValueError(f"RFDETR_FULL_RESOLUTION must be > 0, got {FULL_RESOLUTION}")
 
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -627,7 +649,7 @@ def find_best_val(output_dir: Path) -> dict:
 # ───────────────────────────────────────────────────────────────────────────────
 STATIC_CFG = dict(
     MODEL_CLS="RFDETRLarge",
-    RESOLUTION=224 if USE_PATCH_224 else 672,
+    RESOLUTION=PATCH_SIZE if USE_PATCH_224 else FULL_RESOLUTION,
     EPOCHS=40,
     LR=5e-5,
     LR_ENCODER_MULT=1.0,
@@ -691,8 +713,10 @@ def _build_probe_row(
         "train_fraction": TRAIN_FRACTION,
         "fraction_seed": FRACTION_SEED,
         "seed": SEED,
+        "input_mode": INPUT_MODE,
         "use_patch_224": USE_PATCH_224,
         "patch_size": PATCH_SIZE if USE_PATCH_224 else None,
+        "full_resolution": None if USE_PATCH_224 else FULL_RESOLUTION,
     }
 
 
@@ -759,8 +783,10 @@ def train_one_run(target_name: str, dataset_dir_effective: Path, out_dir: Path, 
         "dataset_dir_effective": str(dataset_dir_effective),
         "train_fraction": TRAIN_FRACTION,
         "fraction_seed": FRACTION_SEED,
+        "input_mode": INPUT_MODE,
         "use_patch_224": USE_PATCH_224,
         "patch_size": PATCH_SIZE if USE_PATCH_224 else None,
+        "full_resolution": None if USE_PATCH_224 else FULL_RESOLUTION,
         "seed": SEED,
         "session_root": str(SESSION_ROOT),
     }, indent=2), encoding="utf-8")
@@ -1013,6 +1039,7 @@ def main():
     print(f"[PLAN] SSL checkpoints: {len(SSL_BACKBONES)}")
     print(f"[PLAN] Targets: {[name for name, _ in selected]}")
     print(f"[PLAN] Total RF-DETR runs: {len(SSL_BACKBONES) * len(selected)}")
+    print(f"[PLAN] Input mode: {INPUT_MODE} (patch={USE_PATCH_224}, full_resolution={FULL_RESOLUTION})")
     print(f"[PLAN] Parallel GPU slots: {_gpu_slots_for_parallel()}")
     print("[PLAN] Train subset is built once per target and reused for every SSL checkpoint.")
 
@@ -1036,8 +1063,10 @@ def main():
         "train_fraction": TRAIN_FRACTION,
         "fraction_seed": FRACTION_SEED,
         "seed": SEED,
+        "input_mode": INPUT_MODE,
         "use_patch_224": USE_PATCH_224,
         "patch_size": PATCH_SIZE if USE_PATCH_224 else None,
+        "full_resolution": None if USE_PATCH_224 else FULL_RESOLUTION,
         "results": {k: v["best"] for k, v in results.items()},
     }
 
