@@ -19,6 +19,11 @@ from PIL import Image
 #  - "epi"  -> only Squamous Epithelial Cell
 #  - "all"  -> both
 PROBE_TARGET = os.environ.get("RFDETR_PROBE_TARGET", "epi").lower()
+BACKBONE_BLOCK_SIZE = 56
+
+
+def _round_up_to_multiple(v: int, m: int) -> int:
+    return ((v + m - 1) // m) * m
 
 def _resolve_input_mode() -> tuple[bool, str, int, int]:
     mode_raw = os.getenv("RFDETR_INPUT_MODE", "").strip().lower()
@@ -44,7 +49,7 @@ def _resolve_input_mode() -> tuple[bool, str, int, int]:
 
         use_patch = mode_size != 640
         patch_size = mode_size if use_patch else 224
-        full_resolution = 640
+        full_resolution = int(os.getenv("RFDETR_FULL_RESOLUTION", str(mode_size)))
         return use_patch, str(mode_size), patch_size, full_resolution
 
     # Backward-compatible path: keep old env behavior if RFDETR_INPUT_MODE is unset.
@@ -57,6 +62,13 @@ def _resolve_input_mode() -> tuple[bool, str, int, int]:
 # If RFDETR_INPUT_MODE != 640 we run patch mode with patch size = int(RFDETR_INPUT_MODE).
 # If RFDETR_INPUT_MODE == 640 we run full-image mode.
 USE_PATCH_224, INPUT_MODE, PATCH_SIZE, FULL_RESOLUTION = _resolve_input_mode()
+if not USE_PATCH_224 and FULL_RESOLUTION % BACKBONE_BLOCK_SIZE != 0:
+    old = FULL_RESOLUTION
+    FULL_RESOLUTION = _round_up_to_multiple(FULL_RESOLUTION, BACKBONE_BLOCK_SIZE)
+    print(
+        f"[INPUT MODE][WARN] Full-mode resolution {old} is not divisible by "
+        f"{BACKBONE_BLOCK_SIZE}; using {FULL_RESOLUTION}."
+    )
 
 # Fraction of TRAIN split to use for *all* runs (must be same across ckpts)
 TRAIN_FRACTION = float(os.getenv("RFDETR_TRAIN_FRACTION", "0.125"))
