@@ -2,7 +2,6 @@ from __future__ import annotations
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
-from inspect import signature
 import os, json, glob, os.path as op, itertools, time, csv, multiprocessing as mp
 import re
 import random
@@ -617,6 +616,89 @@ def get_or_build_aug_cache(target_name: str, dataset_dir: Path, root_out: Path, 
 # ───────────────────────────────────────────────────────────────────────────────
 # Training (single run). Called in worker processes.
 # ───────────────────────────────────────────────────────────────────────────────
+def verify_effective_backbone_in_checkpoint(out_dir: Path, requested_ckpt: str | None) -> dict:
+    """
+    Verify whether the requested SSL checkpoint is reflected in saved training args.
+    Returns a summary dict for metadata logging.
+    """
+    summary = {
+        "requested_ckpt": requested_ckpt,
+        "requested_ckpt_normalized": None,
+        "verified": requested_ckpt is None,
+        "checked_checkpoint": None,
+        "found_pretrained_encoder": None,
+        "found_pretrain_weights": None,
+        "found_encoder_name": None,
+        "found_pretrained_backbone": None,
+    }
+    if requested_ckpt is None:
+        return summary
+
+    def _normalize_pathlike(v):
+        if v is None:
+            return None
+        s = str(v).strip()
+        if not s:
+            return None
+        return os.path.abspath(os.path.expanduser(s))
+
+    requested_norm = _normalize_pathlike(requested_ckpt)
+    summary["requested_ckpt_normalized"] = requested_norm
+    ckpt_candidates = [
+        out_dir / "checkpoint_best_total.pth",
+        out_dir / "checkpoint_best_regular.pth",
+        out_dir / "checkpoint.pth",
+    ]
+    ckpt_path = next((p for p in ckpt_candidates if p.exists()), None)
+    if ckpt_path is None:
+        raise RuntimeError(
+            "Requested SSL checkpoint but no saved training checkpoint was found for verification."
+        )
+    summary["checked_checkpoint"] = str(ckpt_path)
+    try:
+        import torch
+        try:
+            ckpt_obj = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
+        except TypeError:
+            ckpt_obj = torch.load(str(ckpt_path), map_location="cpu")
+    except Exception as e:
+        raise RuntimeError(f"Failed to load checkpoint for SSL verification: {e}") from e
+    args_obj = ckpt_obj.get("args")
+    if args_obj is None:
+        raise RuntimeError("Checkpoint has no 'args'; cannot verify SSL backbone usage.")
+    try:
+        args_dict = vars(args_obj) if hasattr(args_obj, "__dict__") else dict(args_obj)
+    except Exception as e:
+        raise RuntimeError(f"Could not parse checkpoint args for SSL verification: {e}") from e
+    found_pretrained_encoder = args_dict.get("pretrained_encoder")
+    found_pretrain_weights = args_dict.get("pretrain_weights")
+    found_encoder_name = args_dict.get("encoder_name")
+    found_pretrained_backbone = args_dict.get("pretrained_backbone")
+    summary["found_pretrained_encoder"] = found_pretrained_encoder
+    summary["found_pretrain_weights"] = found_pretrain_weights
+    summary["found_encoder_name"] = found_encoder_name
+    summary["found_pretrained_backbone"] = found_pretrained_backbone
+    found_raw = {
+        found_pretrained_encoder,
+        found_pretrain_weights,
+        found_encoder_name,
+        found_pretrained_backbone,
+    }
+    found_norm = {_normalize_pathlike(v) for v in found_raw}
+    applied = (requested_ckpt in found_raw) or (requested_norm in found_norm)
+    summary["verified"] = bool(applied)
+    if not applied:
+        raise RuntimeError(
+            "Requested SSL checkpoint was not applied in effective training args. "
+            f"requested={requested_ckpt!r}, "
+            f"requested_normalized={requested_norm!r}, "
+            f"pretrained_encoder={found_pretrained_encoder!r}, "
+            f"pretrain_weights={found_pretrain_weights!r}, "
+            f"encoder_name={found_encoder_name!r}, "
+            f"pretrained_backbone={found_pretrained_backbone!r}"
+        )
+    return summary
+
 def train_one_run(target_name: str,
                   dataset_dir: Path,
                   out_dir: Path,
@@ -652,15 +734,24 @@ def train_one_run(target_name: str,
             seed=seed,
         )
 
+    if backbone_ckpt is not None:
+        backbone_ckpt = str(backbone_ckpt).strip()
+        if not backbone_ckpt:
+            backbone_ckpt = None
+        else:
+            resolved_backbone = Path(os.path.expanduser(backbone_ckpt)).resolve()
+            if not resolved_backbone.exists():
+                raise FileNotFoundError(
+                    f"Requested ENCODER_CKPT not found: {resolved_backbone}"
+                )
+            backbone_ckpt = str(resolved_backbone)
+
     # Force resolution from selected input mode for consistent runs.
     if USE_PATCH_224:
         resolution = PATCH_SIZE
     else:
         resolution = FULL_RESOLUTION
-
     model = model_cls()
-    sig = signature(model.train)
-    can = set(sig.parameters.keys())
 
     # ---- base kwargs ----
     kwargs = dict(
@@ -689,26 +780,26 @@ def train_one_run(target_name: str,
         checkpoint_interval=10,
         run_test=True,
     )
-
-    def maybe(name, value):
-        if name in can and value is not None:
-            kwargs[name] = value
-
-    # Backbone / encoder checkpoint from SSL
-    maybe("encoder_name", backbone_ckpt)
-    maybe("pretrained_backbone", backbone_ckpt)
-
+    # Explicit mapping for SSL backbone initialization.
+    # NOTE: relying on train() signature inspection is unsafe when train(**kwargs).
+    if backbone_ckpt is not None:
+        kwargs["pretrained_encoder"] = backbone_ckpt
+        # Disable hosted RF-DETR pretrain when SSL encoder is requested.
+        kwargs["pretrain_weights"] = None
+        # Backward-compat aliases for older/custom forks.
+        kwargs["encoder_name"] = backbone_ckpt
+        kwargs["pretrained_backbone"] = backbone_ckpt
     # resizing behaviour: IMPORTANT
     if USE_PATCH_224:
         # patches are already square 224×224; do NOT resize
-        maybe("square_resize_div_64", False)
-        maybe("do_random_resize_via_padding", False)
-        maybe("random_resize_via_padding", False)
+        kwargs["square_resize_div_64"] = False
+        kwargs["do_random_resize_via_padding"] = False
+        kwargs["random_resize_via_padding"] = False
     else:
         # previous behaviour
-        maybe("square_resize_div_64", True)
-        maybe("do_random_resize_via_padding", False)
-        maybe("random_resize_via_padding", False)
+        kwargs["square_resize_div_64"] = True
+        kwargs["do_random_resize_via_padding"] = False
+        kwargs["random_resize_via_padding"] = False
 
     # Log meta
     meta = out_dir / "run_meta"
@@ -727,7 +818,12 @@ def train_one_run(target_name: str,
 
     print(f"[TRAIN] {model.__class__.__name__} — {target_name} → {out_dir}")
     model.train(**kwargs)
-
+    # Fail fast if SSL checkpoint was requested but not effectively applied.
+    backbone_check = verify_effective_backbone_in_checkpoint(out_dir, backbone_ckpt)
+    (meta / "effective_backbone_check.json").write_text(
+        json.dumps(backbone_check, indent=2),
+        encoding="utf-8",
+    )
     best = find_best_val(out_dir)
     (out_dir / "val_best_summary.json").write_text(json.dumps(best, indent=2), encoding="utf-8")
     return best
@@ -1008,6 +1104,7 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
                     gauss_blur_prob=try_cfg["GAUSS_BLUR"],
                     aug_copies=try_cfg["AUG_COPIES"],
                     backbone_ckpt=backbone_ckpt,
+                    train_fraction=train_fraction,
                     seed=SEED,
                     num_workers=max(2, NUM_WORKERS // 2),
                     pin_memory=False,
