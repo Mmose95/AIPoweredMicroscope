@@ -103,20 +103,7 @@ SSL_CKPT_ROOT = env_path(
     "SSL_CKPT_ROOT",
     WORK_ROOT / "SSL_Checkpoints",
 )
-
-SSL_BACKBONES = [
-    SSL_CKPT_ROOT / "epoch_epoch-004.ckpt",
-    SSL_CKPT_ROOT / "epoch_epoch-009.ckpt",
-    SSL_CKPT_ROOT / "epoch_epoch-014.ckpt",
-    SSL_CKPT_ROOT / "epoch_epoch-029.ckpt", #This one is the "best" from long SSL training.
-    SSL_CKPT_ROOT / "last.ckpt",
-]
-
-print("[SSL BACKBONES]")
-for p in SSL_BACKBONES:
-    print("  ", p)
-
-BEST_SSL_CKPT = str(SSL_CKPT_ROOT / "epoch_epoch-029.ckpt")  # <- adjust to winner if needed
+BEST_SSL_CKPT = str(SSL_CKPT_ROOT / "epoch_epoch=029.ckpt")  # <- adjust to winner if needed
 
 # ───────────────────────────────────────────────
 # Path resolution helpers for COCO
@@ -958,7 +945,7 @@ SEARCH_EPI = {
     "ENCODER_CKPT":  [BEST_SSL_CKPT],               # intentionally omitted
 
     # For this HPO: always use full train split
-    "TRAIN_FRACTION":  [0.125, 0.03, 1],
+    "TRAIN_FRACTION":  [0.03],
 }
 
 
