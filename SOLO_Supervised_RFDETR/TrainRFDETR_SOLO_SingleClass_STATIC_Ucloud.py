@@ -941,7 +941,7 @@ SEARCH_EPI = {
     # Model & input
     "MODEL_CLS":       ["RFDETRLarge"],   # keep Large, patches are smaller so this is fine
     "RESOLUTION":      [SEARCH_RESOLUTION],  # mode-fixed (224 patch or full resolution)
-    "EPOCHS":          [80],              # let early stopping decide
+    "EPOCHS":          [3],              # let early stopping decide
 
     # Optimizer / schedule
     "LR":              [5e-5],  # a bit wider around your previous good LR
