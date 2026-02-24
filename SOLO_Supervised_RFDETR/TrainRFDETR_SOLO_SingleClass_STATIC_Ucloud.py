@@ -583,6 +583,7 @@ HPO_SESSION_ID: str | None = None
 SESSION_ROOT: Path | None = None
 
 NUM_WORKERS = int(os.getenv("NUM_WORKERS", "8"))
+RFDETR_MIN_BATCHES = int(os.getenv("RFDETR_MIN_BATCHES", "1"))
 SEED        = int(os.getenv("SEED", "42"))
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -763,6 +764,8 @@ def train_one_run(target_name: str,
         dataset_dir=str(data_dir),
         output_dir=str(out_dir),
         class_names=[target_name],
+        # Avoid RF-DETR tiny-dataset sampler/schedule mismatch in some releases.
+        min_batches=RFDETR_MIN_BATCHES,
 
         resolution=resolution,
         batch_size=batch_size,
