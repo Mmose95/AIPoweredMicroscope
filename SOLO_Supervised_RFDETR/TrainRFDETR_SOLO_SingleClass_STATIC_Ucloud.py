@@ -19,6 +19,16 @@ import numpy as np
 HPO_TARGET = os.environ.get("RFDETR_HPO_TARGET", "epi").lower()
 BACKBONE_BLOCK_SIZE = 56
 
+def _is_main_process() -> bool:
+    try:
+        return mp.current_process().name == "MainProcess"
+    except Exception:
+        return True
+
+def _main_print(*args, **kwargs):
+    if _is_main_process():
+        print(*args, **kwargs)
+
 
 def _round_up_to_multiple(v: int, m: int) -> int:
     return ((v + m - 1) // m) * m
@@ -62,16 +72,16 @@ USE_PATCH_224, INPUT_MODE, PATCH_SIZE, FULL_RESOLUTION = _resolve_input_mode()
 if not USE_PATCH_224 and FULL_RESOLUTION % BACKBONE_BLOCK_SIZE != 0:
     old = FULL_RESOLUTION
     FULL_RESOLUTION = _round_up_to_multiple(FULL_RESOLUTION, BACKBONE_BLOCK_SIZE)
-    print(
+    _main_print(
         f"[INPUT MODE][WARN] Full-mode resolution {old} is not divisible by "
         f"{BACKBONE_BLOCK_SIZE}; using {FULL_RESOLUTION}."
     )
 
-print(f"[HPO] Target classes: {HPO_TARGET!r} (env RFDETR_HPO_TARGET)")
-print(f"[INPUT MODE] RFDETR_INPUT_MODE={INPUT_MODE}  USE_PATCH_224={USE_PATCH_224}")
-print(f"[INPUT SIZE] PATCH_SIZE={PATCH_SIZE}  FULL_RESOLUTION={FULL_RESOLUTION}")
+_main_print(f"[HPO] Target classes: {HPO_TARGET!r} (env RFDETR_HPO_TARGET)")
+_main_print(f"[INPUT MODE] RFDETR_INPUT_MODE={INPUT_MODE}  USE_PATCH_224={USE_PATCH_224}")
+_main_print(f"[INPUT SIZE] PATCH_SIZE={PATCH_SIZE}  FULL_RESOLUTION={FULL_RESOLUTION}")
 if os.getenv("RFDETR_INPUT_MODE", "").strip():
-    print("[INPUT MODE] RFDETR_INPUT_MODE is authoritative; legacy RFDETR_USE_PATCH_224/RFDETR_PATCH_SIZE are ignored.")
+    _main_print("[INPUT MODE] RFDETR_INPUT_MODE is authoritative; legacy RFDETR_USE_PATCH_224/RFDETR_PATCH_SIZE are ignored.")
 if PATCH_SIZE <= 0:
     raise ValueError(f"RFDETR_PATCH_SIZE must be > 0, got {PATCH_SIZE}")
 if FULL_RESOLUTION <= 0:
@@ -527,7 +537,7 @@ def detect_visible_gpus() -> list[int]:
 
 VISIBLE_GPUS = detect_visible_gpus()
 MAX_PARALLEL = int(os.getenv("MAX_PARALLEL", str(len(VISIBLE_GPUS) if VISIBLE_GPUS else 1)))
-print(f"[GPU DETECT] Visible GPUs: {VISIBLE_GPUS}  |  MAX_PARALLEL={MAX_PARALLEL}")
+_main_print(f"[GPU DETECT] Visible GPUs: {VISIBLE_GPUS}  |  MAX_PARALLEL={MAX_PARALLEL}")
 
 # Where the **real images** live (on your drive)
 IMAGES_FALLBACK_ROOT = env_path(
@@ -738,7 +748,15 @@ def train_one_run(target_name: str,
         resolution = PATCH_SIZE
     else:
         resolution = FULL_RESOLUTION
-    model = model_cls()
+    # Keep baseline behavior for non-SSL runs, but explicitly disable default
+    # detector pretrain loading for SSL-backbone runs to avoid silent mixing.
+    if backbone_ckpt is not None:
+        try:
+            model = model_cls(pretrain_weights=None)
+        except TypeError:
+            model = model_cls()
+    else:
+        model = model_cls()
 
     # ---- base kwargs ----
     kwargs = dict(
@@ -1003,6 +1021,7 @@ def _oom_backoff(cfg: dict) -> dict:
 
 def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
                   dataset_dir: str, out_root: str, result_q: mp.Queue):
+    run_dir = None
     try:
         # Mask to a single physical GPU for this process BEFORE importing torch/rfdetr
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -1120,7 +1139,19 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
         (run_dir / "hpo_record.json").write_text(json.dumps(row, indent=2), encoding="utf-8")
         result_q.put(("ok", row))
     except Exception as e:
-        result_q.put(("err", {"run_idx": run_idx, "target": target_name, "error": repr(e)}))
+        import traceback
+        err = {
+            "run_idx": run_idx,
+            "target": target_name,
+            "error": repr(e),
+            "traceback": traceback.format_exc(),
+        }
+        if run_dir is not None:
+            try:
+                (run_dir / "worker_error.json").write_text(json.dumps(err, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+        result_q.put(("err", err))
 
 # ───────────────────────────────────────────────────────────────────────────────
 def run_hpo_all_classes(session_root: Path) -> dict:
@@ -1213,6 +1244,9 @@ def run_hpo_all_classes(session_root: Path) -> dict:
             else:
                 print(f"[HPO] ERROR run {payload.get('run_idx')} "
                       f"({payload.get('target')}): {payload.get('error')}")
+                tb = payload.get("traceback")
+                if tb:
+                    print(tb)
 
     try:
         while True:
