@@ -946,11 +946,11 @@ SEARCH_EPI = {
     # Optimizer / schedule
     "LR":              [5e-5],  # a bit wider around your previous good LR
     "LR_ENCODER_MULT": [1.0],              # still ignored for now
-    "BATCH":           [16],            # 16 should be feasible with 224×224, OOM-backoff will save us
+    "BATCH":           [16 if USE_PATCH_224 else 4],            # 16 should be feasible with 224×224, OOM-backoff will save us
     "WARMUP_STEPS":    [0],          # no warmup vs modest warmup
 
     # Detector capacity — per 224×224 patch there are few cells
-    "NUM_QUERIES":     [200],         # plenty for “few objects per patch”
+    "NUM_QUERIES":     [200 if USE_PATCH_224 else 120],         # plenty for “few objects per patch”
 
     # Augmentation / regularization
     "AUG_COPIES":      [0],                # still no offline aug (RFDETR has its own online aug)
@@ -1003,21 +1003,37 @@ def _set_perf_toggles():
     except Exception:
         pass
 
-def _oom_backoff(cfg: dict) -> dict:
-    """Return a slightly 'lighter' config when OOM is detected."""
+def _is_oom_error_message(msg: str) -> bool:
+    m = (msg or "").lower()
+    return ("out of memory" in m) or ("cudnn_status_alloc_failed" in m)
+
+def _oom_backoff(cfg: dict) -> tuple[dict, dict]:
+    """
+    Return a lighter config plus a change summary.
+    Only touches knobs that are actually used in train_one_run.
+    """
     new = dict(cfg)
-    if new["BATCH"] > 2:
-        new["BATCH"] = max(2, new["BATCH"] - 1)
-        return new
-    if new["NUM_QUERIES"] > 240:
-        new["NUM_QUERIES"] = int(max(240, round(new["NUM_QUERIES"] * 0.8)))
-        return new
-    # drop resolution by ~10% (round to nearest 32)
-    def _downscale(r):
-        x = int(round(r * 0.9 / 32) * 32)
-        return max(512, x)
-    new["RESOLUTION"] = _downscale(new["RESOLUTION"])
-    return new
+    change = {}
+
+    b = int(new.get("BATCH", 1))
+    if b > 1:
+        nb = max(1, b // 2)
+        if nb == b:
+            nb = b - 1
+        new["BATCH"] = nb
+        change["BATCH"] = [b, nb]
+        return new, change
+
+    q = int(new.get("NUM_QUERIES", 0))
+    if q > 64:
+        nq = max(64, int(round(q * 0.75 / 10.0) * 10))
+        if nq == q:
+            nq = max(64, q - 10)
+        new["NUM_QUERIES"] = nq
+        change["NUM_QUERIES"] = [q, nq]
+        return new, change
+
+    return new, change
 
 def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
                   dataset_dir: str, out_root: str, result_q: mp.Queue):
@@ -1060,38 +1076,16 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
 
         t0 = time.time()
         try_cfg = dict(cfg)
-        try:
-            best = train_one_run(
-                target_name=target_name,
-                dataset_dir=Path(dataset_dir),
-                out_dir=run_dir,
-                model_cls=model_cls,
-                resolution=try_cfg["RESOLUTION"],
-                epochs=try_cfg["EPOCHS"],
-                lr=try_cfg["LR"],
-                lr_encoder_mult=try_cfg["LR_ENCODER_MULT"],
-                batch_size=try_cfg["BATCH"],
-                num_queries=try_cfg["NUM_QUERIES"],
-                warmup_steps=try_cfg["WARMUP_STEPS"],
-                scale_range=try_cfg["SCALE_RANGE"],
-                rot_deg=try_cfg["ROT_DEG"],
-                color_jitter=try_cfg["COLOR_JITTER"],
-                gauss_blur_prob=try_cfg["GAUSS_BLUR"],
-                aug_copies=try_cfg["AUG_COPIES"],
-                backbone_ckpt=backbone_ckpt,
-                train_fraction=train_fraction,
-                seed=SEED,
-                num_workers=NUM_WORKERS,
-                pin_memory=True,
-                persistent_workers=True,
-            )
+        max_oom_retries = int(os.getenv("RFDETR_OOM_MAX_RETRIES", "8"))
+        oom_history = []
 
-        except RuntimeError as e:
-            msg = str(e)
-            if "CUDA out of memory" in msg or "CUDNN_STATUS_ALLOC_FAILED" in msg:
-                torch.cuda.empty_cache()
-                try_cfg = _oom_backoff(try_cfg)
-                (run_dir / "oom_backoff.json").write_text(json.dumps(try_cfg, indent=2), encoding="utf-8")
+        attempt = 0
+        workers_now = NUM_WORKERS
+        pin_now = True
+        persist_now = True
+
+        while True:
+            try:
                 best = train_one_run(
                     target_name=target_name,
                     dataset_dir=Path(dataset_dir),
@@ -1112,12 +1106,60 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
                     backbone_ckpt=backbone_ckpt,
                     train_fraction=train_fraction,
                     seed=SEED,
-                    num_workers=max(2, NUM_WORKERS // 2),
-                    pin_memory=False,
-                    persistent_workers=False,
+                    num_workers=workers_now,
+                    pin_memory=pin_now,
+                    persistent_workers=persist_now,
                 )
-            else:
-                raise
+                break
+            except RuntimeError as e:
+                msg = str(e)
+                if not _is_oom_error_message(msg):
+                    raise
+                if attempt >= max_oom_retries:
+                    oom_history.append({
+                        "attempt": attempt,
+                        "error": msg,
+                        "cfg": {"BATCH": try_cfg.get("BATCH"), "NUM_QUERIES": try_cfg.get("NUM_QUERIES")},
+                        "workers": workers_now,
+                    })
+                    (run_dir / "oom_backoff_history.json").write_text(json.dumps(oom_history, indent=2), encoding="utf-8")
+                    raise
+
+                import gc
+                del e
+                gc.collect()
+                torch.cuda.empty_cache()
+                try:
+                    torch.cuda.ipc_collect()
+                except Exception:
+                    pass
+
+                next_cfg, change = _oom_backoff(try_cfg)
+                if not change:
+                    raise RuntimeError(
+                        f"OOM persists and no further backoff knobs left. cfg={try_cfg}"
+                    )
+
+                workers_now = max(1, workers_now // 2)
+                pin_now = False
+                persist_now = False
+                attempt += 1
+
+                oom_step = {
+                    "attempt": attempt,
+                    "change": change,
+                    "next_cfg": {"BATCH": next_cfg.get("BATCH"), "NUM_QUERIES": next_cfg.get("NUM_QUERIES")},
+                    "workers": workers_now,
+                    "error": msg,
+                }
+                oom_history.append(oom_step)
+                (run_dir / "oom_backoff_history.json").write_text(json.dumps(oom_history, indent=2), encoding="utf-8")
+                print(
+                    f"[OOM BACKOFF] run {run_idx:03d} retry {attempt}/{max_oom_retries} "
+                    f"with BATCH={next_cfg.get('BATCH')} NUM_QUERIES={next_cfg.get('NUM_QUERIES')} "
+                    f"workers={workers_now}"
+                )
+                try_cfg = next_cfg
 
         dur = round(time.time() - t0, 2)
 
