@@ -64,7 +64,8 @@ FRACTION_SEED  = int(os.getenv("RFDETR_FRACTION_SEED", "42"))
 
 # Static training seed for RFDETR
 SEED = int(os.getenv("SEED", "42"))
-PARALLEL_GPUS = int(os.getenv("RFDETR_PARALLEL_GPUS", "1"))
+PARALLEL_GPUS_REQUESTED = int(os.getenv("RFDETR_PARALLEL_GPUS", "1"))
+PARALLEL_GPUS = 1
 
 print(f"[PROBE] Target classes: {PROBE_TARGET!r} (env RFDETR_PROBE_TARGET)")
 print(f"[INPUT MODE] RFDETR_INPUT_MODE={INPUT_MODE}  USE_PATCH_224={USE_PATCH_224}")
@@ -73,6 +74,8 @@ if os.getenv("RFDETR_INPUT_MODE", "").strip():
     print("[INPUT MODE] RFDETR_INPUT_MODE is authoritative; legacy RFDETR_USE_PATCH_224/RFDETR_PATCH_SIZE are ignored.")
 print(f"[PROBE] TRAIN_FRACTION={TRAIN_FRACTION}  FRACTION_SEED={FRACTION_SEED}  SEED={SEED}")
 print(f"[PROBE] RFDETR_PARALLEL_GPUS={PARALLEL_GPUS}")
+if PARALLEL_GPUS_REQUESTED != 1:
+    print(f"[PROBE][WARN] Requested RFDETR_PARALLEL_GPUS={PARALLEL_GPUS_REQUESTED}, forcing single-GPU mode (1).")
 
 if not (0.0 < TRAIN_FRACTION <= 1.0):
     raise ValueError(f"RFDETR_TRAIN_FRACTION must be in (0, 1], got {TRAIN_FRACTION}")
@@ -702,8 +705,8 @@ def _gpu_slots_for_parallel() -> list[str | None]:
     ids = _detect_visible_gpu_ids()
     if not ids:
         return [None]
-    n = max(1, min(PARALLEL_GPUS, len(ids)))
-    return ids[:n]
+    # Force single-GPU sequential execution for stability on Ucloud.
+    return [ids[0]]
 
 
 def _build_probe_row(
