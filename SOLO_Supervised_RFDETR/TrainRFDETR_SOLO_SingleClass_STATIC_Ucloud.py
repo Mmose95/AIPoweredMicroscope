@@ -19,30 +19,48 @@ import numpy as np
 #  - "all"  -> both
 HPO_TARGET = os.environ.get("RFDETR_HPO_TARGET", "epi").lower()
 
-def _resolve_input_mode() -> tuple[bool, str]:
+def _resolve_input_mode() -> tuple[bool, str, int, int]:
     mode_raw = os.getenv("RFDETR_INPUT_MODE", "").strip().lower()
     if mode_raw:
-        if mode_raw in {"224", "224x224", "patch", "patch224", "patch_224"}:
-            return True, "224"
-        if mode_raw in {"640", "640x640", "full", "full640", "full_640"}:
-            return False, "640"
-        raise ValueError(
-            f"Invalid RFDETR_INPUT_MODE={mode_raw!r}. Use one of: "
-            f"224, patch224, 640, full640"
-        )
+        aliases = {
+            "patch": "224",
+            "patch224": "224",
+            "patch_224": "224",
+            "full": "640",
+            "full640": "640",
+            "full_640": "640",
+        }
+        mode_norm = aliases.get(mode_raw, mode_raw)
+        m = re.fullmatch(r"(\d+)(?:x\1)?", mode_norm)
+        if not m:
+            raise ValueError(
+                f"Invalid RFDETR_INPUT_MODE={mode_raw!r}. "
+                f"Use 640 for full-image mode, or any positive integer (e.g. 224) for patch mode."
+            )
+        mode_size = int(m.group(1))
+        if mode_size <= 0:
+            raise ValueError(f"RFDETR_INPUT_MODE must be a positive integer, got {mode_size}")
+
+        use_patch = mode_size != 640
+        patch_size = mode_size if use_patch else 224
+        full_resolution = 640
+        return use_patch, str(mode_size), patch_size, full_resolution
 
     # Backward-compatible path: keep old env behavior if RFDETR_INPUT_MODE is unset.
     use_patch = bool(int(os.getenv("RFDETR_USE_PATCH_224", "1")))
-    return use_patch, ("224" if use_patch else "640")
+    patch_size = int(os.getenv("RFDETR_PATCH_SIZE", "224"))
+    full_resolution = int(os.getenv("RFDETR_FULL_RESOLUTION", "640"))
+    return use_patch, (str(patch_size) if use_patch else "640"), patch_size, full_resolution
 
-# Toggle to use 224×224 patchified dataset instead of full 640×640 images
-USE_PATCH_224, INPUT_MODE = _resolve_input_mode()
-PATCH_SIZE = int(os.getenv("RFDETR_PATCH_SIZE", "224"))
-FULL_RESOLUTION = int(os.getenv("RFDETR_FULL_RESOLUTION", "640"))
+# If RFDETR_INPUT_MODE != 640 we run patch mode with patch size = int(RFDETR_INPUT_MODE).
+# If RFDETR_INPUT_MODE == 640 we run full-image mode.
+USE_PATCH_224, INPUT_MODE, PATCH_SIZE, FULL_RESOLUTION = _resolve_input_mode()
 
 print(f"[HPO] Target classes: {HPO_TARGET!r} (env RFDETR_HPO_TARGET)")
 print(f"[INPUT MODE] RFDETR_INPUT_MODE={INPUT_MODE}  USE_PATCH_224={USE_PATCH_224}")
 print(f"[INPUT SIZE] PATCH_SIZE={PATCH_SIZE}  FULL_RESOLUTION={FULL_RESOLUTION}")
+if os.getenv("RFDETR_INPUT_MODE", "").strip():
+    print("[INPUT MODE] RFDETR_INPUT_MODE is authoritative; legacy RFDETR_USE_PATCH_224/RFDETR_PATCH_SIZE are ignored.")
 if PATCH_SIZE <= 0:
     raise ValueError(f"RFDETR_PATCH_SIZE must be > 0, got {PATCH_SIZE}")
 if FULL_RESOLUTION <= 0:
