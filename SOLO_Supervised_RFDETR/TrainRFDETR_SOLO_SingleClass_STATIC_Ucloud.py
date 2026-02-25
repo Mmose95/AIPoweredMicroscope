@@ -715,6 +715,12 @@ def train_one_run(target_name: str,
                   color_jitter: float,
                   gauss_blur_prob: float,
                   aug_copies: int,
+                  weight_decay: float,
+                  dropout: float,
+                  early_stopping: bool,
+                  early_stopping_patience: int,
+                  early_stopping_min_delta: float,
+                  early_stopping_use_ema: bool,
                   backbone_ckpt: str | None = None,
                   train_fraction: float = 1.0,
                   seed: int = 42,
@@ -774,8 +780,8 @@ def train_one_run(target_name: str,
         grad_accum_steps=8,
         epochs=epochs,
         lr=lr,
-        weight_decay=5e-4,
-        dropout=0.1,
+        weight_decay=weight_decay,
+        dropout=dropout,
         num_queries=num_queries,
 
         multi_scale=False,
@@ -786,7 +792,10 @@ def train_one_run(target_name: str,
         persistent_workers=persistent_workers,
 
         seed=seed,
-        early_stopping=True, #default patience is 10
+        early_stopping=early_stopping,
+        early_stopping_patience=early_stopping_patience,
+        early_stopping_min_delta=early_stopping_min_delta,
+        early_stopping_use_ema=early_stopping_use_ema,
         checkpoint_interval=10,
         run_test=True,
     )
@@ -895,19 +904,25 @@ SEARCH_RESOLUTION = PATCH_SIZE if USE_PATCH_224 else FULL_RESOLUTION
 MATRIX_QUICK_DEFAULTS = {
     # Shared matrix controls
     "RFDETR_MODEL_CLS": "RFDETRLarge",
-    "RFDETR_EPI_EPOCHS": "80",
-    "RFDETR_LEU_EPOCHS": "80",
+    "RFDETR_EPI_EPOCHS": "50",
+    "RFDETR_LEU_EPOCHS": "70",
     "RFDETR_SSL_MODES": "none,ssl",  # options: none, ssl
     "RFDETR_TRAIN_FRACTIONS": "0.03,0.125,0.25,0.5,0.75,1.0",
     "RFDETR_SEEDS": str(SEED),
     # Shared hyperparameters
     "RFDETR_LR_ENCODER_MULT": "1.0",
+    "RFDETR_WEIGHT_DECAY": "7e-4",
+    "RFDETR_DROPOUT": "0.15",
     "RFDETR_AUG_COPIES": "0",
     "RFDETR_SCALE_MIN": "0.9",
     "RFDETR_SCALE_MAX": "1.1",
     "RFDETR_ROT_DEG": "5.0",
     "RFDETR_COLOR_JITTER": "0.20",
     "RFDETR_GAUSS_BLUR": "0.20",
+    "RFDETR_EARLY_STOPPING": "1",
+    "RFDETR_EARLY_STOPPING_PATIENCE": "10",
+    "RFDETR_EARLY_STOPPING_MIN_DELTA": "0.001",
+    "RFDETR_EARLY_STOPPING_USE_EMA": "0",
     # Class-specific defaults
     "RFDETR_EPI_LR": "5e-5",
     "RFDETR_LEU_LR": "8e-5",
@@ -947,6 +962,14 @@ def _csv_int(raw: str) -> list[int]:
         raise ValueError("Expected a non-empty int CSV.")
     return vals
 
+def _parse_bool(raw: str) -> bool:
+    x = str(raw).strip().lower()
+    if x in ("1", "true", "yes", "y", "on"):
+        return True
+    if x in ("0", "false", "no", "n", "off"):
+        return False
+    raise ValueError(f"Expected boolean text, got {raw!r}")
+
 def _unique_keep_order(seq):
     out, seen = [], set()
     for x in seq:
@@ -979,12 +1002,18 @@ def _build_matrix_runtime_config() -> dict:
         "train_fractions": _csv_float(_cfg_text("RFDETR_TRAIN_FRACTIONS")),
         "seeds": _csv_int(_cfg_text("RFDETR_SEEDS")),
         "lr_encoder_mult": float(_cfg_text("RFDETR_LR_ENCODER_MULT")),
+        "weight_decay": float(_cfg_text("RFDETR_WEIGHT_DECAY")),
+        "dropout": float(_cfg_text("RFDETR_DROPOUT")),
         "aug_copies": int(_cfg_text("RFDETR_AUG_COPIES")),
         "scale_min": float(_cfg_text("RFDETR_SCALE_MIN")),
         "scale_max": float(_cfg_text("RFDETR_SCALE_MAX")),
         "rot_deg": float(_cfg_text("RFDETR_ROT_DEG")),
         "color_jitter": float(_cfg_text("RFDETR_COLOR_JITTER")),
         "gauss_blur": float(_cfg_text("RFDETR_GAUSS_BLUR")),
+        "early_stopping": _parse_bool(_cfg_text("RFDETR_EARLY_STOPPING")),
+        "early_stopping_patience": int(_cfg_text("RFDETR_EARLY_STOPPING_PATIENCE")),
+        "early_stopping_min_delta": float(_cfg_text("RFDETR_EARLY_STOPPING_MIN_DELTA")),
+        "early_stopping_use_ema": _parse_bool(_cfg_text("RFDETR_EARLY_STOPPING_USE_EMA")),
         "epi": {
             "epochs": int(_cfg_text("RFDETR_EPI_EPOCHS")),
             "lr": float(_cfg_text("RFDETR_EPI_LR")),
@@ -1005,6 +1034,18 @@ def _build_matrix_runtime_config() -> dict:
     if cfg["scale_min"] <= 0 or cfg["scale_max"] <= 0 or cfg["scale_min"] > cfg["scale_max"]:
         raise ValueError(
             f"Invalid scale range: RFDETR_SCALE_MIN={cfg['scale_min']} RFDETR_SCALE_MAX={cfg['scale_max']}"
+        )
+    if cfg["weight_decay"] < 0:
+        raise ValueError(f"RFDETR_WEIGHT_DECAY must be >= 0, got {cfg['weight_decay']}")
+    if cfg["dropout"] < 0 or cfg["dropout"] >= 1:
+        raise ValueError(f"RFDETR_DROPOUT must be in [0,1), got {cfg['dropout']}")
+    if cfg["early_stopping_patience"] < 0:
+        raise ValueError(
+            f"RFDETR_EARLY_STOPPING_PATIENCE must be >= 0, got {cfg['early_stopping_patience']}"
+        )
+    if cfg["early_stopping_min_delta"] < 0:
+        raise ValueError(
+            f"RFDETR_EARLY_STOPPING_MIN_DELTA must be >= 0, got {cfg['early_stopping_min_delta']}"
         )
     return cfg
 
@@ -1036,12 +1077,18 @@ def _build_matrix_space_for_target(target_key: str, matrix_cfg: dict) -> dict:
         "LR_ENCODER_MULT": [matrix_cfg["lr_encoder_mult"]],
         "BATCH":           [tcfg["batch"]],
         "WARMUP_STEPS":    [tcfg["warmup_steps"]],
+        "WEIGHT_DECAY":    [matrix_cfg["weight_decay"]],
+        "DROPOUT":         [matrix_cfg["dropout"]],
         "NUM_QUERIES":     [tcfg["num_queries"]],
         "AUG_COPIES":      [matrix_cfg["aug_copies"]],
         "SCALE_RANGE":     [(matrix_cfg["scale_min"], matrix_cfg["scale_max"])],
         "ROT_DEG":         [matrix_cfg["rot_deg"]],
         "COLOR_JITTER":    [matrix_cfg["color_jitter"]],
         "GAUSS_BLUR":      [matrix_cfg["gauss_blur"]],
+        "EARLY_STOPPING":             [matrix_cfg["early_stopping"]],
+        "EARLY_STOPPING_PATIENCE":    [matrix_cfg["early_stopping_patience"]],
+        "EARLY_STOPPING_MIN_DELTA":   [matrix_cfg["early_stopping_min_delta"]],
+        "EARLY_STOPPING_USE_EMA":     [matrix_cfg["early_stopping_use_ema"]],
         "ENCODER_CKPT":    encoder_ckpts,
         "TRAIN_FRACTION":  matrix_cfg["train_fractions"],
         "SEED":            matrix_cfg["seeds"],
@@ -1194,11 +1241,17 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
                     batch_size=try_cfg["BATCH"],
                     num_queries=try_cfg["NUM_QUERIES"],
                     warmup_steps=try_cfg["WARMUP_STEPS"],
+                    weight_decay=try_cfg["WEIGHT_DECAY"],
+                    dropout=try_cfg["DROPOUT"],
                     scale_range=try_cfg["SCALE_RANGE"],
                     rot_deg=try_cfg["ROT_DEG"],
                     color_jitter=try_cfg["COLOR_JITTER"],
                     gauss_blur_prob=try_cfg["GAUSS_BLUR"],
                     aug_copies=try_cfg["AUG_COPIES"],
+                    early_stopping=try_cfg["EARLY_STOPPING"],
+                    early_stopping_patience=try_cfg["EARLY_STOPPING_PATIENCE"],
+                    early_stopping_min_delta=try_cfg["EARLY_STOPPING_MIN_DELTA"],
+                    early_stopping_use_ema=try_cfg["EARLY_STOPPING_USE_EMA"],
                     backbone_ckpt=backbone_ckpt,
                     train_fraction=train_fraction,
                     seed=run_seed,
