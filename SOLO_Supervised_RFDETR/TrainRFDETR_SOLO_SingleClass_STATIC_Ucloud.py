@@ -114,8 +114,8 @@ SSL_CKPT_ROOT = env_path(
     WORK_ROOT / "SSL_Checkpoints",
 )
 # Explicit per-class defaults for SSL backbone selection.
-BEST_SSL_CKPT_EPI = str(SSL_CKPT_ROOT / "epoch_epoch=029.ckpt")  # set your epithelial winner
-BEST_SSL_CKPT_LEU = str(SSL_CKPT_ROOT / "epoch_epoch=029.ckpt")  # set your leucocyte winner
+BEST_SSL_CKPT_EPI = str(SSL_CKPT_ROOT / "Epi_SSL_Models" / "epoch_epoch=029.ckpt")  # set your epithelial winner
+BEST_SSL_CKPT_LEU = str(SSL_CKPT_ROOT / "Leu_SSL_Models" / "epoch_epoch=069.ckpt")  # set your leucocyte winner
 
 # ───────────────────────────────────────────────
 # Path resolution helpers for COCO
@@ -786,7 +786,7 @@ def train_one_run(target_name: str,
         persistent_workers=persistent_workers,
 
         seed=seed,
-        early_stopping=True,
+        early_stopping=True, #default patience is 10
         checkpoint_interval=10,
         run_test=True,
     )
@@ -895,7 +895,8 @@ SEARCH_RESOLUTION = PATCH_SIZE if USE_PATCH_224 else FULL_RESOLUTION
 MATRIX_QUICK_DEFAULTS = {
     # Shared matrix controls
     "RFDETR_MODEL_CLS": "RFDETRLarge",
-    "RFDETR_EPOCHS": "80",
+    "RFDETR_EPI_EPOCHS": "80",
+    "RFDETR_LEU_EPOCHS": "80",
     "RFDETR_SSL_MODES": "none,ssl",  # options: none, ssl
     "RFDETR_TRAIN_FRACTIONS": "0.03,0.125,0.25,0.5,0.75,1.0",
     "RFDETR_SEEDS": str(SEED),
@@ -974,7 +975,6 @@ def _parse_ssl_modes(raw: str) -> list[str]:
 def _build_matrix_runtime_config() -> dict:
     cfg = {
         "model_cls": _cfg_text("RFDETR_MODEL_CLS"),
-        "epochs": int(_cfg_text("RFDETR_EPOCHS")),
         "ssl_modes": _parse_ssl_modes(_cfg_text("RFDETR_SSL_MODES")),
         "train_fractions": _csv_float(_cfg_text("RFDETR_TRAIN_FRACTIONS")),
         "seeds": _csv_int(_cfg_text("RFDETR_SEEDS")),
@@ -986,6 +986,7 @@ def _build_matrix_runtime_config() -> dict:
         "color_jitter": float(_cfg_text("RFDETR_COLOR_JITTER")),
         "gauss_blur": float(_cfg_text("RFDETR_GAUSS_BLUR")),
         "epi": {
+            "epochs": int(_cfg_text("RFDETR_EPI_EPOCHS")),
             "lr": float(_cfg_text("RFDETR_EPI_LR")),
             "batch": int(_cfg_text("RFDETR_EPI_BATCH")),
             "warmup_steps": int(_cfg_text("RFDETR_EPI_WARMUP_STEPS")),
@@ -993,6 +994,7 @@ def _build_matrix_runtime_config() -> dict:
             "ssl_ckpt": _cfg_text("RFDETR_EPI_SSL_CKPT"),
         },
         "leu": {
+            "epochs": int(_cfg_text("RFDETR_LEU_EPOCHS")),
             "lr": float(_cfg_text("RFDETR_LEU_LR")),
             "batch": int(_cfg_text("RFDETR_LEU_BATCH")),
             "warmup_steps": int(_cfg_text("RFDETR_LEU_WARMUP_STEPS")),
@@ -1029,7 +1031,7 @@ def _build_matrix_space_for_target(target_key: str, matrix_cfg: dict) -> dict:
     return {
         "MODEL_CLS":       [matrix_cfg["model_cls"]],
         "RESOLUTION":      [SEARCH_RESOLUTION],
-        "EPOCHS":          [matrix_cfg["epochs"]],
+        "EPOCHS":          [tcfg["epochs"]],
         "LR":              [tcfg["lr"]],
         "LR_ENCODER_MULT": [matrix_cfg["lr_encoder_mult"]],
         "BATCH":           [tcfg["batch"]],
