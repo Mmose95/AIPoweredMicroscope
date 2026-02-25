@@ -890,19 +890,60 @@ def find_best_val(output_dir: Path) -> dict:
 # ───────────────────────────────────────────────────────────────────────────────
 SEARCH_RESOLUTION = PATCH_SIZE if USE_PATCH_224 else FULL_RESOLUTION
 
+MATRIX_QUICK_DEFAULTS = {
+    # Shared matrix controls
+    "RFDETR_MODEL_CLS": "RFDETRLarge",
+    "RFDETR_EPOCHS": "80",
+    "RFDETR_SSL_MODES": "none,ssl",  # options: none, ssl
+    "RFDETR_SSL_CKPT_DEFAULT": BEST_SSL_CKPT,
+    "RFDETR_TRAIN_FRACTIONS": "0.03,0.125,0.25,0.5,0.75,1.0",
+    "RFDETR_SEEDS": str(SEED),
+    # Shared hyperparameters
+    "RFDETR_LR_ENCODER_MULT": "1.0",
+    "RFDETR_AUG_COPIES": "0",
+    "RFDETR_SCALE_MIN": "0.9",
+    "RFDETR_SCALE_MAX": "1.1",
+    "RFDETR_ROT_DEG": "5.0",
+    "RFDETR_COLOR_JITTER": "0.20",
+    "RFDETR_GAUSS_BLUR": "0.20",
+    # Class-specific defaults
+    "RFDETR_EPI_LR": "5e-5",
+    "RFDETR_LEU_LR": "8e-5",
+    "RFDETR_EPI_WARMUP_STEPS": "0",
+    "RFDETR_LEU_WARMUP_STEPS": "0",
+}
+
+def _matrix_dynamic_defaults() -> dict:
+    default_batch = 16 if USE_PATCH_224 else 4
+    default_queries = 200 if USE_PATCH_224 else 120
+    ckpt_default = MATRIX_QUICK_DEFAULTS["RFDETR_SSL_CKPT_DEFAULT"]
+    return {
+        "RFDETR_EPI_BATCH": str(default_batch),
+        "RFDETR_LEU_BATCH": str(default_batch),
+        "RFDETR_EPI_NUM_QUERIES": str(default_queries),
+        "RFDETR_LEU_NUM_QUERIES": str(default_queries),
+        "RFDETR_EPI_SSL_CKPT": ckpt_default,
+        "RFDETR_LEU_SSL_CKPT": ckpt_default,
+    }
+
+def _cfg_text(name: str) -> str:
+    dyn = _matrix_dynamic_defaults()
+    default = dyn.get(name, MATRIX_QUICK_DEFAULTS.get(name, ""))
+    return os.getenv(name, default).strip()
+
 def _csv_tokens(raw: str) -> list[str]:
     return [x.strip() for x in str(raw).split(",") if x.strip()]
 
-def _csv_float_env(name: str, default_csv: str) -> list[float]:
-    vals = [float(x) for x in _csv_tokens(os.getenv(name, default_csv))]
+def _csv_float(raw: str) -> list[float]:
+    vals = [float(x) for x in _csv_tokens(raw)]
     if not vals:
-        raise ValueError(f"{name} produced an empty float list.")
+        raise ValueError("Expected a non-empty float CSV.")
     return vals
 
-def _csv_int_env(name: str, default_csv: str) -> list[int]:
-    vals = [int(x) for x in _csv_tokens(os.getenv(name, default_csv))]
+def _csv_int(raw: str) -> list[int]:
+    vals = [int(x) for x in _csv_tokens(raw)]
     if not vals:
-        raise ValueError(f"{name} produced an empty int list.")
+        raise ValueError("Expected a non-empty int CSV.")
     return vals
 
 def _unique_keep_order(seq):
@@ -930,7 +971,42 @@ def _parse_ssl_modes(raw: str) -> list[str]:
         raise ValueError("RFDETR_SSL_MODES must not be empty.")
     return norm
 
-def _build_matrix_space_for_target(target_key: str) -> dict:
+def _build_matrix_runtime_config() -> dict:
+    cfg = {
+        "model_cls": _cfg_text("RFDETR_MODEL_CLS"),
+        "epochs": int(_cfg_text("RFDETR_EPOCHS")),
+        "ssl_modes": _parse_ssl_modes(_cfg_text("RFDETR_SSL_MODES")),
+        "train_fractions": _csv_float(_cfg_text("RFDETR_TRAIN_FRACTIONS")),
+        "seeds": _csv_int(_cfg_text("RFDETR_SEEDS")),
+        "lr_encoder_mult": float(_cfg_text("RFDETR_LR_ENCODER_MULT")),
+        "aug_copies": int(_cfg_text("RFDETR_AUG_COPIES")),
+        "scale_min": float(_cfg_text("RFDETR_SCALE_MIN")),
+        "scale_max": float(_cfg_text("RFDETR_SCALE_MAX")),
+        "rot_deg": float(_cfg_text("RFDETR_ROT_DEG")),
+        "color_jitter": float(_cfg_text("RFDETR_COLOR_JITTER")),
+        "gauss_blur": float(_cfg_text("RFDETR_GAUSS_BLUR")),
+        "epi": {
+            "lr": float(_cfg_text("RFDETR_EPI_LR")),
+            "batch": int(_cfg_text("RFDETR_EPI_BATCH")),
+            "warmup_steps": int(_cfg_text("RFDETR_EPI_WARMUP_STEPS")),
+            "num_queries": int(_cfg_text("RFDETR_EPI_NUM_QUERIES")),
+            "ssl_ckpt": _cfg_text("RFDETR_EPI_SSL_CKPT"),
+        },
+        "leu": {
+            "lr": float(_cfg_text("RFDETR_LEU_LR")),
+            "batch": int(_cfg_text("RFDETR_LEU_BATCH")),
+            "warmup_steps": int(_cfg_text("RFDETR_LEU_WARMUP_STEPS")),
+            "num_queries": int(_cfg_text("RFDETR_LEU_NUM_QUERIES")),
+            "ssl_ckpt": _cfg_text("RFDETR_LEU_SSL_CKPT"),
+        },
+    }
+    if cfg["scale_min"] <= 0 or cfg["scale_max"] <= 0 or cfg["scale_min"] > cfg["scale_max"]:
+        raise ValueError(
+            f"Invalid scale range: RFDETR_SCALE_MIN={cfg['scale_min']} RFDETR_SCALE_MAX={cfg['scale_max']}"
+        )
+    return cfg
+
+def _build_matrix_space_for_target(target_key: str, matrix_cfg: dict) -> dict:
     """
     Build one-click matrix search space for a target class.
     target_key: 'epi' or 'leu'
@@ -938,53 +1014,35 @@ def _build_matrix_space_for_target(target_key: str) -> dict:
     if target_key not in ("epi", "leu"):
         raise ValueError(f"Unsupported target_key={target_key!r}")
 
-    pfx = "RFDETR_EPI" if target_key == "epi" else "RFDETR_LEU"
-    default_batch = 16 if USE_PATCH_224 else 4
-    default_queries = 200 if USE_PATCH_224 else 120
-    default_lr = 5e-5 if target_key == "epi" else 8e-5
-    default_ssl_ckpt = BEST_SSL_CKPT
-
-    ssl_ckpt = os.getenv(
-        f"{pfx}_SSL_CKPT",
-        os.getenv("RFDETR_SSL_CKPT_DEFAULT", default_ssl_ckpt),
-    ).strip()
-    ssl_modes = _parse_ssl_modes(os.getenv("RFDETR_SSL_MODES", "none,ssl"))
-
+    tcfg = matrix_cfg[target_key]
     encoder_ckpts = []
-    if "none" in ssl_modes:
+    if "none" in matrix_cfg["ssl_modes"]:
         encoder_ckpts.append(None)
-    if "ssl" in ssl_modes:
-        if not ssl_ckpt:
+    if "ssl" in matrix_cfg["ssl_modes"]:
+        if not tcfg["ssl_ckpt"]:
             raise ValueError(
                 f"SSL mode is enabled but no checkpoint path provided for {target_key}. "
-                f"Set {pfx}_SSL_CKPT or RFDETR_SSL_CKPT_DEFAULT."
+                f"Set RFDETR_{target_key.upper()}_SSL_CKPT."
             )
-        encoder_ckpts.append(ssl_ckpt)
-
-    # Shared matrix dimensions
-    train_fracs = _csv_float_env("RFDETR_TRAIN_FRACTIONS", "0.03,0.125,0.25,0.5,0.75,1.0")
-    run_seeds = _csv_int_env("RFDETR_SEEDS", str(SEED))
+        encoder_ckpts.append(tcfg["ssl_ckpt"])
 
     return {
-        "MODEL_CLS":       [os.getenv("RFDETR_MODEL_CLS", "RFDETRLarge")],
+        "MODEL_CLS":       [matrix_cfg["model_cls"]],
         "RESOLUTION":      [SEARCH_RESOLUTION],
-        "EPOCHS":          [int(os.getenv("RFDETR_EPOCHS", "80"))],
-        "LR":              [float(os.getenv(f"{pfx}_LR", str(default_lr)))],
-        "LR_ENCODER_MULT": [float(os.getenv("RFDETR_LR_ENCODER_MULT", "1.0"))],
-        "BATCH":           [int(os.getenv(f"{pfx}_BATCH", str(default_batch)))],
-        "WARMUP_STEPS":    [int(os.getenv(f"{pfx}_WARMUP_STEPS", "0"))],
-        "NUM_QUERIES":     [int(os.getenv(f"{pfx}_NUM_QUERIES", str(default_queries)))],
-        "AUG_COPIES":      [int(os.getenv("RFDETR_AUG_COPIES", "0"))],
-        "SCALE_RANGE":     [(
-            float(os.getenv("RFDETR_SCALE_MIN", "0.9")),
-            float(os.getenv("RFDETR_SCALE_MAX", "1.1")),
-        )],
-        "ROT_DEG":         [float(os.getenv("RFDETR_ROT_DEG", "5.0"))],
-        "COLOR_JITTER":    [float(os.getenv("RFDETR_COLOR_JITTER", "0.20"))],
-        "GAUSS_BLUR":      [float(os.getenv("RFDETR_GAUSS_BLUR", "0.20"))],
+        "EPOCHS":          [matrix_cfg["epochs"]],
+        "LR":              [tcfg["lr"]],
+        "LR_ENCODER_MULT": [matrix_cfg["lr_encoder_mult"]],
+        "BATCH":           [tcfg["batch"]],
+        "WARMUP_STEPS":    [tcfg["warmup_steps"]],
+        "NUM_QUERIES":     [tcfg["num_queries"]],
+        "AUG_COPIES":      [matrix_cfg["aug_copies"]],
+        "SCALE_RANGE":     [(matrix_cfg["scale_min"], matrix_cfg["scale_max"])],
+        "ROT_DEG":         [matrix_cfg["rot_deg"]],
+        "COLOR_JITTER":    [matrix_cfg["color_jitter"]],
+        "GAUSS_BLUR":      [matrix_cfg["gauss_blur"]],
         "ENCODER_CKPT":    encoder_ckpts,
-        "TRAIN_FRACTION":  train_fracs,
-        "SEED":            run_seeds,
+        "TRAIN_FRACTION":  matrix_cfg["train_fractions"],
+        "SEED":            matrix_cfg["seeds"],
     }
 
 # One-click matrix mode (both classes, with/without SSL, chosen fractions) with env flags.
@@ -992,12 +1050,13 @@ EXPERIMENT_MODE = os.getenv("RFDETR_EXPERIMENT_MODE", "matrix").strip().lower()
 if EXPERIMENT_MODE != "matrix":
     raise ValueError("RFDETR_EXPERIMENT_MODE currently supports only 'matrix'.")
 
-SEARCH_LEUCO = _build_matrix_space_for_target("leu")
-SEARCH_EPI = _build_matrix_space_for_target("epi")
+MATRIX_CFG = _build_matrix_runtime_config()
+SEARCH_LEUCO = _build_matrix_space_for_target("leu", MATRIX_CFG)
+SEARCH_EPI = _build_matrix_space_for_target("epi", MATRIX_CFG)
 _main_print(
-    f"[EXPERIMENT] mode=matrix ssl_modes={os.getenv('RFDETR_SSL_MODES', 'none,ssl')} "
-    f"fractions={os.getenv('RFDETR_TRAIN_FRACTIONS', '0.03,0.125,0.25,0.5,0.75,1.0')} "
-    f"seeds={os.getenv('RFDETR_SEEDS', str(SEED))}"
+    f"[EXPERIMENT] mode=matrix ssl_modes={','.join(MATRIX_CFG['ssl_modes'])} "
+    f"fractions={','.join(str(x) for x in MATRIX_CFG['train_fractions'])} "
+    f"seeds={','.join(str(x) for x in MATRIX_CFG['seeds'])}"
 )
 
 
@@ -1399,12 +1458,8 @@ def main():
     print("[DATASETS]")
     print("  Leucocyte:", DATASET_LEUCO)
     print("  Epithelial:", DATASET_EPI)
-    print("[MATRIX FLAGS]")
-    print("  RFDETR_SSL_MODES:", os.getenv("RFDETR_SSL_MODES", "none,ssl"))
-    print("  RFDETR_TRAIN_FRACTIONS:", os.getenv("RFDETR_TRAIN_FRACTIONS", "0.03,0.125,0.25,0.5,0.75,1.0"))
-    print("  RFDETR_SEEDS:", os.getenv("RFDETR_SEEDS", str(SEED)))
-    print("  RFDETR_EPI_SSL_CKPT:", os.getenv("RFDETR_EPI_SSL_CKPT", os.getenv("RFDETR_SSL_CKPT_DEFAULT", BEST_SSL_CKPT)))
-    print("  RFDETR_LEU_SSL_CKPT:", os.getenv("RFDETR_LEU_SSL_CKPT", os.getenv("RFDETR_SSL_CKPT_DEFAULT", BEST_SSL_CKPT)))
+    print("[MATRIX CONFIG]")
+    print(json.dumps(MATRIX_CFG, indent=2))
     for p in (DATASET_LEUCO, DATASET_EPI):
         for part in ("train", "valid"):
             if not (p / part / "_annotations.coco.json").exists():
@@ -1429,13 +1484,7 @@ def main():
         "full_resolution": None if USE_PATCH_224 else FULL_RESOLUTION,
     }
 
-    final["matrix_flags"] = {
-        "ssl_modes": os.getenv("RFDETR_SSL_MODES", "none,ssl"),
-        "train_fractions": os.getenv("RFDETR_TRAIN_FRACTIONS", "0.03,0.125,0.25,0.5,0.75,1.0"),
-        "seeds": os.getenv("RFDETR_SEEDS", str(SEED)),
-        "model_cls": os.getenv("RFDETR_MODEL_CLS", "RFDETRLarge"),
-        "epochs": int(os.getenv("RFDETR_EPOCHS", "80")),
-    }
+    final["matrix_config"] = MATRIX_CFG
 
     if "Leucocyte" in res_all:
         final["leucocyte"] = {
