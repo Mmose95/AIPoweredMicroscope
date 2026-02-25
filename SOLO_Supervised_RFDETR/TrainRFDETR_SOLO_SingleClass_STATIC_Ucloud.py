@@ -558,11 +558,11 @@ DEFAULT_ROOT = env_path(
 
 DATASET_LEUCO = Path(os.getenv(
     "DATASET_LEUCO",
-    str(DEFAULT_ROOT / "QA-2025v1_Leucocyte_OVR")
+    str(DEFAULT_ROOT / "QA-2025v2_Leucocyte_OVR")
 ))
 DATASET_EPI = Path(os.getenv(
     "DATASET_EPI",
-    str(DEFAULT_ROOT / "QA-2025v1_SquamousEpithelialCell_OVR")
+    str(DEFAULT_ROOT / "QA-2025v2_SquamousEpithelialCell_OVR")
 ))
 
 def _autofind_dataset(root: Path, token: str) -> Path:
