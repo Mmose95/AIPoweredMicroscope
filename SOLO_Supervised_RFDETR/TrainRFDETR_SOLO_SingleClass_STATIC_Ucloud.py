@@ -886,88 +886,9 @@ def find_best_val(output_dir: Path) -> dict:
     return {"best_epoch": None, "map50": None, "map5095": None, "source": "not_found"}
 
 # ───────────────────────────────────────────────────────────────────────────────
-# HPO spaces (compact)
+# Matrix Search Space (generated from env flags)
 # ───────────────────────────────────────────────────────────────────────────────
 SEARCH_RESOLUTION = PATCH_SIZE if USE_PATCH_224 else FULL_RESOLUTION
-
-SEARCH_LEUCO = {
-    # Model & input
-    "MODEL_CLS":       ["RFDETRLarge"],
-    "RESOLUTION":      [SEARCH_RESOLUTION],  # mode-fixed (224 patch or full resolution)
-    "EPOCHS":          [80],
-
-    # Optimizer / schedule
-    "LR":              [5e-5, 8e-5],
-    "LR_ENCODER_MULT": [1.0],
-    "BATCH":           [4],
-    "WARMUP_STEPS":    [0, 4000],
-
-    # Detector capacity
-    "NUM_QUERIES":     [384, 512],
-
-    # Aug / regularization (we’re using RFDETR defaults; these are just logged)
-    "AUG_COPIES":      [0],
-    "SCALE_RANGE":     [(0.9, 1.1)],
-    "ROT_DEG":         [5.0],
-    "COLOR_JITTER":    [0.20],
-    "GAUSS_BLUR":      [0.10],
-}
-'''
-SEARCH_EPI = {
-    "MODEL_CLS":       ["RFDETRLarge"],
-    "RESOLUTION":      [672],      # ignored in patch mode (forced to 224)
-    "EPOCHS":          [80],
-
-    "LR":              [5e-5],
-    "LR_ENCODER_MULT": [1.0],
-    "BATCH":           [8],
-    "WARMUP_STEPS":    [0],
-
-    "NUM_QUERIES":     [250],
-
-    "AUG_COPIES":      [0],
-    "SCALE_RANGE":     [(0.9, 1.1)],
-    "ROT_DEG":         [5.0],
-    "COLOR_JITTER":    [0.20],
-    "GAUSS_BLUR":      [0.20],
-
-    # Example: fixed best SSL backbone; uncomment when you want SSL
-    # "ENCODER_CKPT":    [BEST_SSL_CKPT],
-
-    # Data-cost curve
-    "TRAIN_FRACTION":  [0.25, 0.50, 0.75, 1.00],
-}'''
-
-# Best supervised RFDETR HPO space for 224×224 patches (EPI)
-#224
-SEARCH_EPI = {
-    # Model & input
-    "MODEL_CLS":       ["RFDETRLarge"],   # keep Large, patches are smaller so this is fine
-    "RESOLUTION":      [SEARCH_RESOLUTION],  # mode-fixed (224 patch or full resolution)
-    "EPOCHS":          [3],              # let early stopping decide
-
-    # Optimizer / schedule
-    "LR":              [5e-5],  # a bit wider around your previous good LR
-    "LR_ENCODER_MULT": [1.0],              # still ignored for now
-    "BATCH":           [16 if USE_PATCH_224 else 4],            # 16 should be feasible with 224×224, OOM-backoff will save us
-    "WARMUP_STEPS":    [0],          # no warmup vs modest warmup
-
-    # Detector capacity — per 224×224 patch there are few cells
-    "NUM_QUERIES":     [200 if USE_PATCH_224 else 120],         # plenty for “few objects per patch”
-
-    # Augmentation / regularization
-    "AUG_COPIES":      [0],                # still no offline aug (RFDETR has its own online aug)
-    "SCALE_RANGE":     [(0.9, 1.1)],
-    "ROT_DEG":         [5.0],
-    "COLOR_JITTER":    [0.20],
-    "GAUSS_BLUR":      [0.20],
-
-    # Supervised baseline only → NO SSL backbone here
-    "ENCODER_CKPT":  [BEST_SSL_CKPT],               # intentionally omitted
-
-    # For this HPO: always use full train split
-    "TRAIN_FRACTION":  [0.03],
-}
 
 def _csv_tokens(raw: str) -> list[str]:
     return [x.strip() for x in str(raw).split(",") if x.strip()]
@@ -1068,20 +989,16 @@ def _build_matrix_space_for_target(target_key: str) -> dict:
 
 # One-click matrix mode (both classes, with/without SSL, chosen fractions) with env flags.
 EXPERIMENT_MODE = os.getenv("RFDETR_EXPERIMENT_MODE", "matrix").strip().lower()
-if EXPERIMENT_MODE not in ("matrix", "legacy"):
-    raise ValueError("RFDETR_EXPERIMENT_MODE must be 'matrix' or 'legacy'")
+if EXPERIMENT_MODE != "matrix":
+    raise ValueError("RFDETR_EXPERIMENT_MODE currently supports only 'matrix'.")
 
-if EXPERIMENT_MODE == "matrix":
-    SEARCH_LEUCO = _build_matrix_space_for_target("leu")
-    SEARCH_EPI = _build_matrix_space_for_target("epi")
-
-    _main_print(
-        f"[EXPERIMENT] mode=matrix ssl_modes={os.getenv('RFDETR_SSL_MODES', 'none,ssl')} "
-        f"fractions={os.getenv('RFDETR_TRAIN_FRACTIONS', '0.03,0.125,0.25,0.5,0.75,1.0')} "
-        f"seeds={os.getenv('RFDETR_SEEDS', str(SEED))}"
-    )
-else:
-    _main_print("[EXPERIMENT] mode=legacy (using hardcoded SEARCH_LEUCO/SEARCH_EPI).")
+SEARCH_LEUCO = _build_matrix_space_for_target("leu")
+SEARCH_EPI = _build_matrix_space_for_target("epi")
+_main_print(
+    f"[EXPERIMENT] mode=matrix ssl_modes={os.getenv('RFDETR_SSL_MODES', 'none,ssl')} "
+    f"fractions={os.getenv('RFDETR_TRAIN_FRACTIONS', '0.03,0.125,0.25,0.5,0.75,1.0')} "
+    f"seeds={os.getenv('RFDETR_SEEDS', str(SEED))}"
+)
 
 
 def grid(space: dict):
@@ -1482,13 +1399,12 @@ def main():
     print("[DATASETS]")
     print("  Leucocyte:", DATASET_LEUCO)
     print("  Epithelial:", DATASET_EPI)
-    if EXPERIMENT_MODE == "matrix":
-        print("[MATRIX FLAGS]")
-        print("  RFDETR_SSL_MODES:", os.getenv("RFDETR_SSL_MODES", "none,ssl"))
-        print("  RFDETR_TRAIN_FRACTIONS:", os.getenv("RFDETR_TRAIN_FRACTIONS", "0.03,0.125,0.25,0.5,0.75,1.0"))
-        print("  RFDETR_SEEDS:", os.getenv("RFDETR_SEEDS", str(SEED)))
-        print("  RFDETR_EPI_SSL_CKPT:", os.getenv("RFDETR_EPI_SSL_CKPT", os.getenv("RFDETR_SSL_CKPT_DEFAULT", BEST_SSL_CKPT)))
-        print("  RFDETR_LEU_SSL_CKPT:", os.getenv("RFDETR_LEU_SSL_CKPT", os.getenv("RFDETR_SSL_CKPT_DEFAULT", BEST_SSL_CKPT)))
+    print("[MATRIX FLAGS]")
+    print("  RFDETR_SSL_MODES:", os.getenv("RFDETR_SSL_MODES", "none,ssl"))
+    print("  RFDETR_TRAIN_FRACTIONS:", os.getenv("RFDETR_TRAIN_FRACTIONS", "0.03,0.125,0.25,0.5,0.75,1.0"))
+    print("  RFDETR_SEEDS:", os.getenv("RFDETR_SEEDS", str(SEED)))
+    print("  RFDETR_EPI_SSL_CKPT:", os.getenv("RFDETR_EPI_SSL_CKPT", os.getenv("RFDETR_SSL_CKPT_DEFAULT", BEST_SSL_CKPT)))
+    print("  RFDETR_LEU_SSL_CKPT:", os.getenv("RFDETR_LEU_SSL_CKPT", os.getenv("RFDETR_SSL_CKPT_DEFAULT", BEST_SSL_CKPT)))
     for p in (DATASET_LEUCO, DATASET_EPI):
         for part in ("train", "valid"):
             if not (p / part / "_annotations.coco.json").exists():
@@ -1513,14 +1429,13 @@ def main():
         "full_resolution": None if USE_PATCH_224 else FULL_RESOLUTION,
     }
 
-    if EXPERIMENT_MODE == "matrix":
-        final["matrix_flags"] = {
-            "ssl_modes": os.getenv("RFDETR_SSL_MODES", "none,ssl"),
-            "train_fractions": os.getenv("RFDETR_TRAIN_FRACTIONS", "0.03,0.125,0.25,0.5,0.75,1.0"),
-            "seeds": os.getenv("RFDETR_SEEDS", str(SEED)),
-            "model_cls": os.getenv("RFDETR_MODEL_CLS", "RFDETRLarge"),
-            "epochs": int(os.getenv("RFDETR_EPOCHS", "80")),
-        }
+    final["matrix_flags"] = {
+        "ssl_modes": os.getenv("RFDETR_SSL_MODES", "none,ssl"),
+        "train_fractions": os.getenv("RFDETR_TRAIN_FRACTIONS", "0.03,0.125,0.25,0.5,0.75,1.0"),
+        "seeds": os.getenv("RFDETR_SEEDS", str(SEED)),
+        "model_cls": os.getenv("RFDETR_MODEL_CLS", "RFDETRLarge"),
+        "epochs": int(os.getenv("RFDETR_EPOCHS", "80")),
+    }
 
     if "Leucocyte" in res_all:
         final["leucocyte"] = {
