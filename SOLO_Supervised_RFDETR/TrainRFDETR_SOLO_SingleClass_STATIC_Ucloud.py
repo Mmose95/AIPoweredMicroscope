@@ -16,7 +16,7 @@ import numpy as np
 #  - "leu"  -> only Leucocyte
 #  - "epi"  -> only Squamous Epithelial Cell
 #  - "all"  -> both
-HPO_TARGET = os.environ.get("RFDETR_HPO_TARGET", "epi").lower()
+HPO_TARGET = os.environ.get("RFDETR_HPO_TARGET", "all").lower()
 BACKBONE_BLOCK_SIZE = 56
 
 def _is_main_process() -> bool:
@@ -969,6 +969,120 @@ SEARCH_EPI = {
     "TRAIN_FRACTION":  [0.03],
 }
 
+def _csv_tokens(raw: str) -> list[str]:
+    return [x.strip() for x in str(raw).split(",") if x.strip()]
+
+def _csv_float_env(name: str, default_csv: str) -> list[float]:
+    vals = [float(x) for x in _csv_tokens(os.getenv(name, default_csv))]
+    if not vals:
+        raise ValueError(f"{name} produced an empty float list.")
+    return vals
+
+def _csv_int_env(name: str, default_csv: str) -> list[int]:
+    vals = [int(x) for x in _csv_tokens(os.getenv(name, default_csv))]
+    if not vals:
+        raise ValueError(f"{name} produced an empty int list.")
+    return vals
+
+def _unique_keep_order(seq):
+    out, seen = [], set()
+    for x in seq:
+        if x not in seen:
+            out.append(x)
+            seen.add(x)
+    return out
+
+def _parse_ssl_modes(raw: str) -> list[str]:
+    norm = []
+    for t in _csv_tokens(raw):
+        x = t.lower()
+        if x in ("none", "supervised", "baseline", "no_ssl"):
+            norm.append("none")
+        elif x in ("ssl", "pretrained", "with_ssl"):
+            norm.append("ssl")
+        else:
+            raise ValueError(
+                f"Unsupported SSL mode {t!r}. Use any of: none, ssl."
+            )
+    norm = _unique_keep_order(norm)
+    if not norm:
+        raise ValueError("RFDETR_SSL_MODES must not be empty.")
+    return norm
+
+def _build_matrix_space_for_target(target_key: str) -> dict:
+    """
+    Build one-click matrix search space for a target class.
+    target_key: 'epi' or 'leu'
+    """
+    if target_key not in ("epi", "leu"):
+        raise ValueError(f"Unsupported target_key={target_key!r}")
+
+    pfx = "RFDETR_EPI" if target_key == "epi" else "RFDETR_LEU"
+    default_batch = 16 if USE_PATCH_224 else 4
+    default_queries = 200 if USE_PATCH_224 else 120
+    default_lr = 5e-5 if target_key == "epi" else 8e-5
+    default_ssl_ckpt = BEST_SSL_CKPT
+
+    ssl_ckpt = os.getenv(
+        f"{pfx}_SSL_CKPT",
+        os.getenv("RFDETR_SSL_CKPT_DEFAULT", default_ssl_ckpt),
+    ).strip()
+    ssl_modes = _parse_ssl_modes(os.getenv("RFDETR_SSL_MODES", "none,ssl"))
+
+    encoder_ckpts = []
+    if "none" in ssl_modes:
+        encoder_ckpts.append(None)
+    if "ssl" in ssl_modes:
+        if not ssl_ckpt:
+            raise ValueError(
+                f"SSL mode is enabled but no checkpoint path provided for {target_key}. "
+                f"Set {pfx}_SSL_CKPT or RFDETR_SSL_CKPT_DEFAULT."
+            )
+        encoder_ckpts.append(ssl_ckpt)
+
+    # Shared matrix dimensions
+    train_fracs = _csv_float_env("RFDETR_TRAIN_FRACTIONS", "0.03,0.125,0.25,0.5,0.75,1.0")
+    run_seeds = _csv_int_env("RFDETR_SEEDS", str(SEED))
+
+    return {
+        "MODEL_CLS":       [os.getenv("RFDETR_MODEL_CLS", "RFDETRLarge")],
+        "RESOLUTION":      [SEARCH_RESOLUTION],
+        "EPOCHS":          [int(os.getenv("RFDETR_EPOCHS", "80"))],
+        "LR":              [float(os.getenv(f"{pfx}_LR", str(default_lr)))],
+        "LR_ENCODER_MULT": [float(os.getenv("RFDETR_LR_ENCODER_MULT", "1.0"))],
+        "BATCH":           [int(os.getenv(f"{pfx}_BATCH", str(default_batch)))],
+        "WARMUP_STEPS":    [int(os.getenv(f"{pfx}_WARMUP_STEPS", "0"))],
+        "NUM_QUERIES":     [int(os.getenv(f"{pfx}_NUM_QUERIES", str(default_queries)))],
+        "AUG_COPIES":      [int(os.getenv("RFDETR_AUG_COPIES", "0"))],
+        "SCALE_RANGE":     [(
+            float(os.getenv("RFDETR_SCALE_MIN", "0.9")),
+            float(os.getenv("RFDETR_SCALE_MAX", "1.1")),
+        )],
+        "ROT_DEG":         [float(os.getenv("RFDETR_ROT_DEG", "5.0"))],
+        "COLOR_JITTER":    [float(os.getenv("RFDETR_COLOR_JITTER", "0.20"))],
+        "GAUSS_BLUR":      [float(os.getenv("RFDETR_GAUSS_BLUR", "0.20"))],
+        "ENCODER_CKPT":    encoder_ckpts,
+        "TRAIN_FRACTION":  train_fracs,
+        "SEED":            run_seeds,
+    }
+
+# One-click matrix mode (both classes, with/without SSL, chosen fractions) with env flags.
+EXPERIMENT_MODE = os.getenv("RFDETR_EXPERIMENT_MODE", "matrix").strip().lower()
+if EXPERIMENT_MODE not in ("matrix", "legacy"):
+    raise ValueError("RFDETR_EXPERIMENT_MODE must be 'matrix' or 'legacy'")
+
+if EXPERIMENT_MODE == "matrix":
+    SEARCH_LEUCO = _build_matrix_space_for_target("leu")
+    SEARCH_EPI = _build_matrix_space_for_target("epi")
+
+    _main_print(
+        f"[EXPERIMENT] mode=matrix ssl_modes={os.getenv('RFDETR_SSL_MODES', 'none,ssl')} "
+        f"fractions={os.getenv('RFDETR_TRAIN_FRACTIONS', '0.03,0.125,0.25,0.5,0.75,1.0')} "
+        f"seeds={os.getenv('RFDETR_SEEDS', str(SEED))}"
+    )
+else:
+    _main_print("[EXPERIMENT] mode=legacy (using hardcoded SEARCH_LEUCO/SEARCH_EPI).")
+
 
 def grid(space: dict):
     keys = list(space.keys())
@@ -1076,6 +1190,7 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
 
         backbone_ckpt = cfg.get("ENCODER_CKPT")
         train_fraction = float(cfg.get("TRAIN_FRACTION", 1.0))
+        run_seed = int(cfg.get("SEED", SEED))
 
         t0 = time.time()
         try_cfg = dict(cfg)
@@ -1108,7 +1223,7 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
                     aug_copies=try_cfg["AUG_COPIES"],
                     backbone_ckpt=backbone_ckpt,
                     train_fraction=train_fraction,
-                    seed=SEED,
+                    seed=run_seed,
                     num_workers=workers_now,
                     pin_memory=pin_now,
                     persistent_workers=persist_now,
@@ -1170,6 +1285,9 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
             "run_idx": run_idx,
             "target": target_name,
             **{k: (v if not hasattr(v, "__name__") else v.__name__) for k, v in try_cfg.items()},
+            "seed": run_seed,
+            "uses_ssl_encoder": bool(backbone_ckpt),
+            "encoder_ckpt": backbone_ckpt,
             "val_AP50": best.get("map50"),
             "val_mAP5095": best.get("map5095"),
             "best_epoch": best.get("best_epoch"),
@@ -1360,9 +1478,17 @@ def main():
     global HPO_SESSION_ID, SESSION_ROOT
 
     print("[WORK_ROOT]", WORK_ROOT)
+    print("[EXPERIMENT MODE]", EXPERIMENT_MODE)
     print("[DATASETS]")
     print("  Leucocyte:", DATASET_LEUCO)
     print("  Epithelial:", DATASET_EPI)
+    if EXPERIMENT_MODE == "matrix":
+        print("[MATRIX FLAGS]")
+        print("  RFDETR_SSL_MODES:", os.getenv("RFDETR_SSL_MODES", "none,ssl"))
+        print("  RFDETR_TRAIN_FRACTIONS:", os.getenv("RFDETR_TRAIN_FRACTIONS", "0.03,0.125,0.25,0.5,0.75,1.0"))
+        print("  RFDETR_SEEDS:", os.getenv("RFDETR_SEEDS", str(SEED)))
+        print("  RFDETR_EPI_SSL_CKPT:", os.getenv("RFDETR_EPI_SSL_CKPT", os.getenv("RFDETR_SSL_CKPT_DEFAULT", BEST_SSL_CKPT)))
+        print("  RFDETR_LEU_SSL_CKPT:", os.getenv("RFDETR_LEU_SSL_CKPT", os.getenv("RFDETR_SSL_CKPT_DEFAULT", BEST_SSL_CKPT)))
     for p in (DATASET_LEUCO, DATASET_EPI):
         for part in ("train", "valid"):
             if not (p / part / "_annotations.coco.json").exists():
@@ -1380,11 +1506,21 @@ def main():
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "session_id": HPO_SESSION_ID,
         "work_root": str(WORK_ROOT),
+        "experiment_mode": EXPERIMENT_MODE,
         "input_mode": INPUT_MODE,
         "use_patch_224": USE_PATCH_224,
         "patch_size": PATCH_SIZE if USE_PATCH_224 else None,
         "full_resolution": None if USE_PATCH_224 else FULL_RESOLUTION,
     }
+
+    if EXPERIMENT_MODE == "matrix":
+        final["matrix_flags"] = {
+            "ssl_modes": os.getenv("RFDETR_SSL_MODES", "none,ssl"),
+            "train_fractions": os.getenv("RFDETR_TRAIN_FRACTIONS", "0.03,0.125,0.25,0.5,0.75,1.0"),
+            "seeds": os.getenv("RFDETR_SEEDS", str(SEED)),
+            "model_cls": os.getenv("RFDETR_MODEL_CLS", "RFDETRLarge"),
+            "epochs": int(os.getenv("RFDETR_EPOCHS", "80")),
+        }
 
     if "Leucocyte" in res_all:
         final["leucocyte"] = {
