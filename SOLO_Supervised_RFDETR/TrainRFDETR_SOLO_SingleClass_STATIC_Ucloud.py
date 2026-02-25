@@ -113,7 +113,9 @@ SSL_CKPT_ROOT = env_path(
     "SSL_CKPT_ROOT",
     WORK_ROOT / "SSL_Checkpoints",
 )
-BEST_SSL_CKPT = str(SSL_CKPT_ROOT / "epoch_epoch=029.ckpt")  # <- adjust to winner if needed
+# Explicit per-class defaults for SSL backbone selection.
+BEST_SSL_CKPT_EPI = str(SSL_CKPT_ROOT / "epoch_epoch=029.ckpt")  # set your epithelial winner
+BEST_SSL_CKPT_LEU = str(SSL_CKPT_ROOT / "epoch_epoch=029.ckpt")  # set your leucocyte winner
 
 # ───────────────────────────────────────────────
 # Path resolution helpers for COCO
@@ -895,7 +897,6 @@ MATRIX_QUICK_DEFAULTS = {
     "RFDETR_MODEL_CLS": "RFDETRLarge",
     "RFDETR_EPOCHS": "80",
     "RFDETR_SSL_MODES": "none,ssl",  # options: none, ssl
-    "RFDETR_SSL_CKPT_DEFAULT": BEST_SSL_CKPT,
     "RFDETR_TRAIN_FRACTIONS": "0.03,0.125,0.25,0.5,0.75,1.0",
     "RFDETR_SEEDS": str(SEED),
     # Shared hyperparameters
@@ -911,19 +912,18 @@ MATRIX_QUICK_DEFAULTS = {
     "RFDETR_LEU_LR": "8e-5",
     "RFDETR_EPI_WARMUP_STEPS": "0",
     "RFDETR_LEU_WARMUP_STEPS": "0",
+    "RFDETR_EPI_SSL_CKPT": BEST_SSL_CKPT_EPI,
+    "RFDETR_LEU_SSL_CKPT": BEST_SSL_CKPT_LEU,
 }
 
 def _matrix_dynamic_defaults() -> dict:
     default_batch = 16 if USE_PATCH_224 else 4
     default_queries = 200 if USE_PATCH_224 else 120
-    ckpt_default = MATRIX_QUICK_DEFAULTS["RFDETR_SSL_CKPT_DEFAULT"]
     return {
         "RFDETR_EPI_BATCH": str(default_batch),
         "RFDETR_LEU_BATCH": str(default_batch),
         "RFDETR_EPI_NUM_QUERIES": str(default_queries),
         "RFDETR_LEU_NUM_QUERIES": str(default_queries),
-        "RFDETR_EPI_SSL_CKPT": ckpt_default,
-        "RFDETR_LEU_SSL_CKPT": ckpt_default,
     }
 
 def _cfg_text(name: str) -> str:
