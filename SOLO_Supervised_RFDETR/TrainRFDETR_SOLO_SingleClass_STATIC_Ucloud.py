@@ -708,6 +708,7 @@ def train_one_run(target_name: str,
                   lr: float,
                   lr_encoder_mult: float,
                   batch_size: int,
+                  grad_accum_steps: int,
                   num_queries: int,
                   warmup_steps: int,
                   scale_range: tuple[float, float],
@@ -752,6 +753,29 @@ def train_one_run(target_name: str,
                 )
             backbone_ckpt = str(resolved_backbone)
 
+    # Estimate effective optimization steps per epoch for sanity on small datasets.
+    train_json = data_dir / "train" / "_annotations.coco.json"
+    train_images_count = None
+    if train_json.exists():
+        try:
+            _js = json.loads(train_json.read_text(encoding="utf-8"))
+            train_images_count = int(len(_js.get("images", [])))
+        except Exception:
+            train_images_count = None
+    if train_images_count is not None and batch_size > 0 and grad_accum_steps > 0:
+        raw_batches = (train_images_count + batch_size - 1) // batch_size
+        opt_steps = (raw_batches + grad_accum_steps - 1) // grad_accum_steps
+        print(
+            f"[TRAIN PLAN] train_images={train_images_count} batch={batch_size} "
+            f"grad_accum={grad_accum_steps} raw_batches={raw_batches} "
+            f"optimizer_steps_per_epoch~{opt_steps}"
+        )
+        if opt_steps < 4:
+            print(
+                f"[TRAIN PLAN][WARN] Very few optimizer steps per epoch (~{opt_steps}). "
+                "Consider lowering RFDETR_GRAD_ACCUM_STEPS and/or batch size."
+            )
+
     # Force resolution from selected input mode for consistent runs.
     if USE_PATCH_224:
         resolution = PATCH_SIZE
@@ -777,7 +801,7 @@ def train_one_run(target_name: str,
 
         resolution=resolution,
         batch_size=batch_size,
-        grad_accum_steps=8,
+        grad_accum_steps=grad_accum_steps,
         epochs=epochs,
         lr=lr,
         weight_decay=weight_decay,
@@ -911,6 +935,7 @@ MATRIX_QUICK_DEFAULTS = {
     "RFDETR_SEEDS": str(SEED),
     # Shared hyperparameters
     "RFDETR_LR_ENCODER_MULT": "1.0",
+    "RFDETR_GRAD_ACCUM_STEPS": "1",
     "RFDETR_WEIGHT_DECAY": "7e-4",
     "RFDETR_DROPOUT": "0.15",
     "RFDETR_AUG_COPIES": "0",
@@ -1002,6 +1027,7 @@ def _build_matrix_runtime_config() -> dict:
         "train_fractions": _csv_float(_cfg_text("RFDETR_TRAIN_FRACTIONS")),
         "seeds": _csv_int(_cfg_text("RFDETR_SEEDS")),
         "lr_encoder_mult": float(_cfg_text("RFDETR_LR_ENCODER_MULT")),
+        "grad_accum_steps": int(_cfg_text("RFDETR_GRAD_ACCUM_STEPS")),
         "weight_decay": float(_cfg_text("RFDETR_WEIGHT_DECAY")),
         "dropout": float(_cfg_text("RFDETR_DROPOUT")),
         "aug_copies": int(_cfg_text("RFDETR_AUG_COPIES")),
@@ -1037,6 +1063,8 @@ def _build_matrix_runtime_config() -> dict:
         )
     if cfg["weight_decay"] < 0:
         raise ValueError(f"RFDETR_WEIGHT_DECAY must be >= 0, got {cfg['weight_decay']}")
+    if cfg["grad_accum_steps"] < 1:
+        raise ValueError(f"RFDETR_GRAD_ACCUM_STEPS must be >= 1, got {cfg['grad_accum_steps']}")
     if cfg["dropout"] < 0 or cfg["dropout"] >= 1:
         raise ValueError(f"RFDETR_DROPOUT must be in [0,1), got {cfg['dropout']}")
     if cfg["early_stopping_patience"] < 0:
@@ -1075,6 +1103,7 @@ def _build_matrix_space_for_target(target_key: str, matrix_cfg: dict) -> dict:
         "EPOCHS":          [tcfg["epochs"]],
         "LR":              [tcfg["lr"]],
         "LR_ENCODER_MULT": [matrix_cfg["lr_encoder_mult"]],
+        "GRAD_ACCUM_STEPS":[matrix_cfg["grad_accum_steps"]],
         "BATCH":           [tcfg["batch"]],
         "WARMUP_STEPS":    [tcfg["warmup_steps"]],
         "WEIGHT_DECAY":    [matrix_cfg["weight_decay"]],
@@ -1140,6 +1169,7 @@ def _build_training_plan_rows(jobs: list[dict]) -> list[dict]:
             "epochs": cfg.get("EPOCHS"),
             "lr": cfg.get("LR"),
             "batch": cfg.get("BATCH"),
+            "grad_accum_steps": cfg.get("GRAD_ACCUM_STEPS"),
             "num_queries": cfg.get("NUM_QUERIES"),
             "warmup_steps": cfg.get("WARMUP_STEPS"),
             "weight_decay": cfg.get("WEIGHT_DECAY"),
@@ -1172,7 +1202,7 @@ def _print_and_save_training_plan(plan_rows: list[dict], session_root: Path):
 
     concise_cols = [
         "run_idx", "target", "ssl_mode", "train_fraction", "seed", "epochs", "lr",
-        "batch", "num_queries", "weight_decay", "dropout",
+        "batch", "grad_accum_steps", "num_queries", "weight_decay", "dropout",
         "early_stopping", "early_stopping_patience", "early_stopping_min_delta",
         "early_stopping_use_ema", "ssl_ckpt_name",
     ]
@@ -1317,6 +1347,7 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
                     lr=try_cfg["LR"],
                     lr_encoder_mult=try_cfg["LR_ENCODER_MULT"],
                     batch_size=try_cfg["BATCH"],
+                    grad_accum_steps=try_cfg["GRAD_ACCUM_STEPS"],
                     num_queries=try_cfg["NUM_QUERIES"],
                     warmup_steps=try_cfg["WARMUP_STEPS"],
                     weight_decay=try_cfg["WEIGHT_DECAY"],
