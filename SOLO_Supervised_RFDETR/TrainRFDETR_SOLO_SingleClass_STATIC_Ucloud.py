@@ -114,8 +114,8 @@ SSL_CKPT_ROOT = env_path(
     WORK_ROOT / "SSL_Checkpoints",
 )
 # Explicit per-class defaults for SSL backbone selection.
-BEST_SSL_CKPT_EPI = str(SSL_CKPT_ROOT / "Epi_SSL_Models" / "epoch_epoch=029.ckpt")  # set your epithelial winner
-BEST_SSL_CKPT_LEU = str(SSL_CKPT_ROOT / "Leu_SSL_Models" / "epoch_epoch=069.ckpt")  # set your leucocyte winner
+BEST_SSL_CKPT_EPI = str(SSL_CKPT_ROOT / "epoch_epoch=029.ckpt")  # set your epithelial winner
+BEST_SSL_CKPT_LEU = str(SSL_CKPT_ROOT / "epoch_epoch=069.ckpt")  # set your leucocyte winner
 
 # ───────────────────────────────────────────────
 # Path resolution helpers for COCO
