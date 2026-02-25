@@ -1115,6 +1115,84 @@ def grid(space: dict):
     for combo in itertools.product(*vals):
         yield dict(zip(keys, combo))
 
+def _short_ckpt_name(ckpt) -> str:
+    if not ckpt:
+        return "-"
+    try:
+        return Path(str(ckpt)).name
+    except Exception:
+        return str(ckpt)
+
+def _build_training_plan_rows(jobs: list[dict]) -> list[dict]:
+    rows = []
+    for run_idx, job in enumerate(jobs, start=1):
+        cfg = job["cfg"]
+        ckpt = cfg.get("ENCODER_CKPT")
+        rows.append({
+            "run_idx": run_idx,
+            "target": job["target_name"],
+            "model": cfg.get("MODEL_CLS"),
+            "ssl_mode": ("ssl" if ckpt else "none"),
+            "ssl_ckpt": (str(ckpt) if ckpt else ""),
+            "ssl_ckpt_name": _short_ckpt_name(ckpt),
+            "train_fraction": cfg.get("TRAIN_FRACTION"),
+            "seed": cfg.get("SEED"),
+            "epochs": cfg.get("EPOCHS"),
+            "lr": cfg.get("LR"),
+            "batch": cfg.get("BATCH"),
+            "num_queries": cfg.get("NUM_QUERIES"),
+            "warmup_steps": cfg.get("WARMUP_STEPS"),
+            "weight_decay": cfg.get("WEIGHT_DECAY"),
+            "dropout": cfg.get("DROPOUT"),
+            "early_stopping": cfg.get("EARLY_STOPPING"),
+            "early_stopping_patience": cfg.get("EARLY_STOPPING_PATIENCE"),
+            "early_stopping_min_delta": cfg.get("EARLY_STOPPING_MIN_DELTA"),
+            "early_stopping_use_ema": cfg.get("EARLY_STOPPING_USE_EMA"),
+            "resolution": cfg.get("RESOLUTION"),
+            "input_mode": INPUT_MODE,
+            "dataset_dir": job["dataset_dir"],
+            "out_root": job["out_root"],
+        })
+    return rows
+
+def _print_and_save_training_plan(plan_rows: list[dict], session_root: Path):
+    print_rows = _parse_bool(os.getenv("RFDETR_PRINT_PLAN_ROWS", "1"))
+    print("[PLAN] Matrix training plan")
+    print(f"[PLAN] Total planned runs: {len(plan_rows)}")
+    if not plan_rows:
+        return
+
+    by_target = defaultdict(list)
+    for r in plan_rows:
+        by_target[r["target"]].append(r)
+    for target_name, rows in by_target.items():
+        n_ssl = sum(1 for r in rows if r["ssl_mode"] == "ssl")
+        n_none = sum(1 for r in rows if r["ssl_mode"] == "none")
+        print(f"[PLAN] {target_name}: runs={len(rows)} ssl={n_ssl} no_ssl={n_none}")
+
+    concise_cols = [
+        "run_idx", "target", "ssl_mode", "train_fraction", "seed", "epochs", "lr",
+        "batch", "num_queries", "weight_decay", "dropout",
+        "early_stopping", "early_stopping_patience", "early_stopping_min_delta",
+        "early_stopping_use_ema", "ssl_ckpt_name",
+    ]
+    if print_rows:
+        print("[PLAN] Columns: " + ", ".join(concise_cols))
+        for r in plan_rows:
+            print("[PLAN] " + " | ".join(f"{k}={r.get(k)}" for k in concise_cols))
+
+    plan_csv = session_root / "TRAINING_PLAN.csv"
+    with plan_csv.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=list(plan_rows[0].keys()))
+        w.writeheader()
+        for r in plan_rows:
+            w.writerow(r)
+
+    plan_json = session_root / "TRAINING_PLAN.json"
+    plan_json.write_text(json.dumps(plan_rows, indent=2), encoding="utf-8")
+    print(f"[PLAN] Saved: {plan_csv}")
+    print(f"[PLAN] Saved: {plan_json}")
+
 # ───────────────────────────────────────────────────────────────────────────────
 # Trial-level parallel launcher with allocator + OOM backoff
 # ───────────────────────────────────────────────────────────────────────────────
@@ -1389,7 +1467,8 @@ def run_hpo_all_classes(session_root: Path) -> dict:
                 "cfg": cfg,
             })
 
-    print(f"[HPO] Total jobs across classes={len(jobs)}")
+    plan_rows = _build_training_plan_rows(jobs)
+    _print_and_save_training_plan(plan_rows, session_root)
 
     ctx = mp.get_context("spawn")
     result_q: mp.Queue = ctx.Queue()
