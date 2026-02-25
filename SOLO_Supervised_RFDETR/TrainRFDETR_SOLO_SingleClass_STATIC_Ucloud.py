@@ -907,7 +907,7 @@ MATRIX_QUICK_DEFAULTS = {
     "RFDETR_EPI_EPOCHS": "50",
     "RFDETR_LEU_EPOCHS": "70",
     "RFDETR_SSL_MODES": "none,ssl",  # options: none, ssl
-    "RFDETR_TRAIN_FRACTIONS": "0.03,0.125,0.25,0.5,0.75,1.0",
+    "RFDETR_TRAIN_FRACTIONS": "1.0",
     "RFDETR_SEEDS": str(SEED),
     # Shared hyperparameters
     "RFDETR_LR_ENCODER_MULT": "1.0",
