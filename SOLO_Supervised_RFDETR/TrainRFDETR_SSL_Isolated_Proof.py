@@ -435,16 +435,55 @@ def _default_images_fallback_root() -> Path | None:
     return None
 
 
+def _default_dataset_dir() -> Path:
+    raw = os.getenv("DATASET_DIR", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    candidates = [
+        Path(
+            r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\SOLO_Supervised_RFDETR\Stat_Dataset\QA-2025v2_SquamousEpithelialCell_OVR_20260217-093944"
+        ),
+        Path(__file__).resolve().parent / "Stat_Dataset" / "QA-2025v2_SquamousEpithelialCell_OVR_20260217-093944",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c.resolve()
+    return candidates[0]
+
+
+def _default_output_dir() -> Path:
+    raw = os.getenv("OUTPUT_DIR", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return Path(
+        r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\SOLO_Supervised_RFDETR\RFDETR_SOLO_OUTPUT\ssl_isolated_epi"
+    )
+
+
+def _default_ssl_ckpt() -> Path:
+    raw = os.getenv("SSL_CKPT", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    candidates = [
+        Path(r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\dinov2_base_selfsup_trained.pt"),
+        Path(r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\Checkpoints\checkpoint.pth"),
+    ]
+    for c in candidates:
+        if c.exists():
+            return c.resolve()
+    return candidates[0]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Isolated proof script: explicitly load SSL checkpoint into RF-DETR backbone, then train."
     )
-    parser.add_argument("--dataset-dir", type=Path, required=True)
-    parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--ssl-ckpt", type=Path, required=True)
+    parser.add_argument("--dataset-dir", type=Path, default=_default_dataset_dir())
+    parser.add_argument("--output-dir", type=Path, default=_default_output_dir())
+    parser.add_argument("--ssl-ckpt", type=Path, default=_default_ssl_ckpt())
     parser.add_argument("--images-fallback-root", type=Path, default=_default_images_fallback_root())
     parser.add_argument("--skip-resolve-dataset", action="store_true")
-    parser.add_argument("--class-name", type=str, default="target")
+    parser.add_argument("--class-name", type=str, default="Squamous Epithelial Cell")
     parser.add_argument("--model", type=str, default="large", choices=("small", "medium", "large"))
     parser.add_argument("--resolution", type=int, default=224)
     parser.add_argument("--epochs", type=int, default=1)
@@ -460,6 +499,11 @@ def main() -> None:
     parser.add_argument("--non-strict-train-start", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    args.dataset_dir = args.dataset_dir.expanduser()
+    args.output_dir = args.output_dir.expanduser()
+    args.ssl_ckpt = args.ssl_ckpt.expanduser()
+    if args.images_fallback_root is not None:
+        args.images_fallback_root = args.images_fallback_root.expanduser()
 
     if not args.ssl_ckpt.exists():
         raise FileNotFoundError(f"SSL checkpoint not found: {args.ssl_ckpt}")
