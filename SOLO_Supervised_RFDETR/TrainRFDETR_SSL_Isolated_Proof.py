@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+from collections import defaultdict
 from pathlib import Path
 
 import torch
@@ -22,6 +24,8 @@ KNOWN_STRIP_PREFIXES = (
     "encoder.",
 )
 BLOCK_RE = re.compile(r"^blocks\.(\d+)\.(\d+)\.(.+)$")
+BLOCK_RE_SINGLE = re.compile(r"^blocks\.(\d+)\.(.+)$")
+VALID_EXTS = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp"}
 
 
 def _strip_known_prefixes(key: str) -> str:
@@ -67,6 +71,18 @@ def _try_add(
     mapped[dst_key] = value
     stats[bucket] += 1
     return True
+
+
+def _parse_block_key(norm_key: str) -> tuple[int, str] | None:
+    m = BLOCK_RE.match(norm_key)
+    if m:
+        _, layer_idx, suffix = m.groups()
+        return int(layer_idx), suffix
+    m = BLOCK_RE_SINGLE.match(norm_key)
+    if m:
+        layer_idx, suffix = m.groups()
+        return int(layer_idx), suffix
+    return None
 
 
 def _map_ssl_to_rfdetr_backbone(
@@ -140,13 +156,13 @@ def _map_ssl_to_rfdetr_backbone(
             if _try_add(mapped, target_sd, simple_global_map[norm_key], value, stats, "converted_matches"):
                 continue
 
-        m = BLOCK_RE.match(norm_key)
-        if not m:
+        parsed = _parse_block_key(norm_key)
+        if parsed is None:
             stats["unmapped"] += 1
             continue
 
-        _, layer_idx, suffix = m.groups()
-        layer_prefix = f"{TARGET_BLOCK_PREFIX}{int(layer_idx)}."
+        layer_idx, suffix = parsed
+        layer_prefix = f"{TARGET_BLOCK_PREFIX}{layer_idx}."
 
         if suffix == "attn.qkv.weight":
             q, k, v = value.chunk(3, dim=0)
@@ -180,7 +196,7 @@ def _map_ssl_to_rfdetr_backbone(
 
 def load_ssl_backbone_into_rfdetr(
     rf_model, ssl_ckpt: Path, min_loaded_keys: int
-) -> dict:
+) -> tuple[dict, dict[str, torch.Tensor]]:
     raw = torch.load(str(ssl_ckpt), map_location="cpu", weights_only=False)
     ssl_sd = _extract_state_dict(raw)
     target_model = rf_model.model.model
@@ -210,7 +226,212 @@ def load_ssl_backbone_into_rfdetr(
         "missing_keys_sample": load_info.missing_keys[:25],
         "unexpected_keys_sample": load_info.unexpected_keys[:25],
     }
-    return report
+    return report, mapped_sd
+
+
+def _pick_monitor_key(mapped_sd: dict[str, torch.Tensor]) -> str:
+    preferred_suffixes = (
+        "embeddings.patch_embeddings.projection.weight",
+        "embeddings.cls_token",
+        "encoder.layer.0.attention.attention.query.weight",
+    )
+    keys = list(mapped_sd.keys())
+    for suffix in preferred_suffixes:
+        for k in keys:
+            if k.endswith(suffix):
+                return k
+    return keys[0]
+
+
+def _state_tensor_for_key(model_sd: dict[str, torch.Tensor], key: str) -> torch.Tensor:
+    if key in model_sd:
+        return model_sd[key]
+    module_key = f"module.{key}"
+    if module_key in model_sd:
+        return model_sd[module_key]
+    raise KeyError(f"Could not find monitor key in state_dict: {key}")
+
+
+def _install_train_start_probe(rf_model, monitor_key: str, expected_tensor: torch.Tensor, strict: bool = True) -> dict:
+    probe = {
+        "monitor_key": monitor_key,
+        "first_batch_seen": False,
+        "first_batch_step": None,
+        "first_batch_max_abs_diff": None,
+        "train_end_seen": False,
+        "post_train_max_abs_diff": None,
+    }
+
+    expected = expected_tensor.detach().cpu()
+
+    def _on_train_batch_start(ctx: dict):
+        if probe["first_batch_seen"]:
+            return
+        state = ctx["model"].state_dict()
+        cur = _state_tensor_for_key(state, monitor_key).detach().cpu()
+        max_abs = float((cur - expected).abs().max().item())
+        probe["first_batch_seen"] = True
+        probe["first_batch_step"] = int(ctx.get("step", -1))
+        probe["first_batch_max_abs_diff"] = max_abs
+        print(
+            f"[SSL-PROBE] first_batch step={probe['first_batch_step']} "
+            f"monitor_key={monitor_key} max_abs_diff={max_abs:.3e}"
+        )
+        if strict and max_abs > 1e-6:
+            raise RuntimeError(
+                f"Training did not start from loaded SSL weights for {monitor_key}. "
+                f"max_abs_diff={max_abs:.6e}"
+            )
+
+    def _on_train_end():
+        final_sd = rf_model.model.model.state_dict()
+        final = _state_tensor_for_key(final_sd, monitor_key).detach().cpu()
+        max_abs = float((final - expected).abs().max().item())
+        probe["train_end_seen"] = True
+        probe["post_train_max_abs_diff"] = max_abs
+        print(f"[SSL-PROBE] train_end monitor_key={monitor_key} max_abs_diff_from_loaded={max_abs:.3e}")
+
+    rf_model.callbacks["on_train_batch_start"].append(_on_train_batch_start)
+    rf_model.callbacks["on_train_end"].append(_on_train_end)
+    return probe
+
+
+def _norm_rel(s: str) -> str:
+    return str(s).replace("\\", "/").lstrip("./")
+
+
+def _build_image_index(root: Path) -> tuple[dict[str, Path], dict[str, list[Path]]]:
+    by_rel: dict[str, Path] = {}
+    by_name: dict[str, list[Path]] = defaultdict(list)
+    root = root.resolve()
+    for p in root.rglob("*"):
+        if p.is_file() and p.suffix.lower() in VALID_EXTS:
+            rel = p.resolve().relative_to(root).as_posix()
+            by_rel[rel] = p.resolve()
+            by_name[p.name].append(p.resolve())
+    return by_rel, by_name
+
+
+def _resolve_image_path(
+    file_name: str,
+    dataset_dir: Path,
+    split: str,
+    fallback_root: Path | None,
+    index_rel: dict[str, Path] | None,
+    index_name: dict[str, list[Path]] | None,
+) -> Path | None:
+    fn = str(file_name).strip()
+    p = Path(fn)
+    candidates = []
+    if p.is_absolute():
+        candidates.append(p)
+    split_dir = dataset_dir / split
+    candidates.extend(
+        [
+            split_dir / fn,
+            split_dir / "images" / fn,
+            dataset_dir / fn,
+            dataset_dir / "images" / fn,
+        ]
+    )
+    if fallback_root is not None:
+        candidates.extend(
+            [
+                fallback_root / fn,
+                fallback_root / "images" / fn,
+            ]
+        )
+    for c in candidates:
+        if c.exists():
+            return c.resolve()
+    if index_rel is not None:
+        rel = _norm_rel(fn)
+        if rel in index_rel:
+            return index_rel[rel]
+    if index_name is not None:
+        base = Path(fn).name
+        matches = index_name.get(base, [])
+        if len(matches) == 1:
+            return matches[0]
+    return None
+
+
+def build_resolved_dataset(
+    dataset_dir: Path,
+    out_dir: Path,
+    images_fallback_root: Path | None,
+) -> tuple[Path, dict]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    report = {
+        "dataset_in": str(dataset_dir),
+        "dataset_out": str(out_dir),
+        "images_fallback_root": str(images_fallback_root) if images_fallback_root else None,
+        "splits": {},
+    }
+
+    index_rel = None
+    index_name = None
+    if images_fallback_root is not None and images_fallback_root.exists():
+        index_rel, index_name = _build_image_index(images_fallback_root)
+
+    for split in ("train", "valid", "test"):
+        src_json = dataset_dir / split / "_annotations.coco.json"
+        if not src_json.exists():
+            continue
+        js = json.loads(src_json.read_text(encoding="utf-8"))
+        out_split = out_dir / split
+        out_split.mkdir(parents=True, exist_ok=True)
+
+        misses = []
+        updated = 0
+        for im in js.get("images", []):
+            resolved = _resolve_image_path(
+                file_name=str(im.get("file_name", "")),
+                dataset_dir=dataset_dir,
+                split=split,
+                fallback_root=images_fallback_root,
+                index_rel=index_rel,
+                index_name=index_name,
+            )
+            if resolved is None:
+                misses.append(str(im.get("file_name", "")))
+                continue
+            im["file_name"] = str(resolved)
+            updated += 1
+
+        if misses:
+            preview = "\n".join(misses[:8])
+            raise FileNotFoundError(
+                f"Could not resolve {len(misses)} image paths in split '{split}'. "
+                f"Examples:\n{preview}\n"
+                f"Try setting --images-fallback-root to the actual image root."
+            )
+
+        (out_split / "_annotations.coco.json").write_text(
+            json.dumps(js, indent=2),
+            encoding="utf-8",
+        )
+        report["splits"][split] = {
+            "images": int(len(js.get("images", []))),
+            "annotations": int(len(js.get("annotations", []))),
+            "resolved_images": int(updated),
+        }
+
+    return out_dir, report
+
+
+def _default_images_fallback_root() -> Path | None:
+    raw = os.getenv("IMAGES_FALLBACK_ROOT", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    candidates = [
+        Path.cwd() / "CellScanData" / "Zoom10x - Quality Assessment_Cleaned",
+        Path(__file__).resolve().parents[1] / "CellScanData" / "Zoom10x - Quality Assessment_Cleaned",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c.resolve()
+    return None
 
 
 def main() -> None:
@@ -220,6 +441,8 @@ def main() -> None:
     parser.add_argument("--dataset-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--ssl-ckpt", type=Path, required=True)
+    parser.add_argument("--images-fallback-root", type=Path, default=_default_images_fallback_root())
+    parser.add_argument("--skip-resolve-dataset", action="store_true")
     parser.add_argument("--class-name", type=str, default="target")
     parser.add_argument("--model", type=str, default="large", choices=("small", "medium", "large"))
     parser.add_argument("--resolution", type=int, default=224)
@@ -231,6 +454,9 @@ def main() -> None:
     parser.add_argument("--num-queries", type=int, default=200)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--min-loaded-keys", type=int, default=120)
+    parser.add_argument("--min-batches", type=int, default=1)
+    parser.add_argument("--run-test", action="store_true")
+    parser.add_argument("--non-strict-train-start", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -243,6 +469,19 @@ def main() -> None:
     run_meta = args.output_dir / "run_meta"
     run_meta.mkdir(parents=True, exist_ok=True)
 
+    effective_dataset_dir = args.dataset_dir
+    if not args.skip_resolve_dataset:
+        resolved_dir = args.output_dir / "_resolved_dataset"
+        effective_dataset_dir, resolved_report = build_resolved_dataset(
+            dataset_dir=args.dataset_dir,
+            out_dir=resolved_dir,
+            images_fallback_root=args.images_fallback_root,
+        )
+        (run_meta / "resolved_dataset_report.json").write_text(
+            json.dumps(resolved_report, indent=2),
+            encoding="utf-8",
+        )
+
     model_cls = {
         "small": RFDETRSmall,
         "medium": RFDETRMedium,
@@ -250,11 +489,23 @@ def main() -> None:
     }[args.model]
     rf_model = model_cls(pretrain_weights=None, resolution=int(args.resolution))
 
-    report = load_ssl_backbone_into_rfdetr(
+    report, mapped_sd = load_ssl_backbone_into_rfdetr(
         rf_model=rf_model,
         ssl_ckpt=args.ssl_ckpt,
         min_loaded_keys=int(args.min_loaded_keys),
     )
+    monitor_key = _pick_monitor_key(mapped_sd)
+    loaded_monitor = mapped_sd[monitor_key].detach().cpu()
+    current_monitor = rf_model.model.model.state_dict()[monitor_key].detach().cpu()
+    pretrain_max_abs_diff = float((current_monitor - loaded_monitor).abs().max().item())
+    report["monitor_key"] = monitor_key
+    report["pretrain_max_abs_diff"] = pretrain_max_abs_diff
+    report["pretrain_exact_match"] = bool(pretrain_max_abs_diff <= 1e-6)
+    if pretrain_max_abs_diff > 1e-6:
+        raise RuntimeError(
+            f"Post-load verification failed for {monitor_key}. max_abs_diff={pretrain_max_abs_diff:.6e}"
+        )
+
     print(json.dumps(report, indent=2))
     (run_meta / "ssl_load_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
 
@@ -262,24 +513,48 @@ def main() -> None:
         print("[DONE] Dry-run only. Skipping training.")
         return
 
-    rf_model.train(
-        dataset_dir=str(args.dataset_dir),
-        output_dir=str(args.output_dir),
-        class_names=[args.class_name],
-        resolution=int(args.resolution),
-        epochs=int(args.epochs),
-        batch_size=int(args.batch_size),
-        grad_accum_steps=int(args.grad_accum_steps),
-        lr=float(args.lr),
-        weight_decay=float(args.weight_decay),
-        num_queries=int(args.num_queries),
-        num_workers=int(args.num_workers),
-        run_test=True,
-        early_stopping=False,
-        amp=True,
+    probe = _install_train_start_probe(
+        rf_model=rf_model,
+        monitor_key=monitor_key,
+        expected_tensor=loaded_monitor,
+        strict=not args.non_strict_train_start,
     )
+
+    try:
+        rf_model.train(
+            dataset_dir=str(effective_dataset_dir),
+            output_dir=str(args.output_dir),
+            class_names=[args.class_name],
+            resolution=int(args.resolution),
+            epochs=int(args.epochs),
+            batch_size=int(args.batch_size),
+            grad_accum_steps=int(args.grad_accum_steps),
+            lr=float(args.lr),
+            weight_decay=float(args.weight_decay),
+            num_queries=int(args.num_queries),
+            num_workers=int(args.num_workers),
+            min_batches=int(args.min_batches),
+            run_test=bool(args.run_test),
+            early_stopping=False,
+            amp=True,
+        )
+    except FileNotFoundError as e:
+        msg = str(e)
+        if "checkpoint_best_regular.pth" in msg or "checkpoint_best_total.pth" in msg:
+            probe["train_exception_ignored"] = msg
+            print(
+                "[WARN] RF-DETR finished epochs but did not create a best checkpoint "
+                "(often happens when mAP never exceeds 0.0)."
+            )
+        else:
+            raise
+
+    if not probe["first_batch_seen"]:
+        raise RuntimeError("Training probe failed: no training batch callback observed.")
+    probe_path = run_meta / "ssl_train_probe_report.json"
+    probe_path.write_text(json.dumps(probe, indent=2), encoding="utf-8")
+    print(f"[DONE] Training probe report -> {probe_path}")
 
 
 if __name__ == "__main__":
     main()
-
