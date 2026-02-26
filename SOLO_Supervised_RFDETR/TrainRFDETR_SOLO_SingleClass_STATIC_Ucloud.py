@@ -109,13 +109,9 @@ def env_path(name: str, default: Path) -> Path:
 # ───────────────────────────────────────────────────────────────────────────────
 # SSL backbones to probe (encoder checkpoints)
 # ───────────────────────────────────────────────────────────────────────────────
-SSL_CKPT_ROOT = env_path(
-    "SSL_CKPT_ROOT",
-    WORK_ROOT / "SSL_Checkpoints",
-)
-# Explicit per-class defaults for SSL backbone selection.
-BEST_SSL_CKPT_EPI = str(SSL_CKPT_ROOT / "epoch_epoch=029.ckpt")  # set your epithelial winner
-BEST_SSL_CKPT_LEU = str(SSL_CKPT_ROOT / "epoch_epoch=069.ckpt")  # set your leucocyte winner
+# SSL checkpoints are configured by launcher env variables:
+#   RFDETR_EPI_SSL_CKPT
+#   RFDETR_LEU_SSL_CKPT
 
 # ───────────────────────────────────────────────
 # Path resolution helpers for COCO
@@ -550,31 +546,20 @@ IMAGES_FALLBACK_ROOT = env_path(
 # ───────────────────────────────────────────────────────────────────────────────
 # ====== STATIC OVR DATASETS (jsons live in repo / project tree) ======
 # ───────────────────────────────────────────────────────────────────────────────
-REPO_ROOT = Path.cwd()  # you usually run this from /work/projects/myproj
-DEFAULT_ROOT = env_path(
-    "STAT_DATASETS_ROOT",
-    REPO_ROOT / "Stat_Dataset"
-)
+DATASET_LEUCO_RAW = os.getenv("DATASET_LEUCO", "").strip()
+DATASET_EPI_RAW = os.getenv("DATASET_EPI", "").strip()
+if not DATASET_LEUCO_RAW or not DATASET_EPI_RAW:
+    raise ValueError(
+        "DATASET_LEUCO and DATASET_EPI must be set by the launcher environment "
+        "(for example in RunRFDETR_Solo_SingleClass_STATIC_Ucloud.ipynb)."
+    )
 
-DATASET_LEUCO = Path(os.getenv(
-    "DATASET_LEUCO",
-    str(DEFAULT_ROOT / "QA-2025v2_Leucocyte_OVR")
-))
-DATASET_EPI = Path(os.getenv(
-    "DATASET_EPI",
-    str(DEFAULT_ROOT / "QA-2025v2_SquamousEpithelialCell_OVR")
-))
-
-def _autofind_dataset(root: Path, token: str) -> Path:
-    cands = sorted([p for p in root.glob(f"*{token}*") if p.is_dir()])
-    if not cands:
-        raise FileNotFoundError(f"Could not find dataset for token '{token}' under {root}")
-    return cands[-1]
-
+DATASET_LEUCO = Path(DATASET_LEUCO_RAW).expanduser().resolve()
+DATASET_EPI = Path(DATASET_EPI_RAW).expanduser().resolve()
 if not DATASET_LEUCO.exists():
-    DATASET_LEUCO = _autofind_dataset(DEFAULT_ROOT, "Leucocyte_OVR")
+    raise FileNotFoundError(f"DATASET_LEUCO does not exist: {DATASET_LEUCO}")
 if not DATASET_EPI.exists():
-    DATASET_EPI = _autofind_dataset(DEFAULT_ROOT, "SquamousEpithelialCell_OVR")
+    raise FileNotFoundError(f"DATASET_EPI does not exist: {DATASET_EPI}")
 
 # Where to put all outputs (HPO runs + leaderboards + final selections)
 OUTPUT_ROOT = env_path("OUTPUT_ROOT", WORK_ROOT / "RFDETR_SOLO_OUTPUT" / "HPO_BOTH_OVR")
@@ -1085,8 +1070,8 @@ MATRIX_QUICK_DEFAULTS = {
     # Class-specific defaults
     "RFDETR_EPI_LR": "5e-5",
     "RFDETR_LEU_LR": "8e-5",
-    "RFDETR_EPI_SSL_CKPT": BEST_SSL_CKPT_EPI,
-    "RFDETR_LEU_SSL_CKPT": BEST_SSL_CKPT_LEU,
+    "RFDETR_EPI_SSL_CKPT": "",
+    "RFDETR_LEU_SSL_CKPT": "",
 }
 
 def _matrix_dynamic_defaults() -> dict:
