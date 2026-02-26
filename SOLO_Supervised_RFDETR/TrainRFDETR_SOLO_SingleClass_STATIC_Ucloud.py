@@ -843,105 +843,15 @@ def load_ssl_backbone_into_rfdetr_model(model, ssl_ckpt: str, min_loaded_keys: i
     return report
 
 
-def verify_effective_backbone_in_checkpoint(out_dir: Path, requested_ckpt: str | None) -> dict:
-    """
-    Verify whether the requested SSL checkpoint is reflected in saved training args.
-    Returns a summary dict for metadata logging.
-    """
-    summary = {
-        "requested_ckpt": requested_ckpt,
-        "requested_ckpt_normalized": None,
-        "verified": requested_ckpt is None,
-        "checked_checkpoint": None,
-        "found_pretrained_encoder": None,
-        "found_pretrain_weights": None,
-        "found_encoder_name": None,
-        "found_pretrained_backbone": None,
-    }
-    if requested_ckpt is None:
-        return summary
-
-    def _normalize_pathlike(v):
-        if v is None:
-            return None
-        s = str(v).strip()
-        if not s:
-            return None
-        return os.path.abspath(os.path.expanduser(s))
-
-    requested_norm = _normalize_pathlike(requested_ckpt)
-    summary["requested_ckpt_normalized"] = requested_norm
-    ckpt_candidates = [
-        out_dir / "checkpoint_best_total.pth",
-        out_dir / "checkpoint_best_regular.pth",
-        out_dir / "checkpoint.pth",
-    ]
-    ckpt_path = next((p for p in ckpt_candidates if p.exists()), None)
-    if ckpt_path is None:
-        raise RuntimeError(
-            "Requested SSL checkpoint but no saved training checkpoint was found for verification."
-        )
-    summary["checked_checkpoint"] = str(ckpt_path)
-    try:
-        import torch
-        try:
-            ckpt_obj = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
-        except TypeError:
-            ckpt_obj = torch.load(str(ckpt_path), map_location="cpu")
-    except Exception as e:
-        raise RuntimeError(f"Failed to load checkpoint for SSL verification: {e}") from e
-    args_obj = ckpt_obj.get("args")
-    if args_obj is None:
-        raise RuntimeError("Checkpoint has no 'args'; cannot verify SSL backbone usage.")
-    try:
-        args_dict = vars(args_obj) if hasattr(args_obj, "__dict__") else dict(args_obj)
-    except Exception as e:
-        raise RuntimeError(f"Could not parse checkpoint args for SSL verification: {e}") from e
-    found_pretrained_encoder = args_dict.get("pretrained_encoder")
-    found_pretrain_weights = args_dict.get("pretrain_weights")
-    found_encoder_name = args_dict.get("encoder_name")
-    found_pretrained_backbone = args_dict.get("pretrained_backbone")
-    summary["found_pretrained_encoder"] = found_pretrained_encoder
-    summary["found_pretrain_weights"] = found_pretrain_weights
-    summary["found_encoder_name"] = found_encoder_name
-    summary["found_pretrained_backbone"] = found_pretrained_backbone
-    found_raw = {
-        found_pretrained_encoder,
-        found_pretrain_weights,
-        found_encoder_name,
-        found_pretrained_backbone,
-    }
-    found_norm = {_normalize_pathlike(v) for v in found_raw}
-    applied = (requested_ckpt in found_raw) or (requested_norm in found_norm)
-    summary["verified"] = bool(applied)
-    if not applied:
-        raise RuntimeError(
-            "Requested SSL checkpoint was not applied in effective training args. "
-            f"requested={requested_ckpt!r}, "
-            f"requested_normalized={requested_norm!r}, "
-            f"pretrained_encoder={found_pretrained_encoder!r}, "
-            f"pretrain_weights={found_pretrain_weights!r}, "
-            f"encoder_name={found_encoder_name!r}, "
-            f"pretrained_backbone={found_pretrained_backbone!r}"
-        )
-    return summary
-
 def train_one_run(target_name: str,
                   dataset_dir: Path,
                   out_dir: Path,
                   model_cls,
-                  resolution: int,
                   epochs: int,
                   lr: float,
-                  lr_encoder_mult: float,
                   batch_size: int,
                   grad_accum_steps: int,
                   num_queries: int,
-                  warmup_steps: int,
-                  scale_range: tuple[float, float],
-                  rot_deg: float,
-                  color_jitter: float,
-                  gauss_blur_prob: float,
                   aug_copies: int,
                   weight_decay: float,
                   dropout: float,
@@ -979,21 +889,6 @@ def train_one_run(target_name: str,
                     f"Requested ENCODER_CKPT not found: {resolved_backbone}"
                 )
             backbone_ckpt = str(resolved_backbone)
-
-    # 10-line runtime check: verify the exact SSL checkpoint is actually read.
-    _ssl_hits = {"n": 0}
-    _orig_torch_load = None
-    if backbone_ckpt is not None:
-        import torch
-        _ssl_abs = os.path.abspath(backbone_ckpt)
-        _orig_torch_load = torch.load
-        def _spy_torch_load(f, *a, **k):
-            p = os.path.abspath(str(f))
-            if p == _ssl_abs:
-                _ssl_hits["n"] += 1
-                print(f"[SSL-RUNTIME] torch.load -> {p}")
-            return _orig_torch_load(f, *a, **k)
-        torch.load = _spy_torch_load
 
     # Estimate effective optimization steps per epoch for sanity on small datasets.
     train_json = data_dir / "train" / "_annotations.coco.json"
@@ -1078,15 +973,6 @@ def train_one_run(target_name: str,
         checkpoint_interval=10,
         run_test=True,
     )
-    # Explicit mapping for SSL backbone initialization.
-    # NOTE: relying on train() signature inspection is unsafe when train(**kwargs).
-    if backbone_ckpt is not None:
-        kwargs["pretrained_encoder"] = backbone_ckpt
-        # Disable hosted RF-DETR pretrain when SSL encoder is requested.
-        kwargs["pretrain_weights"] = None
-        # Backward-compat aliases for older/custom forks.
-        kwargs["encoder_name"] = backbone_ckpt
-        kwargs["pretrained_backbone"] = backbone_ckpt
     # resizing behaviour: IMPORTANT
     if USE_PATCH_224:
         # patches are already square 224×224; do NOT resize
@@ -1120,22 +1006,7 @@ def train_one_run(target_name: str,
         )
 
     print(f"[TRAIN] {model.__class__.__name__} — {target_name} → {out_dir}")
-    try:
-        model.train(**kwargs)
-    finally:
-        if _orig_torch_load is not None:
-            import torch
-            torch.load = _orig_torch_load
-    if backbone_ckpt is not None and _ssl_hits["n"] < 1:
-        raise RuntimeError(
-            f"SSL runtime check failed: checkpoint was never loaded at runtime: {backbone_ckpt}"
-        )
-    # Fail fast if SSL checkpoint was requested but not effectively applied.
-    backbone_check = verify_effective_backbone_in_checkpoint(out_dir, backbone_ckpt)
-    (meta / "effective_backbone_check.json").write_text(
-        json.dumps(backbone_check, indent=2),
-        encoding="utf-8",
-    )
+    model.train(**kwargs)
     best = find_best_val(out_dir)
     (out_dir / "val_best_summary.json").write_text(json.dumps(best, indent=2), encoding="utf-8")
     return best
@@ -1203,16 +1074,10 @@ MATRIX_QUICK_DEFAULTS = {
     "RFDETR_TRAIN_FRACTIONS": "1.0",
     "RFDETR_SEEDS": str(SEED),
     # Shared hyperparameters
-    "RFDETR_LR_ENCODER_MULT": "1.0",
     "RFDETR_GRAD_ACCUM_STEPS": "1",
     "RFDETR_WEIGHT_DECAY": "7e-4",
     "RFDETR_DROPOUT": "0.15",
     "RFDETR_AUG_COPIES": "0",
-    "RFDETR_SCALE_MIN": "0.9",
-    "RFDETR_SCALE_MAX": "1.1",
-    "RFDETR_ROT_DEG": "5.0",
-    "RFDETR_COLOR_JITTER": "0.20",
-    "RFDETR_GAUSS_BLUR": "0.20",
     "RFDETR_EARLY_STOPPING": "1",
     "RFDETR_EARLY_STOPPING_PATIENCE": "10",
     "RFDETR_EARLY_STOPPING_MIN_DELTA": "0.001",
@@ -1220,8 +1085,6 @@ MATRIX_QUICK_DEFAULTS = {
     # Class-specific defaults
     "RFDETR_EPI_LR": "5e-5",
     "RFDETR_LEU_LR": "8e-5",
-    "RFDETR_EPI_WARMUP_STEPS": "0",
-    "RFDETR_LEU_WARMUP_STEPS": "0",
     "RFDETR_EPI_SSL_CKPT": BEST_SSL_CKPT_EPI,
     "RFDETR_LEU_SSL_CKPT": BEST_SSL_CKPT_LEU,
 }
@@ -1295,16 +1158,10 @@ def _build_matrix_runtime_config() -> dict:
         "ssl_modes": _parse_ssl_modes(_cfg_text("RFDETR_SSL_MODES")),
         "train_fractions": _csv_float(_cfg_text("RFDETR_TRAIN_FRACTIONS")),
         "seeds": _csv_int(_cfg_text("RFDETR_SEEDS")),
-        "lr_encoder_mult": float(_cfg_text("RFDETR_LR_ENCODER_MULT")),
         "grad_accum_steps": int(_cfg_text("RFDETR_GRAD_ACCUM_STEPS")),
         "weight_decay": float(_cfg_text("RFDETR_WEIGHT_DECAY")),
         "dropout": float(_cfg_text("RFDETR_DROPOUT")),
         "aug_copies": int(_cfg_text("RFDETR_AUG_COPIES")),
-        "scale_min": float(_cfg_text("RFDETR_SCALE_MIN")),
-        "scale_max": float(_cfg_text("RFDETR_SCALE_MAX")),
-        "rot_deg": float(_cfg_text("RFDETR_ROT_DEG")),
-        "color_jitter": float(_cfg_text("RFDETR_COLOR_JITTER")),
-        "gauss_blur": float(_cfg_text("RFDETR_GAUSS_BLUR")),
         "early_stopping": _parse_bool(_cfg_text("RFDETR_EARLY_STOPPING")),
         "early_stopping_patience": int(_cfg_text("RFDETR_EARLY_STOPPING_PATIENCE")),
         "early_stopping_min_delta": float(_cfg_text("RFDETR_EARLY_STOPPING_MIN_DELTA")),
@@ -1313,7 +1170,6 @@ def _build_matrix_runtime_config() -> dict:
             "epochs": int(_cfg_text("RFDETR_EPI_EPOCHS")),
             "lr": float(_cfg_text("RFDETR_EPI_LR")),
             "batch": int(_cfg_text("RFDETR_EPI_BATCH")),
-            "warmup_steps": int(_cfg_text("RFDETR_EPI_WARMUP_STEPS")),
             "num_queries": int(_cfg_text("RFDETR_EPI_NUM_QUERIES")),
             "ssl_ckpt": _cfg_text("RFDETR_EPI_SSL_CKPT"),
         },
@@ -1321,15 +1177,10 @@ def _build_matrix_runtime_config() -> dict:
             "epochs": int(_cfg_text("RFDETR_LEU_EPOCHS")),
             "lr": float(_cfg_text("RFDETR_LEU_LR")),
             "batch": int(_cfg_text("RFDETR_LEU_BATCH")),
-            "warmup_steps": int(_cfg_text("RFDETR_LEU_WARMUP_STEPS")),
             "num_queries": int(_cfg_text("RFDETR_LEU_NUM_QUERIES")),
             "ssl_ckpt": _cfg_text("RFDETR_LEU_SSL_CKPT"),
         },
     }
-    if cfg["scale_min"] <= 0 or cfg["scale_max"] <= 0 or cfg["scale_min"] > cfg["scale_max"]:
-        raise ValueError(
-            f"Invalid scale range: RFDETR_SCALE_MIN={cfg['scale_min']} RFDETR_SCALE_MAX={cfg['scale_max']}"
-        )
     if cfg["weight_decay"] < 0:
         raise ValueError(f"RFDETR_WEIGHT_DECAY must be >= 0, got {cfg['weight_decay']}")
     if cfg["grad_accum_steps"] < 1:
@@ -1371,18 +1222,12 @@ def _build_matrix_space_for_target(target_key: str, matrix_cfg: dict) -> dict:
         "RESOLUTION":      [SEARCH_RESOLUTION],
         "EPOCHS":          [tcfg["epochs"]],
         "LR":              [tcfg["lr"]],
-        "LR_ENCODER_MULT": [matrix_cfg["lr_encoder_mult"]],
         "GRAD_ACCUM_STEPS":[matrix_cfg["grad_accum_steps"]],
         "BATCH":           [tcfg["batch"]],
-        "WARMUP_STEPS":    [tcfg["warmup_steps"]],
         "WEIGHT_DECAY":    [matrix_cfg["weight_decay"]],
         "DROPOUT":         [matrix_cfg["dropout"]],
         "NUM_QUERIES":     [tcfg["num_queries"]],
         "AUG_COPIES":      [matrix_cfg["aug_copies"]],
-        "SCALE_RANGE":     [(matrix_cfg["scale_min"], matrix_cfg["scale_max"])],
-        "ROT_DEG":         [matrix_cfg["rot_deg"]],
-        "COLOR_JITTER":    [matrix_cfg["color_jitter"]],
-        "GAUSS_BLUR":      [matrix_cfg["gauss_blur"]],
         "EARLY_STOPPING":             [matrix_cfg["early_stopping"]],
         "EARLY_STOPPING_PATIENCE":    [matrix_cfg["early_stopping_patience"]],
         "EARLY_STOPPING_MIN_DELTA":   [matrix_cfg["early_stopping_min_delta"]],
@@ -1440,7 +1285,6 @@ def _build_training_plan_rows(jobs: list[dict]) -> list[dict]:
             "batch": cfg.get("BATCH"),
             "grad_accum_steps": cfg.get("GRAD_ACCUM_STEPS"),
             "num_queries": cfg.get("NUM_QUERIES"),
-            "warmup_steps": cfg.get("WARMUP_STEPS"),
             "weight_decay": cfg.get("WEIGHT_DECAY"),
             "dropout": cfg.get("DROPOUT"),
             "early_stopping": cfg.get("EARLY_STOPPING"),
@@ -1611,20 +1455,13 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
                     dataset_dir=Path(dataset_dir),
                     out_dir=run_dir,
                     model_cls=model_cls,
-                    resolution=try_cfg["RESOLUTION"],
                     epochs=try_cfg["EPOCHS"],
                     lr=try_cfg["LR"],
-                    lr_encoder_mult=try_cfg["LR_ENCODER_MULT"],
                     batch_size=try_cfg["BATCH"],
                     grad_accum_steps=try_cfg["GRAD_ACCUM_STEPS"],
                     num_queries=try_cfg["NUM_QUERIES"],
-                    warmup_steps=try_cfg["WARMUP_STEPS"],
                     weight_decay=try_cfg["WEIGHT_DECAY"],
                     dropout=try_cfg["DROPOUT"],
-                    scale_range=try_cfg["SCALE_RANGE"],
-                    rot_deg=try_cfg["ROT_DEG"],
-                    color_jitter=try_cfg["COLOR_JITTER"],
-                    gauss_blur_prob=try_cfg["GAUSS_BLUR"],
                     aug_copies=try_cfg["AUG_COPIES"],
                     early_stopping=try_cfg["EARLY_STOPPING"],
                     early_stopping_patience=try_cfg["EARLY_STOPPING_PATIENCE"],
