@@ -425,6 +425,7 @@ def _default_images_fallback_root() -> Path | None:
     if raw:
         return Path(raw).expanduser()
     candidates = [
+        Path(r"D:\PHD\PhdData\CellScanData\Zoom10x - Quality Assessment_Cleaned"),
         Path.cwd() / "CellScanData" / "Zoom10x - Quality Assessment_Cleaned",
         Path(__file__).resolve().parents[1] / "CellScanData" / "Zoom10x - Quality Assessment_Cleaned",
     ]
