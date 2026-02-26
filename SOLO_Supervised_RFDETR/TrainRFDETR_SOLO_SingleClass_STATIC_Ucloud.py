@@ -753,6 +753,21 @@ def train_one_run(target_name: str,
                 )
             backbone_ckpt = str(resolved_backbone)
 
+    # 10-line runtime check: verify the exact SSL checkpoint is actually read.
+    _ssl_hits = {"n": 0}
+    _orig_torch_load = None
+    if backbone_ckpt is not None:
+        import torch
+        _ssl_abs = os.path.abspath(backbone_ckpt)
+        _orig_torch_load = torch.load
+        def _spy_torch_load(f, *a, **k):
+            p = os.path.abspath(str(f))
+            if p == _ssl_abs:
+                _ssl_hits["n"] += 1
+                print(f"[SSL-RUNTIME] torch.load -> {p}")
+            return _orig_torch_load(f, *a, **k)
+        torch.load = _spy_torch_load
+
     # Estimate effective optimization steps per epoch for sanity on small datasets.
     train_json = data_dir / "train" / "_annotations.coco.json"
     train_images_count = None
@@ -860,7 +875,16 @@ def train_one_run(target_name: str,
     }, indent=2), encoding="utf-8")
 
     print(f"[TRAIN] {model.__class__.__name__} — {target_name} → {out_dir}")
-    model.train(**kwargs)
+    try:
+        model.train(**kwargs)
+    finally:
+        if _orig_torch_load is not None:
+            import torch
+            torch.load = _orig_torch_load
+    if backbone_ckpt is not None and _ssl_hits["n"] < 1:
+        raise RuntimeError(
+            f"SSL runtime check failed: checkpoint was never loaded at runtime: {backbone_ckpt}"
+        )
     # Fail fast if SSL checkpoint was requested but not effectively applied.
     backbone_check = verify_effective_backbone_in_checkpoint(out_dir, backbone_ckpt)
     (meta / "effective_backbone_check.json").write_text(
