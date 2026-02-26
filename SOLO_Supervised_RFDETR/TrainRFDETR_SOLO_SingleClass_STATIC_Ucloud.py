@@ -189,7 +189,7 @@ def build_resolved_static_dataset(src_dir: Path, dst_dir: Path) -> Path:
             f"Set it to your mounted CellScanData root."
         )
 
-    print(f"[RESOLVE] Building resolved dataset for {src_dir.name} → {dst_dir}")
+    print(f"[RESOLVE] Building resolved dataset for {src_dir.name} -> {dst_dir}")
     dst_dir.mkdir(parents=True, exist_ok=True)
 
     # index all images once
@@ -454,7 +454,7 @@ def _patchify_split(
     }
     dst_json.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
 
-    print(f"[PATCHIFY] {src_json.parent.name}: {len(new_images)} images, {len(new_anns)} anns → {dst_json}")
+    print(f"[PATCHIFY] {src_json.parent.name}: {len(new_images)} images, {len(new_anns)} anns -> {dst_json}")
     return img_id, ann_id, len(new_images), len(new_anns)
 
 
@@ -477,7 +477,7 @@ def build_patchified_dataset(resolved_root: Path,
         print(f"[PATCHIFY] Using cached patchified dataset: {dst_root}")
         return dst_root
 
-    print(f"[PATCHIFY] Building patchified dataset {tag} → {dst_root}")
+    print(f"[PATCHIFY] Building patchified dataset {tag} -> {dst_root}")
     dst_root.mkdir(parents=True, exist_ok=True)
 
     next_img_id = 1
@@ -990,7 +990,7 @@ def train_one_run(target_name: str,
             encoding="utf-8",
         )
 
-    print(f"[TRAIN] {model.__class__.__name__} — {target_name} → {out_dir}")
+    print(f"[TRAIN] {model.__class__.__name__} - {target_name} -> {out_dir}")
     model.train(**kwargs)
     best = find_best_val(out_dir)
     (out_dir / "val_best_summary.json").write_text(json.dumps(best, indent=2), encoding="utf-8")
@@ -1635,7 +1635,7 @@ def run_hpo_all_classes(session_root: Path) -> dict:
             if status == "ok":
                 leaderboard_all.append(payload)
                 print(f"[HPO] Finished run {payload['run_idx']:03d} "
-                      f"({payload['target']}) — AP50={payload['val_AP50']} mAP={payload['val_mAP5095']}")
+                      f"({payload['target']}) - AP50={payload['val_AP50']} mAP={payload['val_mAP5095']}")
             else:
                 print(f"[HPO] ERROR run {payload.get('run_idx')} "
                       f"({payload.get('target')}): {payload.get('error')}")
@@ -1758,7 +1758,7 @@ def main():
 
     summary_path = SESSION_ROOT / "FINAL_HPO_SUMMARY.json"
     summary_path.write_text(json.dumps(final, indent=2), encoding="utf-8")
-    print("\n[FINAL] Summary →", summary_path)
+    print("\n[FINAL] Summary ->", summary_path)
     print(json.dumps(final, indent=2))
 
 if __name__ == "__main__":
