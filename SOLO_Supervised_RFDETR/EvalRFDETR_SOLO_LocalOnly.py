@@ -35,15 +35,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 # ============================================================================
 # USER PATH INPUTS (EDIT THESE)
 # ============================================================================
-# Set RUN_DIR to your local trained run folder.
-# Example:
-# RUN_DIR = r"C:\Users\you\...\SOLO_Supervised_RFDETR\RFDETR_SOLO_OUTPUT\dataset_coco_splits_..."
-RUN_DIR = r""
-
-# Optional overrides. Leave empty ("") to use defaults from RUN_DIR.
-# CHECKPOINT default: <RUN_DIR>/rfdetr_run/checkpoint_best_total.pth
-# TEST_JSON  default: <RUN_DIR>/test/_annotations.coco.json
-# OUTPUT_DIR default: <RUN_DIR>/rfdetr_run/eval_local
+# Set explicit local paths here.
+# You can also override each one from CLI:
+#   --checkpoint ... --test-json ... --output-dir ...
 CHECKPOINT = r"D:\PHD\Results\Quality Assessment\Epi+Leu for ESCMID Conference\first full Epi model no SSL\HPO_Config_003/checkpoint_best_total.pth"
 TEST_JSON = r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\SOLO_Supervised_RFDETR\Stat_Dataset\QA-2025v2_SquamousEpithelialCell_OVR_20260217-093944\test/_annotations.coco"
 OUTPUT_DIR = r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\EvaluationOutput"
@@ -89,7 +83,6 @@ except Exception:
 
 @dataclass
 class LocalEvalConfig:
-    run_dir: Path
     checkpoint: Path
     test_json: Path
     output_dir: Path
@@ -138,8 +131,8 @@ def write_csv(path: Path, fieldnames: Sequence[str], rows: Sequence[Dict[str, An
             w.writerow(row)
 
 
-def infer_model_class(run_dir: Path, checkpoint: Path) -> str:
-    meta_model = run_dir / "rfdetr_run" / "run_meta" / "model_architecture.json"
+def infer_model_class(model_meta_root: Path, checkpoint: Path) -> str:
+    meta_model = model_meta_root / "rfdetr_run" / "run_meta" / "model_architecture.json"
     if meta_model.exists():
         try:
             js = json.loads(meta_model.read_text(encoding="utf-8"))
@@ -602,8 +595,6 @@ def try_plot_curves(output_dir: Path, thr_rows: Sequence[Dict[str, Any]], pr_row
 def run_local_eval(cfg: LocalEvalConfig) -> None:
     ensure_deps()
 
-    if not cfg.run_dir.exists():
-        raise FileNotFoundError(f"run_dir not found: {cfg.run_dir}")
     if not cfg.checkpoint.exists():
         raise FileNotFoundError(f"checkpoint not found: {cfg.checkpoint}")
     if not cfg.test_json.exists():
@@ -845,7 +836,6 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
     summary = {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "mode": "local_only",
-        "run_dir": str(cfg.run_dir),
         "checkpoint": str(cfg.checkpoint),
         "test_json": str(cfg.test_json),
         "output_dir": str(cfg.output_dir),
@@ -875,17 +865,19 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
 
 
 def build_config(args: argparse.Namespace) -> LocalEvalConfig:
-    if args.run_dir is None:
-        raise ValueError(
-            "RUN_DIR is not set. Edit the RUN_DIR variable at the top of this script "
-            "or pass --run-dir on the command line."
-        )
-    run_dir = args.run_dir.resolve()
-    checkpoint = (args.checkpoint.resolve() if args.checkpoint else (run_dir / "rfdetr_run" / "checkpoint_best_total.pth").resolve())
-    test_json = (args.test_json.resolve() if args.test_json else (run_dir / "test" / "_annotations.coco.json").resolve())
-    output_dir = (args.output_dir.resolve() if args.output_dir else (run_dir / "rfdetr_run" / "eval_local").resolve())
+    if args.checkpoint is None:
+        raise ValueError("CHECKPOINT is not set. Edit CHECKPOINT at top or pass --checkpoint.")
+    if args.test_json is None:
+        raise ValueError("TEST_JSON is not set. Edit TEST_JSON at top or pass --test-json.")
+    if args.output_dir is None:
+        raise ValueError("OUTPUT_DIR is not set. Edit OUTPUT_DIR at top or pass --output-dir.")
 
-    model_class = infer_model_class(run_dir, checkpoint) if args.model_class == "auto" else args.model_class
+    checkpoint = args.checkpoint.resolve()
+    test_json = args.test_json.resolve()
+    output_dir = args.output_dir.resolve()
+    model_meta_root = checkpoint.parent.parent if checkpoint.parent.name.lower() == "rfdetr_run" else checkpoint.parent
+
+    model_class = infer_model_class(model_meta_root, checkpoint) if args.model_class == "auto" else args.model_class
 
     if args.iou_step <= 0:
         raise ValueError("--iou-step must be > 0")
@@ -895,7 +887,6 @@ def build_config(args: argparse.Namespace) -> LocalEvalConfig:
         raise ValueError("--threshold-points must be >= 2")
 
     return LocalEvalConfig(
-        run_dir=run_dir,
         checkpoint=checkpoint,
         test_json=test_json,
         output_dir=output_dir,
@@ -919,10 +910,9 @@ def build_config(args: argparse.Namespace) -> LocalEvalConfig:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Local-only RF-DETR evaluator")
-    p.add_argument("--run-dir", type=Path, default=_optional_path(RUN_DIR), help="Run folder containing rfdetr_run/ and test/.")
-    p.add_argument("--checkpoint", type=Path, default=_optional_path(CHECKPOINT), help="Default: <run-dir>/rfdetr_run/checkpoint_best_total.pth")
-    p.add_argument("--test-json", type=Path, default=_optional_path(TEST_JSON), help="Default: <run-dir>/test/_annotations.coco.json")
-    p.add_argument("--output-dir", type=Path, default=_optional_path(OUTPUT_DIR), help="Default: <run-dir>/rfdetr_run/eval_local")
+    p.add_argument("--checkpoint", type=Path, default=_optional_path(CHECKPOINT), help="Path to model checkpoint file.")
+    p.add_argument("--test-json", type=Path, default=_optional_path(TEST_JSON), help="Path to COCO test annotations JSON.")
+    p.add_argument("--output-dir", type=Path, default=_optional_path(OUTPUT_DIR), help="Directory to write evaluation outputs.")
     p.add_argument("--model-class", type=str, default="auto", choices=["auto", "RFDETRSmall", "RFDETRMedium", "RFDETRLarge"])
 
     p.add_argument("--score-floor", type=float, default=0.001, help="Prediction floor retained for curves/AP.")
