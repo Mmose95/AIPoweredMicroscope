@@ -586,6 +586,7 @@ SESSION_ROOT: Path | None = None
 
 NUM_WORKERS = int(os.getenv("NUM_WORKERS", "8"))
 RFDETR_MIN_BATCHES = int(os.getenv("RFDETR_MIN_BATCHES", "1"))
+RFDETR_SSL_MIN_LOADED_KEYS = int(os.getenv("RFDETR_SSL_MIN_LOADED_KEYS", "120"))
 SEED        = int(os.getenv("SEED", "42"))
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -616,6 +617,232 @@ def get_or_build_aug_cache(target_name: str, dataset_dir: Path, root_out: Path, 
 # ───────────────────────────────────────────────────────────────────────────────
 # Training (single run). Called in worker processes.
 # ───────────────────────────────────────────────────────────────────────────────
+_SSL_BLOCK_RE = re.compile(r"^blocks\.(\d+)\.(\d+)\.(.+)$")
+_SSL_BLOCK_RE_SINGLE = re.compile(r"^blocks\.(\d+)\.(.+)$")
+_SSL_KNOWN_STRIP_PREFIXES = (
+    "module.",
+    "state_dict.",
+    "model.",
+    "teacher.",
+    "student.",
+    "backbone.",
+    "encoder.",
+)
+
+
+def _ssl_strip_known_prefixes(key: str) -> str:
+    out = str(key)
+    changed = True
+    while changed:
+        changed = False
+        for pref in _SSL_KNOWN_STRIP_PREFIXES:
+            if out.startswith(pref):
+                out = out[len(pref):]
+                changed = True
+    return out
+
+
+def _ssl_parse_block_key(norm_key: str) -> tuple[int, str] | None:
+    m = _SSL_BLOCK_RE.match(norm_key)
+    if m:
+        _, layer_idx, suffix = m.groups()
+        return int(layer_idx), suffix
+    m = _SSL_BLOCK_RE_SINGLE.match(norm_key)
+    if m:
+        layer_idx, suffix = m.groups()
+        return int(layer_idx), suffix
+    return None
+
+
+def _ssl_extract_state_dict(payload) -> dict:
+    if isinstance(payload, dict):
+        for k in ("state_dict", "model", "teacher", "student"):
+            v = payload.get(k)
+            if isinstance(v, dict) and v:
+                first_val = next(iter(v.values()))
+                if hasattr(first_val, "shape"):
+                    return v
+    if isinstance(payload, dict) and payload:
+        first_val = next(iter(payload.values()))
+        if hasattr(first_val, "shape"):
+            return payload
+    raise ValueError("Could not find a tensor state_dict in SSL checkpoint.")
+
+
+def _ssl_try_add(mapped: dict, target_sd: dict, dst_key: str, value, stats: dict, bucket: str) -> bool:
+    if dst_key not in target_sd:
+        return False
+    if tuple(value.shape) != tuple(target_sd[dst_key].shape):
+        stats["shape_mismatch"] += 1
+        return False
+    mapped[dst_key] = value
+    stats[bucket] += 1
+    return True
+
+
+def _map_ssl_to_rfdetr_backbone(ssl_sd: dict, target_sd: dict) -> tuple[dict, dict]:
+    mapped = {}
+    stats = {
+        "tensor_keys": 0,
+        "direct_matches": 0,
+        "converted_matches": 0,
+        "shape_mismatch": 0,
+        "unmapped": 0,
+    }
+
+    embed_prefix = "backbone.0.encoder.encoder.embeddings."
+    block_prefix = "backbone.0.encoder.encoder.encoder.layer."
+    norm_prefix = "backbone.0.encoder.encoder.layernorm."
+
+    simple_global_map = {
+        "cls_token": f"{embed_prefix}cls_token",
+        "mask_token": f"{embed_prefix}mask_token",
+        "pos_embed": f"{embed_prefix}position_embeddings",
+        "patch_embed.proj.weight": f"{embed_prefix}patch_embeddings.projection.weight",
+        "patch_embed.proj.bias": f"{embed_prefix}patch_embeddings.projection.bias",
+        "norm.weight": f"{norm_prefix}weight",
+        "norm.bias": f"{norm_prefix}bias",
+    }
+    simple_block_map = {
+        "norm1.weight": "norm1.weight",
+        "norm1.bias": "norm1.bias",
+        "norm2.weight": "norm2.weight",
+        "norm2.bias": "norm2.bias",
+        "mlp.fc1.weight": "mlp.fc1.weight",
+        "mlp.fc1.bias": "mlp.fc1.bias",
+        "mlp.fc2.weight": "mlp.fc2.weight",
+        "mlp.fc2.bias": "mlp.fc2.bias",
+        "attn.proj.weight": "attention.output.dense.weight",
+        "attn.proj.bias": "attention.output.dense.bias",
+    }
+
+    for src_key, value in ssl_sd.items():
+        if not hasattr(value, "shape"):
+            continue
+        stats["tensor_keys"] += 1
+        used = False
+
+        for direct_key in (
+            src_key,
+            f"backbone.0.{src_key}",
+            f"backbone.0.encoder.{src_key}",
+            f"backbone.0.encoder.encoder.{src_key}",
+        ):
+            if _ssl_try_add(mapped, target_sd, direct_key, value, stats, "direct_matches"):
+                used = True
+                break
+        if used:
+            continue
+
+        norm_key = _ssl_strip_known_prefixes(src_key)
+        if norm_key != src_key:
+            for direct_key in (
+                norm_key,
+                f"backbone.0.{norm_key}",
+                f"backbone.0.encoder.{norm_key}",
+                f"backbone.0.encoder.encoder.{norm_key}",
+            ):
+                if _ssl_try_add(mapped, target_sd, direct_key, value, stats, "direct_matches"):
+                    used = True
+                    break
+            if used:
+                continue
+
+        if norm_key in simple_global_map:
+            if _ssl_try_add(mapped, target_sd, simple_global_map[norm_key], value, stats, "converted_matches"):
+                continue
+
+        parsed = _ssl_parse_block_key(norm_key)
+        if parsed is None:
+            stats["unmapped"] += 1
+            continue
+
+        layer_idx, suffix = parsed
+        layer_pref = f"{block_prefix}{layer_idx}."
+
+        if suffix == "attn.qkv.weight":
+            q, k, v = value.chunk(3, dim=0)
+            ok_q = _ssl_try_add(mapped, target_sd, f"{layer_pref}attention.attention.query.weight", q, stats, "converted_matches")
+            ok_k = _ssl_try_add(mapped, target_sd, f"{layer_pref}attention.attention.key.weight", k, stats, "converted_matches")
+            ok_v = _ssl_try_add(mapped, target_sd, f"{layer_pref}attention.attention.value.weight", v, stats, "converted_matches")
+            if ok_q and ok_k and ok_v:
+                continue
+            stats["unmapped"] += 1
+            continue
+
+        if suffix == "attn.qkv.bias":
+            q, k, v = value.chunk(3, dim=0)
+            ok_q = _ssl_try_add(mapped, target_sd, f"{layer_pref}attention.attention.query.bias", q, stats, "converted_matches")
+            ok_k = _ssl_try_add(mapped, target_sd, f"{layer_pref}attention.attention.key.bias", k, stats, "converted_matches")
+            ok_v = _ssl_try_add(mapped, target_sd, f"{layer_pref}attention.attention.value.bias", v, stats, "converted_matches")
+            if ok_q and ok_k and ok_v:
+                continue
+            stats["unmapped"] += 1
+            continue
+
+        mapped_suffix = simple_block_map.get(suffix)
+        if mapped_suffix is None:
+            stats["unmapped"] += 1
+            continue
+        if not _ssl_try_add(mapped, target_sd, f"{layer_pref}{mapped_suffix}", value, stats, "converted_matches"):
+            stats["unmapped"] += 1
+
+    return mapped, stats
+
+
+def _pick_ssl_monitor_key(mapped_sd: dict) -> str:
+    preferred_suffixes = (
+        "embeddings.patch_embeddings.projection.weight",
+        "embeddings.cls_token",
+        "encoder.layer.0.attention.attention.query.weight",
+    )
+    keys = list(mapped_sd.keys())
+    for suffix in preferred_suffixes:
+        for k in keys:
+            if k.endswith(suffix):
+                return k
+    return keys[0]
+
+
+def load_ssl_backbone_into_rfdetr_model(model, ssl_ckpt: str, min_loaded_keys: int) -> dict:
+    import torch
+
+    raw = torch.load(str(ssl_ckpt), map_location="cpu", weights_only=False)
+    ssl_sd = _ssl_extract_state_dict(raw)
+    target_model = model.model.model
+    target_sd = target_model.state_dict()
+    mapped_sd, stats = _map_ssl_to_rfdetr_backbone(ssl_sd, target_sd)
+
+    if len(mapped_sd) < int(min_loaded_keys):
+        raise RuntimeError(
+            f"Only {len(mapped_sd)} SSL keys mapped into RF-DETR; min_loaded_keys={min_loaded_keys}."
+        )
+
+    monitor_key = _pick_ssl_monitor_key(mapped_sd)
+    load_info = target_model.load_state_dict(mapped_sd, strict=False)
+    loaded_monitor = mapped_sd[monitor_key].detach().cpu()
+    current_monitor = target_model.state_dict()[monitor_key].detach().cpu()
+    pretrain_max_abs_diff = float((current_monitor - loaded_monitor).abs().max().item())
+
+    report = {
+        "ssl_ckpt": str(ssl_ckpt),
+        "mapped_key_count": int(len(mapped_sd)),
+        "stats": stats,
+        "monitor_key": monitor_key,
+        "pretrain_max_abs_diff": pretrain_max_abs_diff,
+        "pretrain_exact_match": bool(pretrain_max_abs_diff <= 1e-6),
+        "missing_keys_count": int(len(load_info.missing_keys)),
+        "unexpected_keys_count": int(len(load_info.unexpected_keys)),
+        "missing_keys_sample": load_info.missing_keys[:25],
+        "unexpected_keys_sample": load_info.unexpected_keys[:25],
+    }
+    if pretrain_max_abs_diff > 1e-6:
+        raise RuntimeError(
+            f"Post-load verification failed for {monitor_key}. max_abs_diff={pretrain_max_abs_diff:.6e}"
+        )
+    return report
+
+
 def verify_effective_backbone_in_checkpoint(out_dir: Path, requested_ckpt: str | None) -> dict:
     """
     Verify whether the requested SSL checkpoint is reflected in saved training args.
@@ -806,6 +1033,19 @@ def train_one_run(target_name: str,
     else:
         model = model_cls()
 
+    ssl_load_report = None
+    if backbone_ckpt is not None:
+        ssl_load_report = load_ssl_backbone_into_rfdetr_model(
+            model=model,
+            ssl_ckpt=backbone_ckpt,
+            min_loaded_keys=RFDETR_SSL_MIN_LOADED_KEYS,
+        )
+        print(
+            f"[SSL-LOAD] mapped={ssl_load_report['mapped_key_count']} "
+            f"exact_match={ssl_load_report['pretrain_exact_match']} "
+            f"monitor={ssl_load_report['monitor_key']}"
+        )
+
     # ---- base kwargs ----
     kwargs = dict(
         dataset_dir=str(data_dir),
@@ -873,6 +1113,11 @@ def train_one_run(target_name: str,
         "dataset_dir_effective": str(data_dir),
         "target_name": target_name
     }, indent=2), encoding="utf-8")
+    if ssl_load_report is not None:
+        (meta / "ssl_load_report.json").write_text(
+            json.dumps(ssl_load_report, indent=2),
+            encoding="utf-8",
+        )
 
     print(f"[TRAIN] {model.__class__.__name__} — {target_name} → {out_dir}")
     try:
