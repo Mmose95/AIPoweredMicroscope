@@ -44,9 +44,9 @@ RUN_DIR = r""
 # CHECKPOINT default: <RUN_DIR>/rfdetr_run/checkpoint_best_total.pth
 # TEST_JSON  default: <RUN_DIR>/test/_annotations.coco.json
 # OUTPUT_DIR default: <RUN_DIR>/rfdetr_run/eval_local
-CHECKPOINT = r""
-TEST_JSON = r""
-OUTPUT_DIR = r""
+CHECKPOINT = r"D:\PHD\Results\Quality Assessment\Epi+Leu for ESCMID Conference\first full Epi model no SSL\HPO_Config_003/checkpoint_best_total.pth"
+TEST_JSON = r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\SOLO_Supervised_RFDETR\Stat_Dataset\QA-2025v2_SquamousEpithelialCell_OVR_20260217-093944\test/_annotations.coco"
+OUTPUT_DIR = r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\EvaluationOutput"
 
 
 def _optional_path(raw: str) -> Optional[Path]:
