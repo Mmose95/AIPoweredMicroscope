@@ -32,6 +32,29 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+# ============================================================================
+# USER PATH INPUTS (EDIT THESE)
+# ============================================================================
+# Set RUN_DIR to your local trained run folder.
+# Example:
+# RUN_DIR = r"C:\Users\you\...\SOLO_Supervised_RFDETR\RFDETR_SOLO_OUTPUT\dataset_coco_splits_..."
+RUN_DIR = r""
+
+# Optional overrides. Leave empty ("") to use defaults from RUN_DIR.
+# CHECKPOINT default: <RUN_DIR>/rfdetr_run/checkpoint_best_total.pth
+# TEST_JSON  default: <RUN_DIR>/test/_annotations.coco.json
+# OUTPUT_DIR default: <RUN_DIR>/rfdetr_run/eval_local
+CHECKPOINT = r""
+TEST_JSON = r""
+OUTPUT_DIR = r""
+
+
+def _optional_path(raw: str) -> Optional[Path]:
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    return Path(raw).expanduser()
+
 try:
     import numpy as np
 except Exception:
@@ -852,6 +875,11 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
 
 
 def build_config(args: argparse.Namespace) -> LocalEvalConfig:
+    if args.run_dir is None:
+        raise ValueError(
+            "RUN_DIR is not set. Edit the RUN_DIR variable at the top of this script "
+            "or pass --run-dir on the command line."
+        )
     run_dir = args.run_dir.resolve()
     checkpoint = (args.checkpoint.resolve() if args.checkpoint else (run_dir / "rfdetr_run" / "checkpoint_best_total.pth").resolve())
     test_json = (args.test_json.resolve() if args.test_json else (run_dir / "test" / "_annotations.coco.json").resolve())
@@ -891,10 +919,10 @@ def build_config(args: argparse.Namespace) -> LocalEvalConfig:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Local-only RF-DETR evaluator")
-    p.add_argument("--run-dir", type=Path, required=True, help="Run folder containing rfdetr_run/ and test/.")
-    p.add_argument("--checkpoint", type=Path, default=None, help="Default: <run-dir>/rfdetr_run/checkpoint_best_total.pth")
-    p.add_argument("--test-json", type=Path, default=None, help="Default: <run-dir>/test/_annotations.coco.json")
-    p.add_argument("--output-dir", type=Path, default=None, help="Default: <run-dir>/rfdetr_run/eval_local")
+    p.add_argument("--run-dir", type=Path, default=_optional_path(RUN_DIR), help="Run folder containing rfdetr_run/ and test/.")
+    p.add_argument("--checkpoint", type=Path, default=_optional_path(CHECKPOINT), help="Default: <run-dir>/rfdetr_run/checkpoint_best_total.pth")
+    p.add_argument("--test-json", type=Path, default=_optional_path(TEST_JSON), help="Default: <run-dir>/test/_annotations.coco.json")
+    p.add_argument("--output-dir", type=Path, default=_optional_path(OUTPUT_DIR), help="Default: <run-dir>/rfdetr_run/eval_local")
     p.add_argument("--model-class", type=str, default="auto", choices=["auto", "RFDETRSmall", "RFDETRMedium", "RFDETRLarge"])
 
     p.add_argument("--score-floor", type=float, default=0.001, help="Prediction floor retained for curves/AP.")
