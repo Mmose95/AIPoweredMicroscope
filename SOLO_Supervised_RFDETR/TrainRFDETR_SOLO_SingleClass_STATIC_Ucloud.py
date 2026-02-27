@@ -255,7 +255,8 @@ def build_fractional_train_split(resolved_root: Path,
     if frac >= 0.999:
         return resolved_root  # use full data
 
-    frac_tag = f"trainfrac_{int(frac*100):02d}"
+    frac_norm = f"{float(frac):.5f}".rstrip("0").rstrip(".")
+    frac_tag = f"trainfrac_{frac_norm.replace('.', 'p')}_seed{int(seed)}"
     dst_root = cache_root / f"{resolved_root.name}_{frac_tag}"
     ok_marker = dst_root / ".FRACTION_OK"
 
@@ -853,6 +854,7 @@ def train_one_run(target_name: str,
                   early_stopping_use_ema: bool,
                   backbone_ckpt: str | None = None,
                   train_fraction: float = 1.0,
+                  fraction_seed: int | None = None,
                   seed: int = 42,
                   num_workers: int = 8,
                   pin_memory: bool = True,
@@ -863,11 +865,12 @@ def train_one_run(target_name: str,
 
     # Optionally reduce the TRAIN split size
     if train_fraction < 0.999:
+        frac_seed = seed if fraction_seed is None else int(fraction_seed)
         data_dir = build_fractional_train_split(
             resolved_root=data_dir,
             frac=train_fraction,
             cache_root=OUTPUT_ROOT,
-            seed=seed,
+            seed=frac_seed,
         )
 
     init_mode = str(init_mode).strip().lower()
@@ -992,6 +995,7 @@ def train_one_run(target_name: str,
     meta = out_dir / "run_meta"
     meta.mkdir(parents=True, exist_ok=True)
     kwargs["train_fraction"] = float(train_fraction)
+    kwargs["fraction_seed"] = (int(seed) if fraction_seed is None else int(fraction_seed))
     kwargs["init_mode"] = init_mode
     kwargs["input_mode"] = INPUT_MODE
     kwargs["use_patch_224"] = USE_PATCH_224
@@ -1082,6 +1086,7 @@ MATRIX_QUICK_DEFAULTS = {
     # Legacy alias kept for backward compatibility; used only if RFDETR_INIT_MODES is unset.
     "RFDETR_SSL_MODES": "none,ssl",
     "RFDETR_TRAIN_FRACTIONS": "1.0",
+    "RFDETR_FRACTION_SEEDS": str(SEED),
     "RFDETR_SEEDS": str(SEED),
     # Shared hyperparameters
     "RFDETR_GRAD_ACCUM_STEPS": "1",
@@ -1124,6 +1129,17 @@ def _cfg_train_fractions_text() -> str:
     if v1:
         return v1
     return _cfg_text("RFDETR_TRAIN_FRACTIONS")
+
+def _cfg_fraction_seeds_text() -> str:
+    # Primary env: RFDETR_FRACTION_SEEDS (CSV).
+    # Compatibility alias: RFDETR_FRACTION_SEED (single value).
+    v = os.getenv("RFDETR_FRACTION_SEEDS", "").strip()
+    if v:
+        return v
+    v1 = os.getenv("RFDETR_FRACTION_SEED", "").strip()
+    if v1:
+        return v1
+    return _cfg_text("RFDETR_FRACTION_SEEDS")
 
 def _csv_tokens(raw: str) -> list[str]:
     return [x.strip() for x in str(raw).split(",") if x.strip()]
@@ -1190,6 +1206,7 @@ def _build_matrix_runtime_config() -> dict:
         "model_cls": _cfg_text("RFDETR_MODEL_CLS"),
         "init_modes": init_modes,
         "train_fractions": _csv_float(_cfg_train_fractions_text()),
+        "fraction_seeds": _csv_int(_cfg_fraction_seeds_text()),
         "seeds": _csv_int(_cfg_text("RFDETR_SEEDS")),
         "grad_accum_steps": int(_cfg_text("RFDETR_GRAD_ACCUM_STEPS")),
         "weight_decay": float(_cfg_text("RFDETR_WEIGHT_DECAY")),
@@ -1264,6 +1281,7 @@ def _build_matrix_space_for_target(target_key: str, matrix_cfg: dict) -> dict:
         "EARLY_STOPPING_MIN_DELTA":   [matrix_cfg["early_stopping_min_delta"]],
         "EARLY_STOPPING_USE_EMA":     [matrix_cfg["early_stopping_use_ema"]],
         "TRAIN_FRACTION":  matrix_cfg["train_fractions"],
+        "FRACTION_SEED":   matrix_cfg["fraction_seeds"],
         "SEED":            matrix_cfg["seeds"],
     }
 
@@ -1278,6 +1296,7 @@ SEARCH_EPI = _build_matrix_space_for_target("epi", MATRIX_CFG)
 _main_print(
     f"[EXPERIMENT] mode=matrix init_modes={','.join(MATRIX_CFG['init_modes'])} "
     f"fractions={','.join(str(x) for x in MATRIX_CFG['train_fractions'])} "
+    f"fraction_seeds={','.join(str(x) for x in MATRIX_CFG['fraction_seeds'])} "
     f"seeds={','.join(str(x) for x in MATRIX_CFG['seeds'])}"
 )
 
@@ -1310,6 +1329,7 @@ def _build_training_plan_rows(jobs: list[dict]) -> list[dict]:
             "ssl_ckpt": (str(ckpt) if ckpt else ""),
             "ssl_ckpt_name": _short_ckpt_name(ckpt),
             "train_fraction": cfg.get("TRAIN_FRACTION"),
+            "fraction_seed": cfg.get("FRACTION_SEED"),
             "seed": cfg.get("SEED"),
             "epochs": cfg.get("EPOCHS"),
             "lr": cfg.get("LR"),
@@ -1347,7 +1367,7 @@ def _print_and_save_training_plan(plan_rows: list[dict], session_root: Path):
         print(f"[PLAN] {target_name}: runs={len(rows)} {counts_txt}")
 
     concise_cols = [
-        "run_idx", "target", "init_mode", "train_fraction", "seed", "epochs", "lr",
+        "run_idx", "target", "init_mode", "train_fraction", "fraction_seed", "seed", "epochs", "lr",
         "batch", "grad_accum_steps", "num_queries", "weight_decay", "dropout",
         "early_stopping", "early_stopping_patience", "early_stopping_min_delta",
         "early_stopping_use_ema", "ssl_ckpt_name",
@@ -1471,6 +1491,7 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
         ssl_ckpt = cfg.get("SSL_CKPT")
         backbone_ckpt = ssl_ckpt if init_mode == "ssl" else None
         train_fraction = float(cfg.get("TRAIN_FRACTION", 1.0))
+        fraction_seed = int(cfg.get("FRACTION_SEED", cfg.get("SEED", SEED)))
         run_seed = int(cfg.get("SEED", SEED))
 
         t0 = time.time()
@@ -1505,6 +1526,7 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
                     early_stopping_use_ema=try_cfg["EARLY_STOPPING_USE_EMA"],
                     backbone_ckpt=backbone_ckpt,
                     train_fraction=train_fraction,
+                    fraction_seed=fraction_seed,
                     seed=run_seed,
                     num_workers=workers_now,
                     pin_memory=pin_now,
@@ -1572,6 +1594,7 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
             "target": target_name,
             **{k: (v if not hasattr(v, "__name__") else v.__name__) for k, v in logged_cfg.items()},
             "seed": run_seed,
+            "fraction_seed": fraction_seed,
             "init_mode": init_mode,
             "uses_ssl_encoder": bool(init_mode == "ssl"),
             "encoder_ckpt": backbone_ckpt,
