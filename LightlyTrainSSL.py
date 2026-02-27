@@ -45,6 +45,12 @@ STRICT_LAP_FACTOR = float(os.getenv("SSL_STRICT_LAP_FACTOR", "0.6"))
 LOOSE_STD_FACTOR  = float(os.getenv("SSL_LOOSE_STD_FACTOR", "0.3"))
 LOOSE_LAP_FACTOR  = float(os.getenv("SSL_LOOSE_LAP_FACTOR", "0.3"))
 
+# Dataset-selection safety knobs
+SSL_FAIL_ON_MISSING_SAMPLES = os.getenv("SSL_FAIL_ON_MISSING_SAMPLES", "0") == "1"
+SSL_MIN_TOTAL_CROPS = int(os.getenv("SSL_MIN_TOTAL_CROPS", "1"))
+SSL_LIGHTLY_OUT_DIR = os.getenv("SSL_LIGHTLY_OUT_DIR", "outputLightly").strip() or "outputLightly"
+SSL_PREVIEW_ONLY = os.getenv("SSL_PREVIEW_ONLY", "0") == "1"
+
 # For resolving image paths from COCO JSONs
 VALID_EXTS = {".tif", ".tiff", ".png", ".jpg", ".jpeg"}
 WINDOWS_PATH_RE = re.compile(r"^[a-zA-Z]:\\")
@@ -84,8 +90,13 @@ SSL_TRAINING_ROOT = Path(
     )
 )
 
-SSL_FIRST_SAMPLE = int(os.getenv("SSL_FIRST_SAMPLE", "1"))
-SSL_LAST_SAMPLE = int(os.getenv("SSL_LAST_SAMPLE", "999"))
+if "SSL_FIRST_SAMPLE" not in os.environ or "SSL_LAST_SAMPLE" not in os.environ:
+    raise RuntimeError(
+        "Set SSL_FIRST_SAMPLE and SSL_LAST_SAMPLE explicitly before running LightlyTrainSSL.py"
+    )
+
+SSL_FIRST_SAMPLE = int(os.environ["SSL_FIRST_SAMPLE"])
+SSL_LAST_SAMPLE = int(os.environ["SSL_LAST_SAMPLE"])
 
 if SSL_FIRST_SAMPLE > SSL_LAST_SAMPLE:
     raise ValueError(
@@ -672,31 +683,104 @@ def ensure_ssl_crops_for_sample(sample_dir: Path, patch_size: int = PATCH_SIZE) 
 # ─────────────────────────────────────────────
 # 4) Build aggregated dataset from all crop folders
 # ─────────────────────────────────────────────
+# Quick source-data audit for reproducibility sanity checks.
+def summarize_ssl_source_range(ssl_root: Path, first_sample: int, last_sample: int) -> dict:
+    exts = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp", ".webp"}
+    missing_samples = []
+    existing_samples = 0
+    total_full_images = 0
+    per_sample_full_images = {}
+
+    for i in range(first_sample, last_sample + 1):
+        sample_dir = ssl_root / f"Sample {i}"
+        if not sample_dir.is_dir():
+            missing_samples.append(i)
+            continue
+        existing_samples += 1
+        n_full = sum(
+            1
+            for p in sample_dir.iterdir()
+            if p.is_file() and p.suffix.lower() in exts
+        )
+        per_sample_full_images[str(i)] = int(n_full)
+        total_full_images += int(n_full)
+
+    summary = {
+        "ssl_root": str(ssl_root),
+        "first_sample": int(first_sample),
+        "last_sample": int(last_sample),
+        "existing_samples": int(existing_samples),
+        "missing_samples": missing_samples,
+        "total_full_images": int(total_full_images),
+        "per_sample_full_images": per_sample_full_images,
+    }
+    print("[SSL SOURCE]", json.dumps(summary, indent=2))
+    return summary
+
+
 def build_ssl_selection_dataset(
     ssl_root: Path,
     first_sample: int,
     last_sample: int,
 ) -> Path:
     """
-    For each 'Sample XX' in [first_sample, last_sample]:
-      - ensure we have 224×224 crops in 'SSLCrops (224x224) for Sample XX'
-      - then symlink/copy them into a flat temp dir used as Lightly 'data' root.
-
-    If the temp dir already exists, we simply reuse it to avoid
-    expensive deletion/rebuild on UCloud.
+    Build a flat crop dataset used as Lightly `data` root.
+    The output directory name is config-hashed so that changes in sample range
+    or crop/filter knobs cannot silently reuse stale data.
     """
-    tmp_root = ssl_root.parent / "SSL_LightlySelection_224crops"
+    calib_sha1 = _sha1_file(CALIB_STATS_JSON) if CALIB_STATS_JSON.exists() else None
+    selection_cfg = {
+        "ssl_root": str(ssl_root.resolve()),
+        "first_sample": int(first_sample),
+        "last_sample": int(last_sample),
+        "patch_size": int(PATCH_SIZE),
+        "patch_stride_factor": float(PATCH_STRIDE_FACTOR),
+        "extra_random_patches": int(EXTRA_RANDOM_PATCHES),
+        "borderline_keep_prob": float(BORDERLINE_KEEP_PROB),
+        "mean_margin_strict": float(MEAN_MARGIN_STRICT),
+        "mean_margin_loose": float(MEAN_MARGIN_LOOSE),
+        "strict_std_factor": float(STRICT_STD_FACTOR),
+        "strict_lap_factor": float(STRICT_LAP_FACTOR),
+        "loose_std_factor": float(LOOSE_STD_FACTOR),
+        "loose_lap_factor": float(LOOSE_LAP_FACTOR),
+        "calib_stats_sha1": calib_sha1,
+    }
+    cfg_raw = json.dumps(selection_cfg, sort_keys=True)
+    cfg_hash = hashlib.sha1(cfg_raw.encode("utf-8")).hexdigest()[:12]
 
-    if tmp_root.exists():
-        print(f"[build_ssl_selection_dataset] Reusing existing temp dir: {tmp_root}")
-        return tmp_root
-
-    print(f"[build_ssl_selection_dataset] Creating new temp dir: {tmp_root}")
-    tmp_root.mkdir(parents=True, exist_ok=True)
+    tmp_root = ssl_root.parent / f"SSL_LightlySelection_224crops_{cfg_hash}"
+    manifest_path = tmp_root / "selection_manifest.json"
+    ok_marker = tmp_root / ".SELECTION_OK"
 
     exts = {".png", ".jpg", ".jpeg"}
+
+    if tmp_root.exists() and ok_marker.exists() and manifest_path.exists():
+        total_existing = sum(
+            1
+            for p in tmp_root.rglob("*")
+            if p.is_file() and p.suffix.lower() in exts
+        )
+        print(
+            f"[build_ssl_selection_dataset] Reusing cached selection dataset: {tmp_root} "
+            f"(crops={total_existing}, hash={cfg_hash})"
+        )
+        if total_existing < SSL_MIN_TOTAL_CROPS:
+            raise RuntimeError(
+                f"Cached SSL selection dataset has too few crops ({total_existing}) < "
+                f"SSL_MIN_TOTAL_CROPS={SSL_MIN_TOTAL_CROPS}. Remove {tmp_root} and rerun."
+            )
+        return tmp_root
+
+    if tmp_root.exists():
+        print(f"[build_ssl_selection_dataset] Found incomplete/legacy dataset, rebuilding: {tmp_root}")
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+    print(f"[build_ssl_selection_dataset] Creating new temp dir: {tmp_root} (hash={cfg_hash})")
+    tmp_root.mkdir(parents=True, exist_ok=True)
+
     total = 0
     missing_samples = []
+    per_sample_crops = {}
 
     for i in range(first_sample, last_sample + 1):
         sample_dir = ssl_root / f"Sample {i}"
@@ -704,8 +788,8 @@ def build_ssl_selection_dataset(
             missing_samples.append(i)
             continue
 
-        # Create/use crop folder for this sample
         crops_dir = ensure_ssl_crops_for_sample(sample_dir, patch_size=PATCH_SIZE)
+        sample_count = 0
 
         for p in crops_dir.rglob("*"):
             if not p.is_file() or p.suffix.lower() not in exts:
@@ -717,16 +801,39 @@ def build_ssl_selection_dataset(
             except OSError:
                 shutil.copy2(p, dst)
             total += 1
+            sample_count += 1
+
+        per_sample_crops[str(i)] = sample_count
 
     if missing_samples:
-        print("[build_ssl_selection_dataset] Missing Sample folders (ignored):", missing_samples)
+        msg = f"[build_ssl_selection_dataset] Missing Sample folders: {missing_samples}"
+        if SSL_FAIL_ON_MISSING_SAMPLES:
+            raise RuntimeError(msg)
+        print(msg + " (ignored)")
 
     if total == 0:
         raise RuntimeError(
-            f"No 224x224 crops found/created in {ssl_root} for samples {first_sample}–{last_sample}"
+            f"No 224x224 crops found/created in {ssl_root} for samples {first_sample}-{last_sample}"
+        )
+    if total < SSL_MIN_TOTAL_CROPS:
+        raise RuntimeError(
+            f"Total SSL crops too low ({total}) < SSL_MIN_TOTAL_CROPS={SSL_MIN_TOTAL_CROPS}. "
+            f"Check sample range and crop generation."
         )
 
+    manifest = {
+        "selection_cfg": selection_cfg,
+        "selection_cfg_hash": cfg_hash,
+        "tmp_root": str(tmp_root),
+        "total_crops": int(total),
+        "missing_samples": missing_samples,
+        "per_sample_crops": per_sample_crops,
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    ok_marker.write_text("ok", encoding="utf-8")
+
     print(f"[build_ssl_selection_dataset] Collected {total} crops into {tmp_root}")
+    print(f"[build_ssl_selection_dataset] Wrote manifest: {manifest_path}")
     return tmp_root
 
 
@@ -736,15 +843,34 @@ from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 # 5) Main: run Lightly DINOv2 SSL on the crops
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
+    summarize_ssl_source_range(
+        SSL_TRAINING_ROOT,
+        SSL_FIRST_SAMPLE,
+        SSL_LAST_SAMPLE,
+    )
+
     # Build patch-only selection dataset
     data_dir = build_ssl_selection_dataset(
         SSL_TRAINING_ROOT,
         SSL_FIRST_SAMPLE,
         SSL_LAST_SAMPLE,
     )
+    n_ssl_crops = sum(
+        1
+        for p in Path(data_dir).rglob("*")
+        if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg"}
+    )
+    print(f"[SSL DATA] data_dir={data_dir} crops={n_ssl_crops}")
+    print(f"[SSL DATA] fail_on_missing_samples={SSL_FAIL_ON_MISSING_SAMPLES} min_total_crops={SSL_MIN_TOTAL_CROPS}")
+    print(f"[SSL DATA] preview_only={SSL_PREVIEW_ONLY}")
+
+    if SSL_PREVIEW_ONLY:
+        print("[SSL PREVIEW] Preview completed; exiting before lightly_train.")
+        raise SystemExit(0)
+
     lightly_train(
         overwrite=True,
-        out="outputLightly",
+        out=SSL_LIGHTLY_OUT_DIR,
         data=str(data_dir),
 
         model="dinov2/vitb14",
