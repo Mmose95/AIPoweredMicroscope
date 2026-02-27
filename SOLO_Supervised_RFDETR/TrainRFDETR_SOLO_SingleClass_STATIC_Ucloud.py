@@ -605,6 +605,12 @@ def get_or_build_aug_cache(target_name: str, dataset_dir: Path, root_out: Path, 
 _SSL_BLOCK_RE = re.compile(r"^blocks\.(\d+)\.(\d+)\.(.+)$")
 _SSL_BLOCK_RE_SINGLE = re.compile(r"^blocks\.(\d+)\.(.+)$")
 _SSL_KNOWN_STRIP_PREFIXES = (
+    # Common SSL wrapper prefixes (Lightning/custom wrappers).
+    "teacher_embedding_model.",
+    "student_embedding_model.",
+    "embedding_model.",
+    "wrapped_model.",
+    "_model.",
     "module.",
     "state_dict.",
     "model.",
@@ -1070,8 +1076,8 @@ MATRIX_QUICK_DEFAULTS = {
     # Class-specific defaults
     "RFDETR_EPI_LR": "5e-5",
     "RFDETR_LEU_LR": "8e-5",
-    "RFDETR_EPI_SSL_CKPT": "epoch_epoch=029.ckpt",
-    "RFDETR_LEU_SSL_CKPT": "epoch_epoch=069.ckpt",
+    "RFDETR_EPI_SSL_CKPT": "",
+    "RFDETR_LEU_SSL_CKPT": "",
 }
 
 def _matrix_dynamic_defaults() -> dict:
