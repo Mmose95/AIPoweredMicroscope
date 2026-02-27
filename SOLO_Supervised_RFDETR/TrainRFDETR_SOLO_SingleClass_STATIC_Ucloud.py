@@ -838,6 +838,7 @@ def train_one_run(target_name: str,
                   dataset_dir: Path,
                   out_dir: Path,
                   model_cls,
+                  init_mode: str,
                   epochs: int,
                   lr: float,
                   batch_size: int,
@@ -868,6 +869,15 @@ def train_one_run(target_name: str,
             cache_root=OUTPUT_ROOT,
             seed=seed,
         )
+
+    init_mode = str(init_mode).strip().lower()
+    if init_mode not in ("default", "scratch", "ssl"):
+        raise ValueError(f"Unsupported INIT_MODE={init_mode!r}. Use one of: default, scratch, ssl.")
+
+    if init_mode == "ssl" and backbone_ckpt is None:
+        raise ValueError("INIT_MODE='ssl' requires a non-empty SSL checkpoint path.")
+    if init_mode != "ssl":
+        backbone_ckpt = None
 
     if backbone_ckpt is not None:
         backbone_ckpt = str(backbone_ckpt).strip()
@@ -909,9 +919,11 @@ def train_one_run(target_name: str,
         resolution = PATCH_SIZE
     else:
         resolution = FULL_RESOLUTION
-    # Keep baseline behavior for non-SSL runs, but explicitly disable default
-    # detector pretrain loading for SSL-backbone runs to avoid silent mixing.
-    if backbone_ckpt is not None:
+    # Initialization modes:
+    # - default: RF-DETR default pretrained init.
+    # - scratch: no detector pretrain.
+    # - ssl: no detector pretrain + explicit SSL backbone load below.
+    if init_mode in ("scratch", "ssl"):
         try:
             model = model_cls(pretrain_weights=None)
         except TypeError:
@@ -980,6 +992,7 @@ def train_one_run(target_name: str,
     meta = out_dir / "run_meta"
     meta.mkdir(parents=True, exist_ok=True)
     kwargs["train_fraction"] = float(train_fraction)
+    kwargs["init_mode"] = init_mode
     kwargs["input_mode"] = INPUT_MODE
     kwargs["use_patch_224"] = USE_PATCH_224
     kwargs["patch_size"] = PATCH_SIZE if USE_PATCH_224 else None
@@ -1061,7 +1074,13 @@ MATRIX_QUICK_DEFAULTS = {
     "RFDETR_MODEL_CLS": "RFDETRLarge",
     "RFDETR_EPI_EPOCHS": "50",
     "RFDETR_LEU_EPOCHS": "70",
-    "RFDETR_SSL_MODES": "none,ssl",  # options: none, ssl
+    # Init regimes:
+    # - default: RF-DETR default pretrained weights
+    # - scratch: no pretraining
+    # - ssl: no detector pretrain + load SSL backbone checkpoint
+    "RFDETR_INIT_MODES": "default,scratch,ssl",
+    # Legacy alias kept for backward compatibility; used only if RFDETR_INIT_MODES is unset.
+    "RFDETR_SSL_MODES": "none,ssl",
     "RFDETR_TRAIN_FRACTIONS": "1.0",
     "RFDETR_SEEDS": str(SEED),
     # Shared hyperparameters
@@ -1126,27 +1145,39 @@ def _unique_keep_order(seq):
             seen.add(x)
     return out
 
-def _parse_ssl_modes(raw: str) -> list[str]:
+def _parse_init_modes(raw: str) -> list[str]:
     norm = []
     for t in _csv_tokens(raw):
         x = t.lower()
-        if x in ("none", "supervised", "baseline", "no_ssl"):
-            norm.append("none")
+        if x in ("default", "none", "supervised", "baseline", "no_ssl", "rfdetr", "imagenet"):
+            norm.append("default")
+        elif x in ("scratch", "raw", "from_scratch", "no_pretrain"):
+            norm.append("scratch")
         elif x in ("ssl", "pretrained", "with_ssl"):
             norm.append("ssl")
         else:
             raise ValueError(
-                f"Unsupported SSL mode {t!r}. Use any of: none, ssl."
+                f"Unsupported init mode {t!r}. Use any of: default, scratch, ssl."
             )
     norm = _unique_keep_order(norm)
     if not norm:
-        raise ValueError("RFDETR_SSL_MODES must not be empty.")
+        raise ValueError("RFDETR_INIT_MODES must not be empty.")
     return norm
 
 def _build_matrix_runtime_config() -> dict:
+    init_modes_raw = os.getenv("RFDETR_INIT_MODES", "").strip()
+    legacy_modes_raw = os.getenv("RFDETR_SSL_MODES", "").strip()
+    if init_modes_raw:
+        init_modes = _parse_init_modes(init_modes_raw)
+    elif legacy_modes_raw:
+        # Backward-compatible fallback for older env configs.
+        init_modes = _parse_init_modes(legacy_modes_raw)
+    else:
+        init_modes = _parse_init_modes(_cfg_text("RFDETR_INIT_MODES"))
+
     cfg = {
         "model_cls": _cfg_text("RFDETR_MODEL_CLS"),
-        "ssl_modes": _parse_ssl_modes(_cfg_text("RFDETR_SSL_MODES")),
+        "init_modes": init_modes,
         "train_fractions": _csv_float(_cfg_text("RFDETR_TRAIN_FRACTIONS")),
         "seeds": _csv_int(_cfg_text("RFDETR_SEEDS")),
         "grad_accum_steps": int(_cfg_text("RFDETR_GRAD_ACCUM_STEPS")),
@@ -1197,19 +1228,17 @@ def _build_matrix_space_for_target(target_key: str, matrix_cfg: dict) -> dict:
         raise ValueError(f"Unsupported target_key={target_key!r}")
 
     tcfg = matrix_cfg[target_key]
-    encoder_ckpts = []
-    if "none" in matrix_cfg["ssl_modes"]:
-        encoder_ckpts.append(None)
-    if "ssl" in matrix_cfg["ssl_modes"]:
+    if "ssl" in matrix_cfg["init_modes"]:
         if not tcfg["ssl_ckpt"]:
             raise ValueError(
-                f"SSL mode is enabled but no checkpoint path provided for {target_key}. "
+                f"INIT_MODE includes 'ssl' but no checkpoint path provided for {target_key}. "
                 f"Set RFDETR_{target_key.upper()}_SSL_CKPT."
             )
-        encoder_ckpts.append(tcfg["ssl_ckpt"])
 
     return {
         "MODEL_CLS":       [matrix_cfg["model_cls"]],
+        "INIT_MODE":       matrix_cfg["init_modes"],
+        "SSL_CKPT":        [tcfg["ssl_ckpt"]],
         "RESOLUTION":      [SEARCH_RESOLUTION],
         "EPOCHS":          [tcfg["epochs"]],
         "LR":              [tcfg["lr"]],
@@ -1223,7 +1252,6 @@ def _build_matrix_space_for_target(target_key: str, matrix_cfg: dict) -> dict:
         "EARLY_STOPPING_PATIENCE":    [matrix_cfg["early_stopping_patience"]],
         "EARLY_STOPPING_MIN_DELTA":   [matrix_cfg["early_stopping_min_delta"]],
         "EARLY_STOPPING_USE_EMA":     [matrix_cfg["early_stopping_use_ema"]],
-        "ENCODER_CKPT":    encoder_ckpts,
         "TRAIN_FRACTION":  matrix_cfg["train_fractions"],
         "SEED":            matrix_cfg["seeds"],
     }
@@ -1237,7 +1265,7 @@ MATRIX_CFG = _build_matrix_runtime_config()
 SEARCH_LEUCO = _build_matrix_space_for_target("leu", MATRIX_CFG)
 SEARCH_EPI = _build_matrix_space_for_target("epi", MATRIX_CFG)
 _main_print(
-    f"[EXPERIMENT] mode=matrix ssl_modes={','.join(MATRIX_CFG['ssl_modes'])} "
+    f"[EXPERIMENT] mode=matrix init_modes={','.join(MATRIX_CFG['init_modes'])} "
     f"fractions={','.join(str(x) for x in MATRIX_CFG['train_fractions'])} "
     f"seeds={','.join(str(x) for x in MATRIX_CFG['seeds'])}"
 )
@@ -1261,12 +1289,13 @@ def _build_training_plan_rows(jobs: list[dict]) -> list[dict]:
     rows = []
     for run_idx, job in enumerate(jobs, start=1):
         cfg = job["cfg"]
-        ckpt = cfg.get("ENCODER_CKPT")
+        init_mode = str(cfg.get("INIT_MODE", "default"))
+        ckpt = cfg.get("SSL_CKPT") if init_mode == "ssl" else None
         rows.append({
             "run_idx": run_idx,
             "target": job["target_name"],
             "model": cfg.get("MODEL_CLS"),
-            "ssl_mode": ("ssl" if ckpt else "none"),
+            "init_mode": init_mode,
             "ssl_ckpt": (str(ckpt) if ckpt else ""),
             "ssl_ckpt_name": _short_ckpt_name(ckpt),
             "train_fraction": cfg.get("TRAIN_FRACTION"),
@@ -1300,12 +1329,14 @@ def _print_and_save_training_plan(plan_rows: list[dict], session_root: Path):
     for r in plan_rows:
         by_target[r["target"]].append(r)
     for target_name, rows in by_target.items():
-        n_ssl = sum(1 for r in rows if r["ssl_mode"] == "ssl")
-        n_none = sum(1 for r in rows if r["ssl_mode"] == "none")
-        print(f"[PLAN] {target_name}: runs={len(rows)} ssl={n_ssl} no_ssl={n_none}")
+        counts = defaultdict(int)
+        for r in rows:
+            counts[str(r.get("init_mode", "default"))] += 1
+        counts_txt = " ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+        print(f"[PLAN] {target_name}: runs={len(rows)} {counts_txt}")
 
     concise_cols = [
-        "run_idx", "target", "ssl_mode", "train_fraction", "seed", "epochs", "lr",
+        "run_idx", "target", "init_mode", "train_fraction", "seed", "epochs", "lr",
         "batch", "grad_accum_steps", "num_queries", "weight_decay", "dropout",
         "early_stopping", "early_stopping_patience", "early_stopping_min_delta",
         "early_stopping_use_ema", "ssl_ckpt_name",
@@ -1425,7 +1456,9 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
         run_dir = out_root / f"HPO_Config_{run_idx:03d}"
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        backbone_ckpt = cfg.get("ENCODER_CKPT")
+        init_mode = str(cfg.get("INIT_MODE", "default")).strip().lower()
+        ssl_ckpt = cfg.get("SSL_CKPT")
+        backbone_ckpt = ssl_ckpt if init_mode == "ssl" else None
         train_fraction = float(cfg.get("TRAIN_FRACTION", 1.0))
         run_seed = int(cfg.get("SEED", SEED))
 
@@ -1446,6 +1479,7 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
                     dataset_dir=Path(dataset_dir),
                     out_dir=run_dir,
                     model_cls=model_cls,
+                    init_mode=init_mode,
                     epochs=try_cfg["EPOCHS"],
                     lr=try_cfg["LR"],
                     batch_size=try_cfg["BATCH"],
@@ -1523,7 +1557,8 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
             "target": target_name,
             **{k: (v if not hasattr(v, "__name__") else v.__name__) for k, v in try_cfg.items()},
             "seed": run_seed,
-            "uses_ssl_encoder": bool(backbone_ckpt),
+            "init_mode": init_mode,
+            "uses_ssl_encoder": bool(init_mode == "ssl"),
             "encoder_ckpt": backbone_ckpt,
             "val_AP50": best.get("map50"),
             "val_mAP5095": best.get("map5095"),
