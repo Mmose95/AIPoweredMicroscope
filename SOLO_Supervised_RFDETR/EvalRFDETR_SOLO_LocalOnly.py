@@ -28,6 +28,7 @@ import csv
 import json
 import random
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -667,6 +668,7 @@ def try_plot_curves(output_dir: Path, thr_rows: Sequence[Dict[str, Any]], pr_row
 
 def run_local_eval(cfg: LocalEvalConfig) -> None:
     ensure_deps()
+    eval_start_t = time.perf_counter()
 
     if not cfg.checkpoint.exists():
         raise FileNotFoundError(f"checkpoint not found: {cfg.checkpoint}")
@@ -712,6 +714,8 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
     preds_coco: List[Dict[str, Any]] = []
     samples: List[Dict[str, Any]] = []
     missing: List[Dict[str, Any]] = []
+    inference_seconds_total = 0.0
+    inference_images_timed = 0
 
     for img_id in iterator:
         info = coco.loadImgs([img_id])[0]
@@ -725,7 +729,10 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
             raise
 
         image = Image.open(img_path).convert("RGB")
+        infer_t0 = time.perf_counter()
         pred_boxes, pred_scores, pred_labels = predict_one_image(model, image, cfg.score_floor)
+        inference_seconds_total += (time.perf_counter() - infer_t0)
+        inference_images_timed += 1
         pred_cat_ids = to_coco_cat_ids(pred_labels, cat_id_to_name, n_classes, idx_to_id)
 
         keep_known = np.array([int(cid) in id_to_idx for cid in pred_cat_ids], dtype=bool)
@@ -979,11 +986,24 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
         "roc_auc": roc_auc,
         "roc_note": "ROC/PR are computed from IoU-matched detection samples.",
         "per_image_object_counts_csv": str(cfg.output_dir / "per_image_object_counts.csv"),
+        "timing": {
+            "inference_seconds_total": float(inference_seconds_total),
+            "inference_images_timed": int(inference_images_timed),
+            "inference_avg_ms_per_image": float((inference_seconds_total / inference_images_timed) * 1000.0) if inference_images_timed > 0 else None,
+            "inference_images_per_second": float(inference_images_timed / inference_seconds_total) if inference_seconds_total > 0 else None,
+            "evaluation_wall_clock_seconds": float(time.perf_counter() - eval_start_t),
+        },
     }
     json_dump(cfg.output_dir / "eval_summary.json", summary)
 
     print("\n[LOCAL EVAL] Done")
     print(f"[LOCAL EVAL] AP@50:95={coco_std_summary['AP@50:95']:.4f} AP@50={coco_std_summary['AP@50']:.4f} AP@75={coco_std_summary['AP@75']:.4f}")
+    if inference_images_timed > 0 and inference_seconds_total > 0:
+        print(
+            f"[LOCAL EVAL] Inference: {inference_seconds_total:.3f}s total over {inference_images_timed} images "
+            f"({(inference_seconds_total / inference_images_timed) * 1000.0:.2f} ms/img, "
+            f"{(inference_images_timed / inference_seconds_total):.2f} img/s)"
+        )
     if best_f1_row is not None:
         print(f"[LOCAL EVAL] Best F1={float(best_f1_row['f1']):.4f} at threshold={float(best_f1_row['threshold']):.4f}")
     print(f"[LOCAL EVAL] Summary -> {(cfg.output_dir / 'eval_summary.json').resolve()}")
