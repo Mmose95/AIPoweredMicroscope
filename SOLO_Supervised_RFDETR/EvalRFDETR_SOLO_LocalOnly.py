@@ -575,6 +575,24 @@ def draw_overlay(
         draw.rectangle([x1, y1, x2, y2], outline=(255, 0, 0), width=2)
         draw.text((x1 + 2, y1 + 2), f"{float(s):.2f} {n}", fill=(255, 0, 0))
 
+    # Top-left legend
+    legend_x = 8
+    legend_y = 8
+    row_h = 16
+    pad = 6
+    box_w = 180
+    box_h = pad * 2 + row_h * 2
+    draw.rectangle(
+        [legend_x, legend_y, legend_x + box_w, legend_y + box_h],
+        fill=(255, 255, 255),
+        outline=(0, 0, 0),
+        width=1,
+    )
+    y1 = legend_y + pad
+    y2 = y1 + row_h
+    draw.text((legend_x + 8, y1), "Green: Ground Truth", fill=(0, 120, 0))
+    draw.text((legend_x + 8, y2), "Red: Prediction", fill=(180, 0, 0))
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     img.save(out_path)
 
@@ -673,6 +691,16 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
     img_ids = coco.getImgIds()
     if cfg.max_images is not None:
         img_ids = img_ids[: cfg.max_images]
+    img_id_set = set(int(i) for i in img_ids)
+    total_gt_objects_in_requested_testset = int(
+        sum(
+            1
+            for ann in coco.dataset.get("annotations", [])
+            if int(ann.get("image_id", -1)) in img_id_set
+            and int(ann.get("iscrowd", 0)) == 0
+            and int(ann.get("category_id", -1)) in id_to_idx
+        )
+    )
 
     try:
         from tqdm import tqdm
@@ -879,10 +907,11 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
         per_image_count_rows,
     )
 
-    if cfg.num_overlays > 0:
-        eligible = [s for s in samples if len(s["gt_boxes"]) > 0 or np.any(s["pred_scores"] >= cfg.score_threshold)]
-        random.shuffle(eligible)
-        chosen = eligible[: cfg.num_overlays]
+    if cfg.num_overlays != 0:
+        chosen = list(samples)
+        random.shuffle(chosen)
+        if cfg.num_overlays > 0:
+            chosen = chosen[: cfg.num_overlays]
         used_overlay_names: set[str] = set()
         for i, s in enumerate(chosen, start=1):
             keep = s["pred_scores"] >= cfg.score_threshold
@@ -936,6 +965,8 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
         "images_total_requested": len(img_ids),
         "images_processed": len(processed_ids),
         "images_missing": len(missing),
+        "total_gt_objects_in_requested_testset": total_gt_objects_in_requested_testset,
+        "total_gt_objects_in_processed_images": int(sum(len(s["gt_boxes"]) for s in samples)),
         "missing_images": missing,
         "score_floor": cfg.score_floor,
         "score_threshold": cfg.score_threshold,
@@ -1025,7 +1056,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--threshold-points", type=int, default=51)
 
     p.add_argument("--max-images", type=int, default=None)
-    p.add_argument("--num-overlays", type=int, default=8)
+    p.add_argument("--num-overlays", type=int, default=-1, help="Number of overlays; -1 means all, 0 disables overlays.")
     p.add_argument("--image-max-side", type=int, default=1600)
     p.add_argument("--seed", type=int, default=42)
 
