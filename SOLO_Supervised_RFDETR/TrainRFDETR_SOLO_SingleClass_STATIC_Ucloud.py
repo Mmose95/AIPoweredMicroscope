@@ -1070,8 +1070,8 @@ MATRIX_QUICK_DEFAULTS = {
     # Class-specific defaults
     "RFDETR_EPI_LR": "5e-5",
     "RFDETR_LEU_LR": "8e-5",
-    "RFDETR_EPI_SSL_CKPT": "",
-    "RFDETR_LEU_SSL_CKPT": "",
+    "RFDETR_EPI_SSL_CKPT": "epoch_epoch=029.ckpt",
+    "RFDETR_LEU_SSL_CKPT": "epoch_epoch=069.ckpt",
 }
 
 def _matrix_dynamic_defaults() -> dict:
