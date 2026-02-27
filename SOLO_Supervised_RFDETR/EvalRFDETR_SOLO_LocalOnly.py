@@ -37,10 +37,13 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 # ============================================================================
 # Set explicit local paths here.
 # You can also override each one from CLI:
-#   --checkpoint ... --test-json ... --output-dir ...
+#   --checkpoint ... --test-json ... --output-dir ... --images-root ...
 CHECKPOINT = r"D:\PHD\Results\Quality Assessment\Epi+Leu for ESCMID Conference\first full Epi model no SSL\HPO_Config_003/checkpoint_best_total.pth"
-TEST_JSON = r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\SOLO_Supervised_RFDETR\Stat_Dataset\QA-2025v2_SquamousEpithelialCell_OVR_20260217-093944\test/_annotations.coco"
+TEST_JSON = r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\SOLO_Supervised_RFDETR\Stat_Dataset\QA-2025v2_SquamousEpithelialCell_OVR_20260217-093944\test/_annotations.coco.json"
 OUTPUT_DIR = r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\EvaluationOutput"
+# Prefix applied to relative file_name entries from COCO JSON, e.g.
+# "Sample 15/Patches for Sample 15/....tif"
+IMAGE_ROOT = r"D:\PHD\PhdData\CellScanData\Zoom10x - Quality Assessment_Cleaned"
 
 
 def _optional_path(raw: str) -> Optional[Path]:
@@ -86,6 +89,7 @@ class LocalEvalConfig:
     checkpoint: Path
     test_json: Path
     output_dir: Path
+    images_root: Optional[Path]
     model_class: str
     score_floor: float
     score_threshold: float
@@ -170,7 +174,7 @@ def load_model(model_class: str, checkpoint: Path):
     return model
 
 
-def resolve_image_path_local(file_name: str, test_json: Path) -> Path:
+def resolve_image_path_local(file_name: str, test_json: Path, images_root: Optional[Path]) -> Path:
     candidates: List[Path] = []
     raw = file_name or ""
     p_raw = Path(raw)
@@ -180,6 +184,9 @@ def resolve_image_path_local(file_name: str, test_json: Path) -> Path:
     rel = raw.replace("\\", "/")
     candidates.append(test_json.parent / rel)
     candidates.append(test_json.parent / Path(rel).name)
+    if images_root is not None and rel:
+        candidates.append(images_root / rel)
+        candidates.append(images_root / Path(rel).name)
 
     seen: set[str] = set()
     for cand in candidates:
@@ -630,7 +637,7 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
         info = coco.loadImgs([img_id])[0]
         file_name = str(info.get("file_name", ""))
         try:
-            img_path = resolve_image_path_local(file_name, cfg.test_json)
+            img_path = resolve_image_path_local(file_name, cfg.test_json, cfg.images_root)
         except FileNotFoundError as exc:
             if cfg.skip_missing_images:
                 missing.append({"image_id": int(img_id), "file_name": file_name, "error": str(exc)})
@@ -839,6 +846,7 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
         "checkpoint": str(cfg.checkpoint),
         "test_json": str(cfg.test_json),
         "output_dir": str(cfg.output_dir),
+        "images_root": str(cfg.images_root) if cfg.images_root is not None else None,
         "model_class": cfg.model_class,
         "images_total_requested": len(img_ids),
         "images_processed": len(processed_ids),
@@ -875,6 +883,7 @@ def build_config(args: argparse.Namespace) -> LocalEvalConfig:
     checkpoint = args.checkpoint.resolve()
     test_json = args.test_json.resolve()
     output_dir = args.output_dir.resolve()
+    images_root = args.images_root.resolve() if args.images_root is not None else None
     model_meta_root = checkpoint.parent.parent if checkpoint.parent.name.lower() == "rfdetr_run" else checkpoint.parent
 
     model_class = infer_model_class(model_meta_root, checkpoint) if args.model_class == "auto" else args.model_class
@@ -890,6 +899,7 @@ def build_config(args: argparse.Namespace) -> LocalEvalConfig:
         checkpoint=checkpoint,
         test_json=test_json,
         output_dir=output_dir,
+        images_root=images_root,
         model_class=model_class,
         score_floor=float(args.score_floor),
         score_threshold=float(args.score_threshold),
@@ -913,6 +923,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--checkpoint", type=Path, default=_optional_path(CHECKPOINT), help="Path to model checkpoint file.")
     p.add_argument("--test-json", type=Path, default=_optional_path(TEST_JSON), help="Path to COCO test annotations JSON.")
     p.add_argument("--output-dir", type=Path, default=_optional_path(OUTPUT_DIR), help="Directory to write evaluation outputs.")
+    p.add_argument("--images-root", type=Path, default=_optional_path(IMAGE_ROOT), help="Prefix root for relative image file_name entries.")
     p.add_argument("--model-class", type=str, default="auto", choices=["auto", "RFDETRSmall", "RFDETRMedium", "RFDETRLarge"])
 
     p.add_argument("--score-floor", type=float, default=0.001, help="Prediction floor retained for curves/AP.")
