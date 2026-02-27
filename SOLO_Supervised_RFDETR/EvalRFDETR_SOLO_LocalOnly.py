@@ -27,6 +27,7 @@ import argparse
 import csv
 import json
 import random
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -91,6 +92,7 @@ class LocalEvalConfig:
     output_dir: Path
     images_root: Optional[Path]
     model_class: str
+    model_resolution: Optional[int]
     score_floor: float
     score_threshold: float
     confmat_iou: float
@@ -136,8 +138,13 @@ def write_csv(path: Path, fieldnames: Sequence[str], rows: Sequence[Dict[str, An
 
 
 def infer_model_class(model_meta_root: Path, checkpoint: Path) -> str:
-    meta_model = model_meta_root / "rfdetr_run" / "run_meta" / "model_architecture.json"
-    if meta_model.exists():
+    meta_candidates = [
+        model_meta_root / "run_meta" / "model_architecture.json",
+        model_meta_root / "rfdetr_run" / "run_meta" / "model_architecture.json",
+    ]
+    for meta_model in meta_candidates:
+        if not meta_model.exists():
+            continue
         try:
             js = json.loads(meta_model.read_text(encoding="utf-8"))
             name = str(js.get("model_name", "")).strip()
@@ -154,7 +161,40 @@ def infer_model_class(model_meta_root: Path, checkpoint: Path) -> str:
     return "RFDETRLarge"
 
 
-def load_model(model_class: str, checkpoint: Path):
+def infer_model_resolution(checkpoint: Path) -> Optional[int]:
+    # Prefer lightweight sidecar metadata from training.
+    sidecars = [
+        checkpoint.parent / "run_meta" / "train_kwargs.json",
+        checkpoint.parent.parent / "run_meta" / "train_kwargs.json",
+        checkpoint.parent / "rfdetr_run" / "run_meta" / "train_kwargs.json",
+    ]
+    for p in sidecars:
+        if not p.exists():
+            continue
+        try:
+            js = json.loads(p.read_text(encoding="utf-8"))
+            val = js.get("resolution")
+            if val is not None:
+                return int(val)
+        except Exception:
+            pass
+
+    # Fallback: inspect checkpoint args.
+    try:
+        ckpt = torch.load(str(checkpoint), map_location="cpu", weights_only=False)  # type: ignore[union-attr]
+        args = ckpt.get("args", None)
+        if args is None:
+            return None
+        if isinstance(args, dict):
+            val = args.get("resolution")
+            return int(val) if val is not None else None
+        val = getattr(args, "resolution", None)
+        return int(val) if val is not None else None
+    except Exception:
+        return None
+
+
+def load_model(model_class: str, checkpoint: Path, resolution: Optional[int]):
     from rfdetr import RFDETRSmall, RFDETRMedium, RFDETRLarge
 
     name_to_cls = {
@@ -165,7 +205,10 @@ def load_model(model_class: str, checkpoint: Path):
     if model_class not in name_to_cls:
         raise ValueError(f"Unsupported model_class={model_class}")
 
-    model = name_to_cls[model_class](pretrain_weights=str(checkpoint))
+    kwargs: Dict[str, Any] = {"pretrain_weights": str(checkpoint)}
+    if resolution is not None:
+        kwargs["resolution"] = int(resolution)
+    model = name_to_cls[model_class](**kwargs)
     if hasattr(model, "optimize_for_inference"):
         try:
             model.optimize_for_inference()
@@ -212,11 +255,16 @@ def predict_one_image(model: Any, img_pil: Image.Image, score_floor: float):
         fn = getattr(model, name, None)
         if callable(fn):
             for inp in (img_pil, arr, ten):
-                try:
-                    out = fn(inp)
+                for kw in ({"threshold": float(score_floor)}, {}):
+                    try:
+                        out = fn(inp, **kw)
+                        break
+                    except TypeError:
+                        out = None
+                    except Exception:
+                        out = None
+                if out is not None:
                     break
-                except Exception:
-                    out = None
             if out is not None:
                 break
 
@@ -616,7 +664,11 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
     n_classes = len(id_to_idx)
     labels = [cat_id_to_name[idx_to_id[i]] for i in range(n_classes)]
 
-    model = load_model(cfg.model_class, cfg.checkpoint)
+    model = load_model(cfg.model_class, cfg.checkpoint, cfg.model_resolution)
+    if cfg.model_resolution is not None:
+        print(f"[LOCAL EVAL] Using model resolution={cfg.model_resolution} (from training metadata/checkpoint)")
+    else:
+        print("[LOCAL EVAL][WARN] Could not infer training resolution; using library default resolution.")
 
     img_ids = coco.getImgIds()
     if cfg.max_images is not None:
@@ -809,10 +861,29 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
     if not cfg.no_plots:
         try_plot_curves(cfg.output_dir, thr_rows, pr_rows, roc_rows)
 
+    per_image_count_rows: List[Dict[str, Any]] = []
+    for s in samples:
+        keep = s["pred_scores"] >= cfg.score_threshold
+        per_image_count_rows.append(
+            {
+                "image_name": Path(s["img_path"]).name,
+                "image_path": s["img_path"],
+                "gt_objects": int(len(s["gt_boxes"])),
+                "pred_objects_at_threshold": int(np.sum(keep)),
+                "score_threshold": float(cfg.score_threshold),
+            }
+        )
+    write_csv(
+        cfg.output_dir / "per_image_object_counts.csv",
+        ["image_name", "image_path", "gt_objects", "pred_objects_at_threshold", "score_threshold"],
+        per_image_count_rows,
+    )
+
     if cfg.num_overlays > 0:
         eligible = [s for s in samples if len(s["gt_boxes"]) > 0 or np.any(s["pred_scores"] >= cfg.score_threshold)]
         random.shuffle(eligible)
         chosen = eligible[: cfg.num_overlays]
+        used_overlay_names: set[str] = set()
         for i, s in enumerate(chosen, start=1):
             keep = s["pred_scores"] >= cfg.score_threshold
             pred_boxes = s["pred_boxes"][keep]
@@ -820,6 +891,19 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
             pred_scores = s["pred_scores"][keep]
             gt_names = [labels[int(c)] for c in s["gt_cls"]]
             pred_names = [labels[int(c)] for c in pred_cls]
+            gt_count = int(len(s["gt_boxes"]))
+            pred_count = int(len(pred_boxes))
+            img_stem = Path(s["img_path"]).stem
+            safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", img_stem).strip("._")
+            if not safe_stem:
+                safe_stem = f"image_{i:02d}"
+            base_name = f"Overlay_{safe_stem}_GT{gt_count}_Pred{pred_count}"
+            overlay_name = f"{base_name}.jpg"
+            suffix = 2
+            while overlay_name in used_overlay_names:
+                overlay_name = f"{base_name}_{suffix}.jpg"
+                suffix += 1
+            used_overlay_names.add(overlay_name)
             draw_overlay(
                 img_path=Path(s["img_path"]),
                 gt_boxes=s["gt_boxes"],
@@ -827,7 +911,7 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
                 pred_boxes=pred_boxes,
                 pred_names=pred_names,
                 pred_scores=pred_scores,
-                out_path=cfg.output_dir / "overlays" / f"overlay_{i:02d}.jpg",
+                out_path=cfg.output_dir / "overlays" / overlay_name,
                 image_max_side=cfg.image_max_side,
             )
 
@@ -848,6 +932,7 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
         "output_dir": str(cfg.output_dir),
         "images_root": str(cfg.images_root) if cfg.images_root is not None else None,
         "model_class": cfg.model_class,
+        "model_resolution": cfg.model_resolution,
         "images_total_requested": len(img_ids),
         "images_processed": len(processed_ids),
         "images_missing": len(missing),
@@ -862,6 +947,7 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
         "pr_auc": pr_auc,
         "roc_auc": roc_auc,
         "roc_note": "ROC/PR are computed from IoU-matched detection samples.",
+        "per_image_object_counts_csv": str(cfg.output_dir / "per_image_object_counts.csv"),
     }
     json_dump(cfg.output_dir / "eval_summary.json", summary)
 
@@ -886,6 +972,7 @@ def build_config(args: argparse.Namespace) -> LocalEvalConfig:
     images_root = args.images_root.resolve() if args.images_root is not None else None
     model_meta_root = checkpoint.parent.parent if checkpoint.parent.name.lower() == "rfdetr_run" else checkpoint.parent
 
+    model_resolution = infer_model_resolution(checkpoint)
     model_class = infer_model_class(model_meta_root, checkpoint) if args.model_class == "auto" else args.model_class
 
     if args.iou_step <= 0:
@@ -901,6 +988,7 @@ def build_config(args: argparse.Namespace) -> LocalEvalConfig:
         output_dir=output_dir,
         images_root=images_root,
         model_class=model_class,
+        model_resolution=model_resolution,
         score_floor=float(args.score_floor),
         score_threshold=float(args.score_threshold),
         confmat_iou=float(args.confmat_iou),
