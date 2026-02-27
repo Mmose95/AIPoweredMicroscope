@@ -1563,10 +1563,14 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
 
         dur = round(time.time() - t0, 2)
 
+        logged_cfg = dict(try_cfg)
+        if init_mode != "ssl":
+            logged_cfg["SSL_CKPT"] = ""
+
         row = {
             "run_idx": run_idx,
             "target": target_name,
-            **{k: (v if not hasattr(v, "__name__") else v.__name__) for k, v in try_cfg.items()},
+            **{k: (v if not hasattr(v, "__name__") else v.__name__) for k, v in logged_cfg.items()},
             "seed": run_seed,
             "init_mode": init_mode,
             "uses_ssl_encoder": bool(init_mode == "ssl"),
