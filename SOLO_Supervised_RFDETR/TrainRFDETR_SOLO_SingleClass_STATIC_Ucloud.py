@@ -1114,6 +1114,17 @@ def _cfg_text(name: str) -> str:
     default = dyn.get(name, MATRIX_QUICK_DEFAULTS.get(name, ""))
     return os.getenv(name, default).strip()
 
+def _cfg_train_fractions_text() -> str:
+    # Primary env: RFDETR_TRAIN_FRACTIONS (CSV).
+    # Compatibility alias: RFDETR_TRAIN_FRACTION (single value).
+    v = os.getenv("RFDETR_TRAIN_FRACTIONS", "").strip()
+    if v:
+        return v
+    v1 = os.getenv("RFDETR_TRAIN_FRACTION", "").strip()
+    if v1:
+        return v1
+    return _cfg_text("RFDETR_TRAIN_FRACTIONS")
+
 def _csv_tokens(raw: str) -> list[str]:
     return [x.strip() for x in str(raw).split(",") if x.strip()]
 
@@ -1178,7 +1189,7 @@ def _build_matrix_runtime_config() -> dict:
     cfg = {
         "model_cls": _cfg_text("RFDETR_MODEL_CLS"),
         "init_modes": init_modes,
-        "train_fractions": _csv_float(_cfg_text("RFDETR_TRAIN_FRACTIONS")),
+        "train_fractions": _csv_float(_cfg_train_fractions_text()),
         "seeds": _csv_int(_cfg_text("RFDETR_SEEDS")),
         "grad_accum_steps": int(_cfg_text("RFDETR_GRAD_ACCUM_STEPS")),
         "weight_decay": float(_cfg_text("RFDETR_WEIGHT_DECAY")),
