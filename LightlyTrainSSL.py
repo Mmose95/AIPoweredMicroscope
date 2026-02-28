@@ -12,6 +12,7 @@ import concurrent.futures
 import re
 from collections import defaultdict
 import random
+import time
 
 ''' How to introduce new labels and trigger new statistics + crops to be made:
  Use 'Stationary_datasets_OVR.py' (easiest locally) to make new datasets. upload them to CVAT along with the new 
@@ -50,6 +51,8 @@ SSL_FAIL_ON_MISSING_SAMPLES = os.getenv("SSL_FAIL_ON_MISSING_SAMPLES", "0") == "
 SSL_MIN_TOTAL_CROPS = int(os.getenv("SSL_MIN_TOTAL_CROPS", "1"))
 SSL_LIGHTLY_OUT_DIR = os.getenv("SSL_LIGHTLY_OUT_DIR", "outputLightly").strip() or "outputLightly"
 SSL_PREVIEW_ONLY = os.getenv("SSL_PREVIEW_ONLY", "0") == "1"
+SSL_PROGRESS_EVERY_IMAGES = max(1, int(os.getenv("SSL_PROGRESS_EVERY_IMAGES", "10")))
+SSL_PROGRESS_EVERY_FILES = max(1, int(os.getenv("SSL_PROGRESS_EVERY_FILES", "2000")))
 
 # For resolving image paths from COCO JSONs
 VALID_EXTS = {".tif", ".tiff", ".png", ".jpg", ".jpeg"}
@@ -622,13 +625,13 @@ def ensure_ssl_crops_for_sample(sample_dir: Path, patch_size: int = PATCH_SIZE) 
             if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg"}
         )
         if num_existing > 0:
-            print(f"[ensure_ssl_crops_for_sample] Reusing {num_existing} crops in {crops_dir}")
+            print(f"[ensure_ssl_crops_for_sample] Reusing {num_existing} crops in {crops_dir}", flush=True)
             return crops_dir
     else:
         crops_dir.mkdir(parents=True, exist_ok=True)
 
 
-    print(f"[ensure_ssl_crops_for_sample] Creating crops in {crops_dir}")
+    print(f"[ensure_ssl_crops_for_sample] Creating crops in {crops_dir}", flush=True)
 
     exts = {".tif", ".tiff", ".png", ".jpg", ".jpeg"}
 
@@ -641,13 +644,20 @@ def ensure_ssl_crops_for_sample(sample_dir: Path, patch_size: int = PATCH_SIZE) 
     if not image_files:
         raise RuntimeError(f"No full-size images found in {sample_dir}")
 
+    total_images = len(image_files)
+    print(
+        f"[crop-progress] {sample_name}: {total_images} source images, "
+        f"workers={NUM_PATCH_WORKERS}",
+        flush=True,
+    )
+
     # Parallel over images
     total_kept = 0
     total_cand = 0
 
     if NUM_PATCH_WORKERS <= 1 or len(image_files) == 1:
         # fallback: single-process
-        for img_path in image_files:
+        for done, img_path in enumerate(image_files, start=1):
             kept, cand = _process_image_for_crops(
                 img_path,
                 crops_dir,
@@ -656,6 +666,13 @@ def ensure_ssl_crops_for_sample(sample_dir: Path, patch_size: int = PATCH_SIZE) 
             )
             total_kept += kept
             total_cand += cand
+            if done % SSL_PROGRESS_EVERY_IMAGES == 0 or done == total_images:
+                pct = (100.0 * done / max(1, total_images))
+                print(
+                    f"[crop-progress] {sample_name}: images {done}/{total_images} "
+                    f"({pct:.1f}%) kept={total_kept} cand={total_cand}",
+                    flush=True,
+                )
     else:
         with concurrent.futures.ProcessPoolExecutor(max_workers=NUM_PATCH_WORKERS) as ex:
             futures = [
@@ -668,14 +685,24 @@ def ensure_ssl_crops_for_sample(sample_dir: Path, patch_size: int = PATCH_SIZE) 
                 )
                 for img_path in image_files
             ]
+            done = 0
             for fut in concurrent.futures.as_completed(futures):
                 kept, cand = fut.result()
                 total_kept += kept
                 total_cand += cand
+                done += 1
+                if done % SSL_PROGRESS_EVERY_IMAGES == 0 or done == total_images:
+                    pct = (100.0 * done / max(1, total_images))
+                    print(
+                        f"[crop-progress] {sample_name}: images {done}/{total_images} "
+                        f"({pct:.1f}%) kept={total_kept} cand={total_cand}",
+                        flush=True,
+                    )
 
     print(
         f"[ensure_ssl_crops_for_sample] Saved {total_kept} / {total_cand} crops "
         f"in {crops_dir} (workers={NUM_PATCH_WORKERS})"
+        , flush=True
     )
     return crops_dir
 
@@ -718,6 +745,14 @@ def summarize_ssl_source_range(ssl_root: Path, first_sample: int, last_sample: i
     return summary
 
 
+def write_selection_progress(progress_path: Path, payload: dict):
+    try:
+        progress_path.parent.mkdir(parents=True, exist_ok=True)
+        progress_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception as e:
+        print(f"[SSL PROGRESS][WARN] Failed writing {progress_path}: {e}", flush=True)
+
+
 def build_ssl_selection_dataset(
     ssl_root: Path,
     first_sample: int,
@@ -750,6 +785,7 @@ def build_ssl_selection_dataset(
 
     tmp_root = ssl_root.parent / f"SSL_LightlySelection_224crops_{cfg_hash}"
     manifest_path = tmp_root / "selection_manifest.json"
+    progress_path = tmp_root / "selection_progress.json"
     ok_marker = tmp_root / ".SELECTION_OK"
 
     exts = {".png", ".jpg", ".jpeg"}
@@ -763,6 +799,17 @@ def build_ssl_selection_dataset(
         print(
             f"[build_ssl_selection_dataset] Reusing cached selection dataset: {tmp_root} "
             f"(crops={total_existing}, hash={cfg_hash})"
+            , flush=True
+        )
+        write_selection_progress(
+            progress_path,
+            {
+                "status": "cached",
+                "selection_cfg_hash": cfg_hash,
+                "tmp_root": str(tmp_root),
+                "total_crops": int(total_existing),
+                "updated_at_epoch": time.time(),
+            },
         )
         if total_existing < SSL_MIN_TOTAL_CROPS:
             raise RuntimeError(
@@ -772,20 +819,63 @@ def build_ssl_selection_dataset(
         return tmp_root
 
     if tmp_root.exists():
-        print(f"[build_ssl_selection_dataset] Found incomplete/legacy dataset, rebuilding: {tmp_root}")
+        print(f"[build_ssl_selection_dataset] Found incomplete/legacy dataset, rebuilding: {tmp_root}", flush=True)
         shutil.rmtree(tmp_root, ignore_errors=True)
 
-    print(f"[build_ssl_selection_dataset] Creating new temp dir: {tmp_root} (hash={cfg_hash})")
+    print(f"[build_ssl_selection_dataset] Creating new temp dir: {tmp_root} (hash={cfg_hash})", flush=True)
     tmp_root.mkdir(parents=True, exist_ok=True)
+    print(f"[SSL PROGRESS] Live progress file: {progress_path}", flush=True)
 
     total = 0
     missing_samples = []
     per_sample_crops = {}
+    sample_ids = list(range(first_sample, last_sample + 1))
+    total_samples = len(sample_ids)
+    start_t = time.time()
+    done_samples = 0
 
-    for i in range(first_sample, last_sample + 1):
+    write_selection_progress(
+        progress_path,
+        {
+            "status": "running",
+            "selection_cfg_hash": cfg_hash,
+            "tmp_root": str(tmp_root),
+            "first_sample": int(first_sample),
+            "last_sample": int(last_sample),
+            "total_samples": int(total_samples),
+            "done_samples": 0,
+            "missing_samples": [],
+            "total_crops": 0,
+            "current_sample": None,
+            "updated_at_epoch": time.time(),
+        },
+    )
+
+    for i in sample_ids:
         sample_dir = ssl_root / f"Sample {i}"
+        print(f"[SSL PROGRESS] Starting sample {i} ({done_samples + 1}/{total_samples})", flush=True)
+
+        write_selection_progress(
+            progress_path,
+            {
+                "status": "running",
+                "selection_cfg_hash": cfg_hash,
+                "tmp_root": str(tmp_root),
+                "first_sample": int(first_sample),
+                "last_sample": int(last_sample),
+                "total_samples": int(total_samples),
+                "done_samples": int(done_samples),
+                "missing_samples": list(missing_samples),
+                "total_crops": int(total),
+                "current_sample": int(i),
+                "updated_at_epoch": time.time(),
+            },
+        )
+
         if not sample_dir.is_dir():
             missing_samples.append(i)
+            done_samples += 1
+            print(f"[SSL PROGRESS] Sample {i} missing ({done_samples}/{total_samples})", flush=True)
             continue
 
         crops_dir = ensure_ssl_crops_for_sample(sample_dir, patch_size=PATCH_SIZE)
@@ -802,20 +892,104 @@ def build_ssl_selection_dataset(
                 shutil.copy2(p, dst)
             total += 1
             sample_count += 1
+            if sample_count % SSL_PROGRESS_EVERY_FILES == 0:
+                print(
+                    f"[SSL PROGRESS] Sample {i}: linked {sample_count} crops "
+                    f"(global={total})",
+                    flush=True,
+                )
 
         per_sample_crops[str(i)] = sample_count
+        done_samples += 1
+        elapsed = time.time() - start_t
+        avg_per_sample = elapsed / max(1, done_samples)
+        eta = max(0.0, (total_samples - done_samples) * avg_per_sample)
+        pct = 100.0 * done_samples / max(1, total_samples)
+        print(
+            f"[SSL PROGRESS] Completed sample {i}: crops={sample_count} "
+            f"samples={done_samples}/{total_samples} ({pct:.1f}%) "
+            f"elapsed={elapsed/60.0:.1f}m eta={eta/60.0:.1f}m total_crops={total}",
+            flush=True,
+        )
+        write_selection_progress(
+            progress_path,
+            {
+                "status": "running",
+                "selection_cfg_hash": cfg_hash,
+                "tmp_root": str(tmp_root),
+                "first_sample": int(first_sample),
+                "last_sample": int(last_sample),
+                "total_samples": int(total_samples),
+                "done_samples": int(done_samples),
+                "missing_samples": list(missing_samples),
+                "total_crops": int(total),
+                "current_sample": None,
+                "last_completed_sample": int(i),
+                "last_completed_sample_crops": int(sample_count),
+                "updated_at_epoch": time.time(),
+            },
+        )
 
     if missing_samples:
         msg = f"[build_ssl_selection_dataset] Missing Sample folders: {missing_samples}"
         if SSL_FAIL_ON_MISSING_SAMPLES:
+            write_selection_progress(
+                progress_path,
+                {
+                    "status": "failed",
+                    "reason": msg,
+                    "selection_cfg_hash": cfg_hash,
+                    "tmp_root": str(tmp_root),
+                    "first_sample": int(first_sample),
+                    "last_sample": int(last_sample),
+                    "total_samples": int(total_samples),
+                    "done_samples": int(done_samples),
+                    "missing_samples": list(missing_samples),
+                    "total_crops": int(total),
+                    "updated_at_epoch": time.time(),
+                },
+            )
             raise RuntimeError(msg)
-        print(msg + " (ignored)")
+        print(msg + " (ignored)", flush=True)
 
     if total == 0:
+        write_selection_progress(
+            progress_path,
+            {
+                "status": "failed",
+                "reason": "no_crops",
+                "selection_cfg_hash": cfg_hash,
+                "tmp_root": str(tmp_root),
+                "first_sample": int(first_sample),
+                "last_sample": int(last_sample),
+                "total_samples": int(total_samples),
+                "done_samples": int(done_samples),
+                "missing_samples": list(missing_samples),
+                "total_crops": int(total),
+                "updated_at_epoch": time.time(),
+            },
+        )
         raise RuntimeError(
             f"No 224x224 crops found/created in {ssl_root} for samples {first_sample}-{last_sample}"
         )
     if total < SSL_MIN_TOTAL_CROPS:
+        write_selection_progress(
+            progress_path,
+            {
+                "status": "failed",
+                "reason": "total_below_min",
+                "selection_cfg_hash": cfg_hash,
+                "tmp_root": str(tmp_root),
+                "first_sample": int(first_sample),
+                "last_sample": int(last_sample),
+                "total_samples": int(total_samples),
+                "done_samples": int(done_samples),
+                "missing_samples": list(missing_samples),
+                "total_crops": int(total),
+                "min_total_crops": int(SSL_MIN_TOTAL_CROPS),
+                "updated_at_epoch": time.time(),
+            },
+        )
         raise RuntimeError(
             f"Total SSL crops too low ({total}) < SSL_MIN_TOTAL_CROPS={SSL_MIN_TOTAL_CROPS}. "
             f"Check sample range and crop generation."
@@ -831,9 +1005,25 @@ def build_ssl_selection_dataset(
     }
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     ok_marker.write_text("ok", encoding="utf-8")
+    write_selection_progress(
+        progress_path,
+        {
+            "status": "completed",
+            "selection_cfg_hash": cfg_hash,
+            "tmp_root": str(tmp_root),
+            "manifest_path": str(manifest_path),
+            "first_sample": int(first_sample),
+            "last_sample": int(last_sample),
+            "total_samples": int(total_samples),
+            "done_samples": int(done_samples),
+            "missing_samples": list(missing_samples),
+            "total_crops": int(total),
+            "updated_at_epoch": time.time(),
+        },
+    )
 
-    print(f"[build_ssl_selection_dataset] Collected {total} crops into {tmp_root}")
-    print(f"[build_ssl_selection_dataset] Wrote manifest: {manifest_path}")
+    print(f"[build_ssl_selection_dataset] Collected {total} crops into {tmp_root}", flush=True)
+    print(f"[build_ssl_selection_dataset] Wrote manifest: {manifest_path}", flush=True)
     return tmp_root
 
 
