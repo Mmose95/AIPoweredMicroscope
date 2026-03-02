@@ -67,6 +67,48 @@ def _detect_runtime_profile() -> str:
     return "local"
 
 
+def _auto_prepare_semidetr_env(target_py: Path) -> None:
+    runtime = _detect_runtime_profile()
+    if runtime != "ucloud":
+        return
+    if target_py.exists():
+        return
+    if not _parse_bool(os.getenv("SEMIDETR_AUTO_PREPARE_ENV", "1")):
+        return
+    print(f"[BOOT] Preparing Semi-DETR env because interpreter is missing: {target_py}")
+    prep = r"""
+set -Eeuo pipefail
+eval "$(/work/CondaEnv/miniconda3/bin/conda shell.bash hook)"
+if ! conda env list | awk '{print $1}' | grep -qx semidetr; then
+  conda create -y -n semidetr python=3.8
+fi
+conda activate semidetr
+python -m pip install -U pip setuptools wheel openmim
+if python - <<'PY'
+import importlib.util
+mods = ("torch", "mmcv")
+missing = [m for m in mods if importlib.util.find_spec(m) is None]
+raise SystemExit(1 if missing else 0)
+PY
+then
+  :
+else
+  python -m pip install torch==1.9.0+cu111 torchvision==0.10.0+cu111 -f https://download.pytorch.org/whl/torch_stable.html
+  python -m mim install "mmcv-full>=1.3.8,<=1.4.0"
+fi
+"""
+    p = subprocess.run(["bash", "-lc", prep], capture_output=True, text=True)
+    if p.returncode != 0:
+        msg = (p.stdout or "") + "\n" + (p.stderr or "")
+        raise RuntimeError(
+            "Failed to auto-prepare semidetr environment.\n"
+            f"Expected interpreter: {target_py}\n"
+            f"Details:\n{msg.strip()}"
+        )
+    if not target_py.exists():
+        raise FileNotFoundError(f"Semi-DETR env prep completed but interpreter still missing: {target_py}")
+
+
 def _maybe_reexec_with_semidetr_python() -> None:
     # Guard against recursively re-execing ourselves.
     if os.getenv("_SEMIDETR_REEXEC_DONE", "") == "1":
@@ -79,6 +121,8 @@ def _maybe_reexec_with_semidetr_python() -> None:
         os.environ["SEMIDETR_PYTHON"] = str(preferred)
     if preferred is None:
         return
+    if not preferred.exists():
+        _auto_prepare_semidetr_env(preferred)
     if not preferred.exists():
         raise FileNotFoundError(
             f"SEMIDETR_PYTHON points to a missing interpreter: {preferred}. "
@@ -193,10 +237,16 @@ def _resolve_semidetr_repo_and_cfg() -> tuple[Path, Path, Path]:
     candidates.extend(
         [
             REPO_ROOT / "_external_SemiDETR_ref",
+            REPO_ROOT / "_external_SemiDETR_ref_runtime",
             SCRIPT_DIR / "_external_SemiDETR_ref",
             Path("/work/projects/myproj/_external_SemiDETR_ref"),
+            Path("/work/projects/myproj/_external_SemiDETR_ref_runtime"),
         ]
     )
+    for root in [REPO_ROOT, Path("/work/projects/myproj")]:
+        if root.exists():
+            for p in sorted(root.glob("_external_SemiDETR_ref_runtime_*"), reverse=True):
+                candidates.append(p)
 
     repo = next((p for p in candidates if _semidetr_repo_is_valid(p)), None)
     if repo is None:
@@ -216,8 +266,37 @@ def _resolve_semidetr_repo_and_cfg() -> tuple[Path, Path, Path]:
             else:
                 clone_target.rmdir()
 
+        def _try_clone(dst: Path) -> tuple[bool, str]:
+            cp = subprocess.run(
+                ["git", "clone", "https://github.com/JCZ404/Semi-DETR", str(dst)],
+                capture_output=True,
+                text=True,
+            )
+            details = ((cp.stdout or "") + "\n" + (cp.stderr or "")).strip()
+            return cp.returncode == 0, details
+
         print(f"[SETUP] Cloning official Semi-DETR repo to {clone_target}")
-        subprocess.run(["git", "clone", "https://github.com/JCZ404/Semi-DETR", str(clone_target)], check=True)
+        ok, details = _try_clone(clone_target)
+        if not ok and _semidetr_repo_is_valid(clone_target):
+            ok = True
+        if not ok:
+            alt = REPO_ROOT / f"_external_SemiDETR_ref_runtime_{int(time.time())}"
+            print(f"[SETUP] First clone failed, retrying at {alt}")
+            ok2, details2 = _try_clone(alt)
+            if ok2:
+                clone_target = alt
+                ok = True
+                details = details2
+            elif _semidetr_repo_is_valid(alt):
+                clone_target = alt
+                ok = True
+                details = details2
+            else:
+                raise RuntimeError(
+                    "Failed to clone Semi-DETR repo automatically.\n"
+                    f"First attempt details:\n{details}\n\n"
+                    f"Second attempt details:\n{details2}"
+                )
         repo = clone_target
 
     if not _semidetr_repo_is_valid(repo):
