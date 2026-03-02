@@ -572,6 +572,12 @@ def _install_hint() -> str:
     mmcv_range = "mmcv-full>=1.3.8,<=1.4.0"
     return "\n".join(
         [
+            "# Recommended: run Semi-DETR in its own env (do NOT mix with aipowmic/torch2.x).",
+            "conda create -y -n semidetr python=3.8",
+            "conda activate semidetr",
+            "python -m pip install -U pip setuptools wheel",
+            "python -m pip install torch==1.9.0+cu111 torchvision==0.10.0+cu111 -f https://download.pytorch.org/whl/torch_stable.html",
+            "",
             "# Install once in the SAME python env used to launch this script:",
             f"{pyq} -m pip install -U pip setuptools wheel",
             f"{pyq} -m pip install -U openmim",
@@ -579,6 +585,9 @@ def _install_hint() -> str:
             f"cd {repoq}/thirdparty/mmdetection && {pyq} -m pip install -e .",
             f"cd {repoq} && {pyq} -m pip install -e .",
             f"cd {repoq}/detr_od/models/utils/ops && {pyq} setup.py build install",
+            "",
+            "# Then launch with:",
+            "export SEMIDETR_PYTHON=/work/CondaEnv/miniconda3/envs/semidetr/bin/python",
             "",
             "# Or set SEMIDETR_BOOTSTRAP_DEPS=1 to let this script attempt these steps automatically.",
         ]
