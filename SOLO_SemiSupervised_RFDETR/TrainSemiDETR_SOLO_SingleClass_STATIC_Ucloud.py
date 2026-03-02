@@ -14,6 +14,7 @@ from typing import Any
 
 
 VALID_EXTS = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp"}
+UCLOUD_SEMIDETR_PY = Path("/work/CondaEnv/miniconda3/envs/semidetr/bin/python")
 
 
 def _csv_tokens(raw: str) -> list[str]:
@@ -66,6 +67,33 @@ def _detect_runtime_profile() -> str:
     return "local"
 
 
+def _maybe_reexec_with_semidetr_python() -> None:
+    # Guard against recursively re-execing ourselves.
+    if os.getenv("_SEMIDETR_REEXEC_DONE", "") == "1":
+        return
+    runtime = _detect_runtime_profile()
+    preferred_txt = os.getenv("SEMIDETR_PYTHON", "").strip()
+    preferred = Path(preferred_txt).expanduser() if preferred_txt else None
+    if preferred is None and runtime == "ucloud" and UCLOUD_SEMIDETR_PY.exists():
+        preferred = UCLOUD_SEMIDETR_PY
+        os.environ["SEMIDETR_PYTHON"] = str(preferred)
+    if preferred is None:
+        return
+    if not preferred.exists():
+        raise FileNotFoundError(
+            f"SEMIDETR_PYTHON points to a missing interpreter: {preferred}. "
+            "Prepare the semidetr env and set SEMIDETR_PYTHON correctly."
+        )
+    curr = Path(sys.executable).resolve()
+    want = preferred.resolve()
+    if curr == want:
+        return
+    print(f"[BOOT] Re-exec with Semi-DETR interpreter: {want} (current={curr})")
+    env = os.environ.copy()
+    env["_SEMIDETR_REEXEC_DONE"] = "1"
+    os.execve(str(want), [str(want)] + sys.argv, env)
+
+_maybe_reexec_with_semidetr_python()
 RUNTIME_PROFILE = _detect_runtime_profile()
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
@@ -668,6 +696,7 @@ def _preflight() -> None:
 def main() -> None:
     _preflight()
     dataset_dir, class_name = _resolve_dataset_dir()
+    print(f"[SEMIDETR] python={sys.executable}")
     print(f"[SEMIDETR] runtime={RUNTIME_PROFILE} target={TARGET} class={class_name}")
     print(f"[SEMIDETR] dataset={dataset_dir}")
     print(f"[SEMIDETR] init_mode={INIT_MODE} fractions={FRACTIONS} seeds={SEEDS} fraction_seeds={FRACTION_SEEDS}")
