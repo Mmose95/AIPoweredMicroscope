@@ -79,6 +79,13 @@ def _auto_prepare_semidetr_env(target_py: Path) -> None:
     prep = r"""
 set -Eeuo pipefail
 eval "$(/work/CondaEnv/miniconda3/bin/conda shell.bash hook)"
+
+# Accept Anaconda channel Terms of Service non-interactively when required.
+if conda tos --help >/dev/null 2>&1; then
+  conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main || true
+  conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r || true
+fi
+
 if ! conda env list | awk '{print $1}' | grep -qx semidetr; then
   conda create -y -n semidetr python=3.8
 fi
