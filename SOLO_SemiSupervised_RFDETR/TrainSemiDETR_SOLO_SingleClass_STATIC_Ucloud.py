@@ -4,6 +4,7 @@ import csv
 import json
 import os
 import random
+import shlex
 import subprocess
 import sys
 import time
@@ -140,6 +141,7 @@ UNLABELED_MAX_IMAGES = int(os.getenv("SEMIDETR_UNLABELED_MAX_IMAGES", "0"))
 UNLABELED_IMAGES_PER_LABELED = int(os.getenv("SEMIDETR_UNLABELED_IMAGES_PER_LABELED", "6"))
 CONTINUE_ON_ERROR = _parse_bool(os.getenv("SEMIDETR_CONTINUE_ON_ERROR", "0"))
 DRY_RUN = _parse_bool(os.getenv("SEMIDETR_DRY_RUN", "0"))
+BOOTSTRAP_DEPS = _parse_bool(os.getenv("SEMIDETR_BOOTSTRAP_DEPS", "0"))
 
 
 def _require_exists(path: Path, name: str) -> None:
@@ -545,12 +547,8 @@ def _run_semidetr_train(run_cfg: Path, work_dir: Path, seed: int) -> None:
         raise RuntimeError(f"Semi-DETR training failed with exit code {rc}")
 
 
-def _check_semidetr_python_deps() -> None:
-    env = os.environ.copy()
-    py_parts = [str(SEMI_DETR_REPO), str(SEMI_DETR_REPO / "thirdparty" / "mmdetection")]
-    old_py = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = os.pathsep.join(py_parts + ([old_py] if old_py else []))
-    cmd = [
+def _deps_check_cmd() -> list[str]:
+    return [
         sys.executable,
         "-c",
         (
@@ -558,15 +556,85 @@ def _check_semidetr_python_deps() -> None:
             "print('deps_ok', torch.__version__, mmcv.__version__, mmdet.__version__)"
         ),
     ]
-    p = subprocess.run(cmd, cwd=str(SEMI_DETR_REPO), env=env, capture_output=True, text=True)
-    if p.returncode != 0:
-        msg = (p.stdout or "") + "\n" + (p.stderr or "")
+
+
+def _semidetr_dep_env() -> dict[str, str]:
+    env = os.environ.copy()
+    py_parts = [str(SEMI_DETR_REPO), str(SEMI_DETR_REPO / "thirdparty" / "mmdetection")]
+    old_py = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = os.pathsep.join(py_parts + ([old_py] if old_py else []))
+    return env
+
+
+def _install_hint() -> str:
+    pyq = shlex.quote(sys.executable)
+    repoq = shlex.quote(str(SEMI_DETR_REPO))
+    mmcv_range = "mmcv-full>=1.3.8,<=1.4.0"
+    return "\n".join(
+        [
+            "# Install once in the SAME python env used to launch this script:",
+            f"{pyq} -m pip install -U pip setuptools wheel",
+            f"{pyq} -m pip install -U openmim",
+            f"{pyq} -m mim install \"{mmcv_range}\"",
+            f"cd {repoq}/thirdparty/mmdetection && {pyq} -m pip install -e .",
+            f"cd {repoq} && {pyq} -m pip install -e .",
+            f"cd {repoq}/detr_od/models/utils/ops && {pyq} setup.py build install",
+            "",
+            "# Or set SEMIDETR_BOOTSTRAP_DEPS=1 to let this script attempt these steps automatically.",
+        ]
+    )
+
+
+def _bootstrap_semidetr_python_deps() -> None:
+    env = _semidetr_dep_env()
+    commands: list[tuple[list[str], Path]] = [
+        ([sys.executable, "-m", "pip", "install", "-U", "pip", "setuptools", "wheel"], SEMI_DETR_REPO),
+        ([sys.executable, "-m", "pip", "install", "-U", "openmim"], SEMI_DETR_REPO),
+        ([sys.executable, "-m", "mim", "install", "mmcv-full>=1.3.8,<=1.4.0"], SEMI_DETR_REPO),
+        ([sys.executable, "-m", "pip", "install", "-e", "."], SEMI_DETR_REPO / "thirdparty" / "mmdetection"),
+        ([sys.executable, "-m", "pip", "install", "-e", "."], SEMI_DETR_REPO),
+        ([sys.executable, "setup.py", "build", "install"], SEMI_DETR_REPO / "detr_od" / "models" / "utils" / "ops"),
+    ]
+    for cmd, cwd in commands:
+        print("[BOOTSTRAP]", " ".join(shlex.quote(x) for x in cmd), f"(cwd={cwd})")
+        p = subprocess.run(cmd, cwd=str(cwd), env=env)
+        if p.returncode != 0:
+            raise RuntimeError(
+                "Dependency bootstrap failed. "
+                f"Command exit code {p.returncode}: {' '.join(cmd)}\n\n"
+                f"Manual install hints:\n{_install_hint()}"
+            )
+
+
+def _check_semidetr_python_deps() -> None:
+    env = _semidetr_dep_env()
+    p = subprocess.run(_deps_check_cmd(), cwd=str(SEMI_DETR_REPO), env=env, capture_output=True, text=True)
+    if p.returncode == 0:
+        print("[PREFLIGHT] python deps:", p.stdout.strip())
+        return
+
+    msg = (p.stdout or "") + "\n" + (p.stderr or "")
+    if BOOTSTRAP_DEPS:
+        print("[PREFLIGHT] Semi-DETR deps missing; SEMIDETR_BOOTSTRAP_DEPS=1 so bootstrap will be attempted.")
+        _bootstrap_semidetr_python_deps()
+        p2 = subprocess.run(_deps_check_cmd(), cwd=str(SEMI_DETR_REPO), env=env, capture_output=True, text=True)
+        if p2.returncode == 0:
+            print("[PREFLIGHT] python deps after bootstrap:", p2.stdout.strip())
+            return
+        msg2 = (p2.stdout or "") + "\n" + (p2.stderr or "")
         raise RuntimeError(
-            "Semi-DETR dependencies are not importable in this environment. "
-            "Install per official repo (mmcv/mmdet/detr_od/detr_ssod + ops build). "
-            f"Details:\n{msg.strip()}"
+            "Semi-DETR dependency bootstrap ran but imports still fail.\n"
+            f"Initial error:\n{msg.strip()}\n\nAfter bootstrap:\n{msg2.strip()}\n\n"
+            f"Manual install hints:\n{_install_hint()}"
         )
-    print("[PREFLIGHT] python deps:", p.stdout.strip())
+
+    raise RuntimeError(
+        "Semi-DETR dependencies are not importable in this environment. "
+        f"Python: {sys.executable}\n"
+        f"Repo: {SEMI_DETR_REPO}\n\n"
+        f"Details:\n{msg.strip()}\n\n"
+        f"{_install_hint()}"
+    )
 
 
 def _preflight() -> None:
