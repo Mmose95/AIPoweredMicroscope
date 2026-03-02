@@ -100,14 +100,15 @@ if len(FRACTION_SEEDS) == 1 and len(SEEDS) > 1:
 if len(FRACTION_SEEDS) not in {1, len(SEEDS)}:
     raise ValueError("SEMIDETR_FRACTION_SEEDS must have length 1 or len(SEMIDETR_SEEDS)")
 
-SEMI_DETR_REPO = Path(os.getenv("SEMIDETR_REPO_DIR", str(REPO_ROOT / "_external_SemiDETR_ref"))).expanduser().resolve()
+SEMI_DETR_EXPECTED_CFG_REL = Path("configs") / "detr_ssod" / "detr_ssod_dino_detr_r50_coco_120k.py"
+SEMI_DETR_REPO = Path(os.getenv("SEMIDETR_REPO_DIR", str(REPO_ROOT / "_external_SemiDETR_ref"))).expanduser()
 SEMI_DETR_TRAIN_SCRIPT = SEMI_DETR_REPO / "tools" / "train_detr_ssod.py"
 SEMI_DETR_BASE_CFG = Path(
     os.getenv(
         "SEMIDETR_BASE_CONFIG",
-        str(SEMI_DETR_REPO / "configs" / "detr_ssod" / "detr_ssod_dino_detr_r50_coco_120k.py"),
+        str(SEMI_DETR_REPO / SEMI_DETR_EXPECTED_CFG_REL),
     )
-).expanduser().resolve()
+).expanduser()
 
 OUTPUT_ROOT = Path(
     os.getenv(
@@ -144,6 +145,70 @@ DRY_RUN = _parse_bool(os.getenv("SEMIDETR_DRY_RUN", "0"))
 def _require_exists(path: Path, name: str) -> None:
     if not path.exists():
         raise FileNotFoundError(f"{name} does not exist: {path}")
+
+
+def _semidetr_repo_is_valid(repo_dir: Path) -> bool:
+    return (
+        repo_dir.exists()
+        and (repo_dir / "tools" / "train_detr_ssod.py").exists()
+        and (repo_dir / SEMI_DETR_EXPECTED_CFG_REL).exists()
+    )
+
+
+def _resolve_semidetr_repo_and_cfg() -> tuple[Path, Path, Path]:
+    repo_env = os.getenv("SEMIDETR_REPO_DIR", "").strip()
+    candidates: list[Path] = []
+    if repo_env:
+        candidates.append(Path(repo_env).expanduser())
+    candidates.extend(
+        [
+            REPO_ROOT / "_external_SemiDETR_ref",
+            SCRIPT_DIR / "_external_SemiDETR_ref",
+            Path("/work/projects/myproj/_external_SemiDETR_ref"),
+        ]
+    )
+
+    repo = next((p for p in candidates if _semidetr_repo_is_valid(p)), None)
+    if repo is None:
+        auto_clone = _parse_bool(os.getenv("SEMIDETR_AUTO_CLONE", "1"))
+        if not auto_clone:
+            raise FileNotFoundError(
+                "Could not find a valid Semi-DETR repo (missing tools/train_detr_ssod.py "
+                f"or {SEMI_DETR_EXPECTED_CFG_REL}). "
+                "Set SEMIDETR_REPO_DIR to a full clone or set SEMIDETR_AUTO_CLONE=1."
+            )
+
+        clone_target_raw = os.getenv("SEMIDETR_CLONE_TARGET", "").strip()
+        clone_target = Path(clone_target_raw).expanduser() if clone_target_raw else (REPO_ROOT / "_external_SemiDETR_ref_runtime")
+        if clone_target.exists() and not _semidetr_repo_is_valid(clone_target):
+            if any(clone_target.iterdir()):
+                clone_target = REPO_ROOT / f"_external_SemiDETR_ref_runtime_{int(time.time())}"
+            else:
+                clone_target.rmdir()
+
+        print(f"[SETUP] Cloning official Semi-DETR repo to {clone_target}")
+        subprocess.run(["git", "clone", "https://github.com/JCZ404/Semi-DETR", str(clone_target)], check=True)
+        repo = clone_target
+
+    if not _semidetr_repo_is_valid(repo):
+        raise FileNotFoundError(
+            f"Resolved SEMIDETR_REPO_DIR is invalid: {repo} "
+            f"(missing {SEMI_DETR_EXPECTED_CFG_REL} or tools/train_detr_ssod.py)"
+        )
+
+    cfg_env = os.getenv("SEMIDETR_BASE_CONFIG", "").strip()
+    if cfg_env:
+        cfg = Path(cfg_env).expanduser()
+        if not cfg.exists():
+            fallback = repo / SEMI_DETR_EXPECTED_CFG_REL
+            if fallback.exists():
+                cfg = fallback
+            else:
+                raise FileNotFoundError(f"Configured SEMIDETR_BASE_CONFIG does not exist: {cfg_env}")
+    else:
+        cfg = repo / SEMI_DETR_EXPECTED_CFG_REL
+
+    return repo.resolve(), (repo / "tools" / "train_detr_ssod.py").resolve(), cfg.resolve()
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -505,6 +570,11 @@ def _check_semidetr_python_deps() -> None:
 
 
 def _preflight() -> None:
+    global SEMI_DETR_REPO, SEMI_DETR_TRAIN_SCRIPT, SEMI_DETR_BASE_CFG
+    SEMI_DETR_REPO, SEMI_DETR_TRAIN_SCRIPT, SEMI_DETR_BASE_CFG = _resolve_semidetr_repo_and_cfg()
+    os.environ["SEMIDETR_REPO_DIR"] = str(SEMI_DETR_REPO)
+    os.environ["SEMIDETR_BASE_CONFIG"] = str(SEMI_DETR_BASE_CFG)
+
     _require_exists(SEMI_DETR_REPO, "SEMIDETR_REPO_DIR")
     _require_exists(SEMI_DETR_TRAIN_SCRIPT, "Semi-DETR train script")
     _require_exists(SEMI_DETR_BASE_CFG, "Semi-DETR base config")
