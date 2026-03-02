@@ -67,55 +67,6 @@ def _detect_runtime_profile() -> str:
     return "local"
 
 
-def _auto_prepare_semidetr_env(target_py: Path) -> None:
-    runtime = _detect_runtime_profile()
-    if runtime != "ucloud":
-        return
-    if target_py.exists():
-        return
-    if not _parse_bool(os.getenv("SEMIDETR_AUTO_PREPARE_ENV", "1")):
-        return
-    print(f"[BOOT] Preparing Semi-DETR env because interpreter is missing: {target_py}")
-    prep = r"""
-set -Eeuo pipefail
-eval "$(/work/CondaEnv/miniconda3/bin/conda shell.bash hook)"
-
-# Accept Anaconda channel Terms of Service non-interactively when required.
-if conda tos --help >/dev/null 2>&1; then
-  conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main || true
-  conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r || true
-fi
-
-if ! conda env list | awk '{print $1}' | grep -qx semidetr; then
-  conda create -y -n semidetr python=3.8
-fi
-conda activate semidetr
-python -m pip install -U pip setuptools wheel openmim
-if python - <<'PY'
-import importlib.util
-mods = ("torch", "mmcv")
-missing = [m for m in mods if importlib.util.find_spec(m) is None]
-raise SystemExit(1 if missing else 0)
-PY
-then
-  :
-else
-  python -m pip install torch==1.9.0+cu111 torchvision==0.10.0+cu111 -f https://download.pytorch.org/whl/torch_stable.html
-  python -m mim install "mmcv-full>=1.3.8,<=1.4.0"
-fi
-"""
-    p = subprocess.run(["bash", "-lc", prep], capture_output=True, text=True)
-    if p.returncode != 0:
-        msg = (p.stdout or "") + "\n" + (p.stderr or "")
-        raise RuntimeError(
-            "Failed to auto-prepare semidetr environment.\n"
-            f"Expected interpreter: {target_py}\n"
-            f"Details:\n{msg.strip()}"
-        )
-    if not target_py.exists():
-        raise FileNotFoundError(f"Semi-DETR env prep completed but interpreter still missing: {target_py}")
-
-
 def _maybe_reexec_with_semidetr_python() -> None:
     # Guard against recursively re-execing ourselves.
     if os.getenv("_SEMIDETR_REEXEC_DONE", "") == "1":
@@ -123,17 +74,16 @@ def _maybe_reexec_with_semidetr_python() -> None:
     runtime = _detect_runtime_profile()
     preferred_txt = os.getenv("SEMIDETR_PYTHON", "").strip()
     preferred = Path(preferred_txt).expanduser() if preferred_txt else None
-    if preferred is None and runtime == "ucloud" and UCLOUD_SEMIDETR_PY.exists():
+    if preferred is None and runtime == "ucloud":
         preferred = UCLOUD_SEMIDETR_PY
         os.environ["SEMIDETR_PYTHON"] = str(preferred)
     if preferred is None:
         return
     if not preferred.exists():
-        _auto_prepare_semidetr_env(preferred)
-    if not preferred.exists():
         raise FileNotFoundError(
-            f"SEMIDETR_PYTHON points to a missing interpreter: {preferred}. "
-            "Prepare the semidetr env and set SEMIDETR_PYTHON correctly."
+            f"SEMIDETR_PYTHON does not exist: {preferred}\n"
+            "Use a dedicated Semi-DETR env and set SEMIDETR_PYTHON to that interpreter, e.g.\n"
+            "  /work/CondaEnv/miniconda3/envs/semidetr/bin/python"
         )
     curr = Path(sys.executable).resolve()
     want = preferred.resolve()
@@ -220,7 +170,6 @@ UNLABELED_MAX_IMAGES = int(os.getenv("SEMIDETR_UNLABELED_MAX_IMAGES", "0"))
 UNLABELED_IMAGES_PER_LABELED = int(os.getenv("SEMIDETR_UNLABELED_IMAGES_PER_LABELED", "6"))
 CONTINUE_ON_ERROR = _parse_bool(os.getenv("SEMIDETR_CONTINUE_ON_ERROR", "0"))
 DRY_RUN = _parse_bool(os.getenv("SEMIDETR_DRY_RUN", "0"))
-BOOTSTRAP_DEPS = _parse_bool(os.getenv("SEMIDETR_BOOTSTRAP_DEPS", "0"))
 
 
 def _require_exists(path: Path, name: str) -> None:
@@ -702,31 +651,8 @@ def _install_hint() -> str:
             "",
             "# Then launch with:",
             "export SEMIDETR_PYTHON=/work/CondaEnv/miniconda3/envs/semidetr/bin/python",
-            "",
-            "# Or set SEMIDETR_BOOTSTRAP_DEPS=1 to let this script attempt these steps automatically.",
         ]
     )
-
-
-def _bootstrap_semidetr_python_deps() -> None:
-    env = _semidetr_dep_env()
-    commands: list[tuple[list[str], Path]] = [
-        ([sys.executable, "-m", "pip", "install", "-U", "pip", "setuptools", "wheel"], SEMI_DETR_REPO),
-        ([sys.executable, "-m", "pip", "install", "-U", "openmim"], SEMI_DETR_REPO),
-        ([sys.executable, "-m", "mim", "install", "mmcv-full>=1.3.8,<=1.4.0"], SEMI_DETR_REPO),
-        ([sys.executable, "-m", "pip", "install", "-e", "."], SEMI_DETR_REPO / "thirdparty" / "mmdetection"),
-        ([sys.executable, "-m", "pip", "install", "-e", "."], SEMI_DETR_REPO),
-        ([sys.executable, "setup.py", "build", "install"], SEMI_DETR_REPO / "detr_od" / "models" / "utils" / "ops"),
-    ]
-    for cmd, cwd in commands:
-        print("[BOOTSTRAP]", " ".join(shlex.quote(x) for x in cmd), f"(cwd={cwd})")
-        p = subprocess.run(cmd, cwd=str(cwd), env=env)
-        if p.returncode != 0:
-            raise RuntimeError(
-                "Dependency bootstrap failed. "
-                f"Command exit code {p.returncode}: {' '.join(cmd)}\n\n"
-                f"Manual install hints:\n{_install_hint()}"
-            )
 
 
 def _check_semidetr_python_deps() -> None:
@@ -737,20 +663,6 @@ def _check_semidetr_python_deps() -> None:
         return
 
     msg = (p.stdout or "") + "\n" + (p.stderr or "")
-    if BOOTSTRAP_DEPS:
-        print("[PREFLIGHT] Semi-DETR deps missing; SEMIDETR_BOOTSTRAP_DEPS=1 so bootstrap will be attempted.")
-        _bootstrap_semidetr_python_deps()
-        p2 = subprocess.run(_deps_check_cmd(), cwd=str(SEMI_DETR_REPO), env=env, capture_output=True, text=True)
-        if p2.returncode == 0:
-            print("[PREFLIGHT] python deps after bootstrap:", p2.stdout.strip())
-            return
-        msg2 = (p2.stdout or "") + "\n" + (p2.stderr or "")
-        raise RuntimeError(
-            "Semi-DETR dependency bootstrap ran but imports still fail.\n"
-            f"Initial error:\n{msg.strip()}\n\nAfter bootstrap:\n{msg2.strip()}\n\n"
-            f"Manual install hints:\n{_install_hint()}"
-        )
-
     raise RuntimeError(
         "Semi-DETR dependencies are not importable in this environment. "
         f"Python: {sys.executable}\n"
