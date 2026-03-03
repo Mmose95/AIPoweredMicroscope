@@ -1003,6 +1003,14 @@ def train_one_run(target_name: str,
         kwargs["square_resize_div_64"] = True
         kwargs["do_random_resize_via_padding"] = False
         kwargs["random_resize_via_padding"] = False
+        # RF-DETR multi-scale transform requires patch_size to be set.
+        # In full-image mode, inherit model default patch size if caller did not set one.
+        if bool(kwargs.get("multi_scale")) and kwargs.get("patch_size") in (None, 0):
+            cfg_patch = getattr(getattr(model, "model_config", None), "patch_size", None)
+            kwargs["patch_size"] = int(cfg_patch) if cfg_patch is not None else 14
+        if bool(kwargs.get("multi_scale")) and kwargs.get("num_windows") in (None, 0):
+            cfg_windows = getattr(getattr(model, "model_config", None), "num_windows", None)
+            kwargs["num_windows"] = int(cfg_windows) if cfg_windows is not None else 4
 
     # Log meta
     meta = out_dir / "run_meta"
@@ -1013,7 +1021,18 @@ def train_one_run(target_name: str,
     kwargs["run_variant"] = str(run_variant)
     kwargs["input_mode"] = INPUT_MODE
     kwargs["use_patch_224"] = USE_PATCH_224
-    kwargs["patch_size"] = PATCH_SIZE if USE_PATCH_224 else None
+    # Keep a concrete patch_size in kwargs; passing None can break multi-scale transforms.
+    if USE_PATCH_224:
+        kwargs["patch_size"] = PATCH_SIZE
+    else:
+        kwargs.setdefault(
+            "patch_size",
+            int(getattr(getattr(model, "model_config", None), "patch_size", 14) or 14),
+        )
+        kwargs.setdefault(
+            "num_windows",
+            int(getattr(getattr(model, "model_config", None), "num_windows", 4) or 4),
+        )
     kwargs["full_resolution"] = None if USE_PATCH_224 else FULL_RESOLUTION
     (meta / "train_kwargs.json").write_text(json.dumps(kwargs, indent=2), encoding="utf-8")
     (meta / "dataset_info.json").write_text(json.dumps({
