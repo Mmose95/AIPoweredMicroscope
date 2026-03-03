@@ -486,7 +486,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--wsl-distro", type=str, default=DEFAULT_WSL_DISTRO)
     p.add_argument("--semidetr-python-wsl", type=str, default=DEFAULT_SEMIDETR_PYTHON_WSL)
     p.add_argument("--cuda-visible-devices", type=str, default="0")
-    p.add_argument("--launcher", choices=["pytorch", "none"], default="pytorch")
+    p.add_argument("--launcher", choices=["pytorch", "none"], default="none")
     p.add_argument("--dist-backend", choices=["gloo", "nccl"], default="gloo")
     p.add_argument("--use-tensorboard", action="store_true")
     p.add_argument("--master-port", type=int, default=0)

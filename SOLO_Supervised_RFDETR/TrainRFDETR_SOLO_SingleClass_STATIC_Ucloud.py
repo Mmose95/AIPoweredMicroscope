@@ -840,11 +840,17 @@ def train_one_run(target_name: str,
                   out_dir: Path,
                   model_cls,
                   init_mode: str,
+                  run_variant: str,
                   epochs: int,
                   lr: float,
+                  lr_encoder: float | None,
+                  warmup_epochs: float | None,
+                  freeze_encoder: bool | None,
                   batch_size: int,
                   grad_accum_steps: int,
                   num_queries: int,
+                  multi_scale: bool,
+                  expanded_scales: bool,
                   aug_copies: int,
                   weight_decay: float,
                   dropout: float,
@@ -964,7 +970,8 @@ def train_one_run(target_name: str,
         dropout=dropout,
         num_queries=num_queries,
 
-        multi_scale=False,
+        multi_scale=bool(multi_scale),
+        expanded_scales=bool(expanded_scales),
         gradient_checkpointing=True,
         amp=True,
         num_workers=min(num_workers, os.cpu_count() or num_workers),
@@ -979,6 +986,12 @@ def train_one_run(target_name: str,
         checkpoint_interval=10,
         run_test=True,
     )
+    if lr_encoder is not None:
+        kwargs["lr_encoder"] = float(lr_encoder)
+    if warmup_epochs is not None:
+        kwargs["warmup_epochs"] = float(warmup_epochs)
+    if freeze_encoder is not None:
+        kwargs["freeze_encoder"] = bool(freeze_encoder)
     # resizing behaviour: IMPORTANT
     if USE_PATCH_224:
         # patches are already square 224×224; do NOT resize
@@ -997,6 +1010,7 @@ def train_one_run(target_name: str,
     kwargs["train_fraction"] = float(train_fraction)
     kwargs["fraction_seed"] = (int(seed) if fraction_seed is None else int(fraction_seed))
     kwargs["init_mode"] = init_mode
+    kwargs["run_variant"] = str(run_variant)
     kwargs["input_mode"] = INPUT_MODE
     kwargs["use_patch_224"] = USE_PATCH_224
     kwargs["patch_size"] = PATCH_SIZE if USE_PATCH_224 else None
@@ -1090,11 +1104,21 @@ MATRIX_QUICK_DEFAULTS_SHARED = {
     "RFDETR_GRAD_ACCUM_STEPS": "1",
     "RFDETR_WEIGHT_DECAY": "7e-4",
     "RFDETR_DROPOUT": "0.15",
+    "RFDETR_MULTI_SCALE": "0",
+    "RFDETR_EXPANDED_SCALES": "0",
     "RFDETR_AUG_COPIES": "0",
     "RFDETR_EARLY_STOPPING": "1",
     "RFDETR_EARLY_STOPPING_PATIENCE": "10",
     "RFDETR_EARLY_STOPPING_MIN_DELTA": "0.001",
     "RFDETR_EARLY_STOPPING_USE_EMA": "0",
+    # Optional optimizer/backbone overrides for all matrix runs.
+    "RFDETR_LR_ENCODER": "",
+    "RFDETR_WARMUP_EPOCHS": "",
+    "RFDETR_FREEZE_ENCODER": "",
+    # SSL triage defaults (used when RFDETR_EXPERIMENT_MODE=ssl_triage).
+    "RFDETR_SSL_TRIAGE_LR_ENCODER": "1e-5",
+    "RFDETR_SSL_TRIAGE_WARMUP_EPOCHS": "1.0",
+    "RFDETR_SSL_TRIAGE_EPOCHS": "",
 }
 
 MATRIX_QUICK_DEFAULTS_EPI = {
@@ -1166,6 +1190,24 @@ def _csv_int(raw: str) -> list[int]:
         raise ValueError("Expected a non-empty int CSV.")
     return vals
 
+def _cfg_optional_float(name: str) -> float | None:
+    raw = _cfg_text(name)
+    if raw == "":
+        return None
+    return float(raw)
+
+def _cfg_optional_int(name: str) -> int | None:
+    raw = _cfg_text(name)
+    if raw == "":
+        return None
+    return int(raw)
+
+def _cfg_optional_bool(name: str) -> bool | None:
+    raw = _cfg_text(name)
+    if raw == "":
+        return None
+    return _parse_bool(raw)
+
 def _parse_bool(raw: str) -> bool:
     x = str(raw).strip().lower()
     if x in ("1", "true", "yes", "y", "on"):
@@ -1221,11 +1263,21 @@ def _build_matrix_runtime_config() -> dict:
         "grad_accum_steps": int(_cfg_text("RFDETR_GRAD_ACCUM_STEPS")),
         "weight_decay": float(_cfg_text("RFDETR_WEIGHT_DECAY")),
         "dropout": float(_cfg_text("RFDETR_DROPOUT")),
+        "lr_encoder": _cfg_optional_float("RFDETR_LR_ENCODER"),
+        "warmup_epochs": _cfg_optional_float("RFDETR_WARMUP_EPOCHS"),
+        "freeze_encoder": _cfg_optional_bool("RFDETR_FREEZE_ENCODER"),
+        "multi_scale": _parse_bool(_cfg_text("RFDETR_MULTI_SCALE")),
+        "expanded_scales": _parse_bool(_cfg_text("RFDETR_EXPANDED_SCALES")),
         "aug_copies": int(_cfg_text("RFDETR_AUG_COPIES")),
         "early_stopping": _parse_bool(_cfg_text("RFDETR_EARLY_STOPPING")),
         "early_stopping_patience": int(_cfg_text("RFDETR_EARLY_STOPPING_PATIENCE")),
         "early_stopping_min_delta": float(_cfg_text("RFDETR_EARLY_STOPPING_MIN_DELTA")),
         "early_stopping_use_ema": _parse_bool(_cfg_text("RFDETR_EARLY_STOPPING_USE_EMA")),
+        "ssl_triage": {
+            "lr_encoder": float(_cfg_text("RFDETR_SSL_TRIAGE_LR_ENCODER")),
+            "warmup_epochs": float(_cfg_text("RFDETR_SSL_TRIAGE_WARMUP_EPOCHS")),
+            "epochs": _cfg_optional_int("RFDETR_SSL_TRIAGE_EPOCHS"),
+        },
         "epi": {
             "epochs": int(_cfg_text("RFDETR_EPI_EPOCHS")),
             "lr": float(_cfg_text("RFDETR_EPI_LR")),
@@ -1247,6 +1299,10 @@ def _build_matrix_runtime_config() -> dict:
         raise ValueError(f"RFDETR_GRAD_ACCUM_STEPS must be >= 1, got {cfg['grad_accum_steps']}")
     if cfg["dropout"] < 0 or cfg["dropout"] >= 1:
         raise ValueError(f"RFDETR_DROPOUT must be in [0,1), got {cfg['dropout']}")
+    if cfg["lr_encoder"] is not None and cfg["lr_encoder"] <= 0:
+        raise ValueError(f"RFDETR_LR_ENCODER must be > 0, got {cfg['lr_encoder']}")
+    if cfg["warmup_epochs"] is not None and cfg["warmup_epochs"] < 0:
+        raise ValueError(f"RFDETR_WARMUP_EPOCHS must be >= 0, got {cfg['warmup_epochs']}")
     if cfg["early_stopping_patience"] < 0:
         raise ValueError(
             f"RFDETR_EARLY_STOPPING_PATIENCE must be >= 0, got {cfg['early_stopping_patience']}"
@@ -1254,6 +1310,19 @@ def _build_matrix_runtime_config() -> dict:
     if cfg["early_stopping_min_delta"] < 0:
         raise ValueError(
             f"RFDETR_EARLY_STOPPING_MIN_DELTA must be >= 0, got {cfg['early_stopping_min_delta']}"
+        )
+    triage_cfg = cfg["ssl_triage"]
+    if triage_cfg["lr_encoder"] <= 0:
+        raise ValueError(
+            f"RFDETR_SSL_TRIAGE_LR_ENCODER must be > 0, got {triage_cfg['lr_encoder']}"
+        )
+    if triage_cfg["warmup_epochs"] < 0:
+        raise ValueError(
+            f"RFDETR_SSL_TRIAGE_WARMUP_EPOCHS must be >= 0, got {triage_cfg['warmup_epochs']}"
+        )
+    if triage_cfg["epochs"] is not None and triage_cfg["epochs"] < 1:
+        raise ValueError(
+            f"RFDETR_SSL_TRIAGE_EPOCHS must be >= 1 when set, got {triage_cfg['epochs']}"
         )
     return cfg
 
@@ -1277,13 +1346,19 @@ def _build_matrix_space_for_target(target_key: str, matrix_cfg: dict) -> dict:
         "MODEL_CLS":       [matrix_cfg["model_cls"]],
         "INIT_MODE":       matrix_cfg["init_modes"],
         "SSL_CKPT":        [tcfg["ssl_ckpt"]],
+        "RUN_VARIANT":     ["matrix_default"],
         "RESOLUTION":      [SEARCH_RESOLUTION],
         "EPOCHS":          [tcfg["epochs"]],
         "LR":              [tcfg["lr"]],
+        "LR_ENCODER":      [matrix_cfg["lr_encoder"]],
+        "WARMUP_EPOCHS":   [matrix_cfg["warmup_epochs"]],
+        "FREEZE_ENCODER":  [matrix_cfg["freeze_encoder"]],
         "GRAD_ACCUM_STEPS":[matrix_cfg["grad_accum_steps"]],
         "BATCH":           [tcfg["batch"]],
         "WEIGHT_DECAY":    [matrix_cfg["weight_decay"]],
         "DROPOUT":         [matrix_cfg["dropout"]],
+        "MULTI_SCALE":     [matrix_cfg["multi_scale"]],
+        "EXPANDED_SCALES": [matrix_cfg["expanded_scales"]],
         "NUM_QUERIES":     [tcfg["num_queries"]],
         "AUG_COPIES":      [matrix_cfg["aug_copies"]],
         "EARLY_STOPPING":             [matrix_cfg["early_stopping"]],
@@ -1295,20 +1370,113 @@ def _build_matrix_space_for_target(target_key: str, matrix_cfg: dict) -> dict:
         "SEED":            matrix_cfg["seeds"],
     }
 
+def _build_ssl_triage_cfgs_for_target(target_key: str, matrix_cfg: dict) -> list[dict]:
+    """
+    Build explicit SSL sanity-check runs:
+    1) scratch baseline (matched hyperparameters),
+    2) SSL head-only (frozen backbone),
+    3) SSL fine-tune with low backbone LR + warmup.
+    """
+    if target_key not in ("epi", "leu"):
+        raise ValueError(f"Unsupported target_key={target_key!r}")
+
+    tcfg = matrix_cfg[target_key]
+    if not tcfg["ssl_ckpt"]:
+        raise ValueError(
+            f"ssl_triage requires RFDETR_{target_key.upper()}_SSL_CKPT to be set."
+        )
+
+    triage_cfg = matrix_cfg["ssl_triage"]
+    triage_epochs = int(triage_cfg["epochs"] or tcfg["epochs"])
+
+    shared = {
+        "MODEL_CLS": matrix_cfg["model_cls"],
+        "SSL_CKPT": tcfg["ssl_ckpt"],
+        "RESOLUTION": SEARCH_RESOLUTION,
+        "EPOCHS": triage_epochs,
+        "LR": tcfg["lr"],
+        "GRAD_ACCUM_STEPS": matrix_cfg["grad_accum_steps"],
+        "BATCH": tcfg["batch"],
+        "WEIGHT_DECAY": matrix_cfg["weight_decay"],
+        "DROPOUT": matrix_cfg["dropout"],
+        "MULTI_SCALE": matrix_cfg["multi_scale"],
+        "EXPANDED_SCALES": matrix_cfg["expanded_scales"],
+        "NUM_QUERIES": tcfg["num_queries"],
+        "AUG_COPIES": matrix_cfg["aug_copies"],
+        "EARLY_STOPPING": matrix_cfg["early_stopping"],
+        "EARLY_STOPPING_PATIENCE": matrix_cfg["early_stopping_patience"],
+        "EARLY_STOPPING_MIN_DELTA": matrix_cfg["early_stopping_min_delta"],
+        "EARLY_STOPPING_USE_EMA": matrix_cfg["early_stopping_use_ema"],
+    }
+
+    variants = [
+        {
+            "RUN_VARIANT": "triage_scratch_matched",
+            "INIT_MODE": "scratch",
+            "SSL_CKPT": "",
+            "FREEZE_ENCODER": False,
+            "LR_ENCODER": None,
+            "WARMUP_EPOCHS": None,
+        },
+        {
+            "RUN_VARIANT": "triage_ssl_head_only",
+            "INIT_MODE": "ssl",
+            "FREEZE_ENCODER": True,
+            "LR_ENCODER": triage_cfg["lr_encoder"],
+            "WARMUP_EPOCHS": triage_cfg["warmup_epochs"],
+        },
+        {
+            "RUN_VARIANT": "triage_ssl_low_backbone_lr",
+            "INIT_MODE": "ssl",
+            "FREEZE_ENCODER": False,
+            "LR_ENCODER": triage_cfg["lr_encoder"],
+            "WARMUP_EPOCHS": triage_cfg["warmup_epochs"],
+        },
+    ]
+
+    cfgs: list[dict] = []
+    for train_fraction in matrix_cfg["train_fractions"]:
+        for fraction_seed in matrix_cfg["fraction_seeds"]:
+            for seed in matrix_cfg["seeds"]:
+                for var in variants:
+                    cfg = dict(shared)
+                    cfg.update(var)
+                    cfg["TRAIN_FRACTION"] = train_fraction
+                    cfg["FRACTION_SEED"] = fraction_seed
+                    cfg["SEED"] = seed
+                    cfgs.append(cfg)
+    return cfgs
+
 # One-click matrix mode (both classes, with/without SSL, chosen fractions) with env flags.
 EXPERIMENT_MODE = os.getenv("RFDETR_EXPERIMENT_MODE", "matrix").strip().lower()
-if EXPERIMENT_MODE != "matrix":
-    raise ValueError("RFDETR_EXPERIMENT_MODE currently supports only 'matrix'.")
+if EXPERIMENT_MODE not in ("matrix", "ssl_triage"):
+    raise ValueError(
+        "RFDETR_EXPERIMENT_MODE must be one of: matrix, ssl_triage."
+    )
 
 MATRIX_CFG = _build_matrix_runtime_config()
-SEARCH_LEUCO = _build_matrix_space_for_target("leu", MATRIX_CFG)
-SEARCH_EPI = _build_matrix_space_for_target("epi", MATRIX_CFG)
-_main_print(
-    f"[EXPERIMENT] mode=matrix init_modes={','.join(MATRIX_CFG['init_modes'])} "
-    f"fractions={','.join(str(x) for x in MATRIX_CFG['train_fractions'])} "
-    f"fraction_seeds={','.join(str(x) for x in MATRIX_CFG['fraction_seeds'])} "
-    f"seeds={','.join(str(x) for x in MATRIX_CFG['seeds'])}"
-)
+need_leu = HPO_TARGET in ("leu", "all")
+need_epi = HPO_TARGET in ("epi", "all")
+if EXPERIMENT_MODE == "matrix":
+    SEARCH_LEUCO = _build_matrix_space_for_target("leu", MATRIX_CFG) if need_leu else {}
+    SEARCH_EPI = _build_matrix_space_for_target("epi", MATRIX_CFG) if need_epi else {}
+    _main_print(
+        f"[EXPERIMENT] mode=matrix init_modes={','.join(MATRIX_CFG['init_modes'])} "
+        f"fractions={','.join(str(x) for x in MATRIX_CFG['train_fractions'])} "
+        f"fraction_seeds={','.join(str(x) for x in MATRIX_CFG['fraction_seeds'])} "
+        f"seeds={','.join(str(x) for x in MATRIX_CFG['seeds'])}"
+    )
+else:
+    SEARCH_LEUCO = _build_ssl_triage_cfgs_for_target("leu", MATRIX_CFG) if need_leu else []
+    SEARCH_EPI = _build_ssl_triage_cfgs_for_target("epi", MATRIX_CFG) if need_epi else []
+    _main_print(
+        f"[EXPERIMENT] mode=ssl_triage triage_lr_encoder={MATRIX_CFG['ssl_triage']['lr_encoder']} "
+        f"triage_warmup_epochs={MATRIX_CFG['ssl_triage']['warmup_epochs']} "
+        f"triage_epochs={MATRIX_CFG['ssl_triage']['epochs'] or 'per-target-default'} "
+        f"fractions={','.join(str(x) for x in MATRIX_CFG['train_fractions'])} "
+        f"fraction_seeds={','.join(str(x) for x in MATRIX_CFG['fraction_seeds'])} "
+        f"seeds={','.join(str(x) for x in MATRIX_CFG['seeds'])}"
+    )
 
 
 def grid(space: dict):
@@ -1316,6 +1484,13 @@ def grid(space: dict):
     vals = [space[k] for k in keys]
     for combo in itertools.product(*vals):
         yield dict(zip(keys, combo))
+
+def _iter_cfgs(search_space):
+    if isinstance(search_space, dict):
+        yield from grid(search_space)
+        return
+    for cfg in search_space:
+        yield cfg
 
 def _short_ckpt_name(ckpt) -> str:
     if not ckpt:
@@ -1335,6 +1510,7 @@ def _build_training_plan_rows(jobs: list[dict]) -> list[dict]:
             "run_idx": run_idx,
             "target": job["target_name"],
             "model": cfg.get("MODEL_CLS"),
+            "run_variant": cfg.get("RUN_VARIANT", "matrix_default"),
             "init_mode": init_mode,
             "ssl_ckpt": (str(ckpt) if ckpt else ""),
             "ssl_ckpt_name": _short_ckpt_name(ckpt),
@@ -1343,8 +1519,13 @@ def _build_training_plan_rows(jobs: list[dict]) -> list[dict]:
             "seed": cfg.get("SEED"),
             "epochs": cfg.get("EPOCHS"),
             "lr": cfg.get("LR"),
+            "lr_encoder": cfg.get("LR_ENCODER"),
+            "warmup_epochs": cfg.get("WARMUP_EPOCHS"),
+            "freeze_encoder": cfg.get("FREEZE_ENCODER"),
             "batch": cfg.get("BATCH"),
             "grad_accum_steps": cfg.get("GRAD_ACCUM_STEPS"),
+            "multi_scale": cfg.get("MULTI_SCALE"),
+            "expanded_scales": cfg.get("EXPANDED_SCALES"),
             "num_queries": cfg.get("NUM_QUERIES"),
             "weight_decay": cfg.get("WEIGHT_DECAY"),
             "dropout": cfg.get("DROPOUT"),
@@ -1361,7 +1542,7 @@ def _build_training_plan_rows(jobs: list[dict]) -> list[dict]:
 
 def _print_and_save_training_plan(plan_rows: list[dict], session_root: Path):
     print_rows = _parse_bool(os.getenv("RFDETR_PRINT_PLAN_ROWS", "1"))
-    print("[PLAN] Matrix training plan")
+    print(f"[PLAN] Training plan ({EXPERIMENT_MODE})")
     print(f"[PLAN] Total planned runs: {len(plan_rows)}")
     if not plan_rows:
         return
@@ -1377,8 +1558,9 @@ def _print_and_save_training_plan(plan_rows: list[dict], session_root: Path):
         print(f"[PLAN] {target_name}: runs={len(rows)} {counts_txt}")
 
     concise_cols = [
-        "run_idx", "target", "init_mode", "train_fraction", "fraction_seed", "seed", "epochs", "lr",
-        "batch", "grad_accum_steps", "num_queries", "weight_decay", "dropout",
+        "run_idx", "target", "run_variant", "init_mode", "train_fraction", "fraction_seed", "seed", "epochs", "lr",
+        "lr_encoder", "warmup_epochs", "freeze_encoder",
+        "batch", "grad_accum_steps", "multi_scale", "expanded_scales", "num_queries", "weight_decay", "dropout",
         "early_stopping", "early_stopping_patience", "early_stopping_min_delta",
         "early_stopping_use_ema", "ssl_ckpt_name",
     ]
@@ -1498,6 +1680,7 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
         run_dir.mkdir(parents=True, exist_ok=True)
 
         init_mode = str(cfg.get("INIT_MODE", "default")).strip().lower()
+        run_variant = str(cfg.get("RUN_VARIANT", "matrix_default"))
         ssl_ckpt = cfg.get("SSL_CKPT")
         backbone_ckpt = ssl_ckpt if init_mode == "ssl" else None
         train_fraction = float(cfg.get("TRAIN_FRACTION", 1.0))
@@ -1522,11 +1705,17 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
                     out_dir=run_dir,
                     model_cls=model_cls,
                     init_mode=init_mode,
+                    run_variant=run_variant,
                     epochs=try_cfg["EPOCHS"],
                     lr=try_cfg["LR"],
+                    lr_encoder=try_cfg.get("LR_ENCODER"),
+                    warmup_epochs=try_cfg.get("WARMUP_EPOCHS"),
+                    freeze_encoder=try_cfg.get("FREEZE_ENCODER"),
                     batch_size=try_cfg["BATCH"],
                     grad_accum_steps=try_cfg["GRAD_ACCUM_STEPS"],
                     num_queries=try_cfg["NUM_QUERIES"],
+                    multi_scale=try_cfg["MULTI_SCALE"],
+                    expanded_scales=try_cfg["EXPANDED_SCALES"],
                     weight_decay=try_cfg["WEIGHT_DECAY"],
                     dropout=try_cfg["DROPOUT"],
                     aug_copies=try_cfg["AUG_COPIES"],
@@ -1606,6 +1795,7 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
             "seed": run_seed,
             "fraction_seed": fraction_seed,
             "init_mode": init_mode,
+            "run_variant": run_variant,
             "uses_ssl_encoder": bool(init_mode == "ssl"),
             "encoder_ckpt": backbone_ckpt,
             "val_AP50": best.get("map50"),
@@ -1670,7 +1860,7 @@ def run_hpo_all_classes(session_root: Path) -> dict:
 
     jobs = []
     for target_name, dataset_dir, search_space in selected:
-        for cfg in grid(search_space):
+        for cfg in _iter_cfgs(search_space):
             jobs.append({
                 "target_name": target_name,
                 "dataset_dir": str(dataset_dir),
