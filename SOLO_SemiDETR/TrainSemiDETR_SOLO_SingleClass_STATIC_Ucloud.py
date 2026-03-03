@@ -149,6 +149,20 @@ def _image_size(image_path: Path) -> tuple[int, int]:
     return int(w), int(h)
 
 
+def _aspect_group(width: int, height: int) -> int:
+    if height <= 0:
+        return 0
+    return 1 if (float(width) / float(height)) > 1.0 else 0
+
+
+def _aspect_group_hist(images: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[int, int] = {}
+    for im in images:
+        g = _aspect_group(int(im["width"]), int(im["height"]))
+        counts[g] = counts.get(g, 0) + 1
+    return {str(k): int(v) for k, v in sorted(counts.items())}
+
+
 def _build_unsup_images(
     sup_js: dict[str, Any],
     val_js: dict[str, Any],
@@ -162,6 +176,10 @@ def _build_unsup_images(
     seed: int,
     cache_root: Path,
 ) -> dict[str, Any]:
+    sup_groups = {_aspect_group(int(im["width"]), int(im["height"])) for im in sup_js.get("images", [])}
+    if not sup_groups:
+        raise RuntimeError("Supervised split has zero images after sampling.")
+
     image_meta = {
         _norm_file_name(str(im["file_name"])): (int(im["width"]), int(im["height"]))
         for im in sup_js.get("images", []) + val_js.get("images", []) + test_js.get("images", []) + leftover_images
@@ -189,6 +207,7 @@ def _build_unsup_images(
     skipped_missing = 0
     skipped_open = 0
     skipped_size = 0
+    skipped_group = 0
     for rel in candidates:
         if rel in seen:
             continue
@@ -209,6 +228,9 @@ def _build_unsup_images(
         ):
             skipped_size += 1
             continue
+        if _aspect_group(wh[0], wh[1]) not in sup_groups:
+            skipped_group += 1
+            continue
         unsup_images.append({"id": len(unsup_images) + 1, "file_name": rel, "width": wh[0], "height": wh[1]})
         if len(unsup_images) >= target_unsup:
             break
@@ -216,7 +238,8 @@ def _build_unsup_images(
     if not unsup_images:
         raise RuntimeError(
             "No usable unlabeled images found. "
-            f"Try increasing --unlabeled-max-width/--unlabeled-max-height or lowering --unlabeled-per-labeled."
+            f"Try increasing --unlabeled-max-width/--unlabeled-max-height or lowering --unlabeled-per-labeled. "
+            f"Allowed aspect groups from labeled set: {sorted(sup_groups)}."
         )
     if len(unsup_images) < target_unsup:
         print(
@@ -224,7 +247,11 @@ def _build_unsup_images(
             target_unsup,
             "images, but prepared",
             len(unsup_images),
-            f"(skipped_missing={skipped_missing}, skipped_open={skipped_open}, skipped_size={skipped_size}).",
+            (
+                f"(skipped_missing={skipped_missing}, skipped_open={skipped_open}, "
+                f"skipped_size={skipped_size}, skipped_group={skipped_group}, "
+                f"allowed_groups={sorted(sup_groups)})."
+            ),
         )
 
     unsup_js = {
@@ -561,7 +588,9 @@ def main() -> None:
         "seed": int(args.seed),
         "labeled_images": len(sup_js.get("images", [])),
         "labeled_annotations": len(sup_js.get("annotations", [])),
+        "labeled_aspect_groups": _aspect_group_hist(sup_js.get("images", [])),
         "unlabeled_images": len(unsup_js.get("images", [])),
+        "unlabeled_aspect_groups": _aspect_group_hist(unsup_js.get("images", [])),
         "unlabeled_max_width": int(args.unlabeled_max_width),
         "unlabeled_max_height": int(args.unlabeled_max_height),
         "dist_backend": str(args.dist_backend),
