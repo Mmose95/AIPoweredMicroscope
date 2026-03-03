@@ -1448,7 +1448,7 @@ def _build_ssl_triage_cfgs_for_target(target_key: str, matrix_cfg: dict) -> list
     return cfgs
 
 # One-click matrix mode (both classes, with/without SSL, chosen fractions) with env flags.
-EXPERIMENT_MODE = os.getenv("RFDETR_EXPERIMENT_MODE", "matrix").strip().lower()
+EXPERIMENT_MODE = os.getenv("RFDETR_EXPERIMENT_MODE", "ssl_triage").strip().lower()
 if EXPERIMENT_MODE not in ("matrix", "ssl_triage"):
     raise ValueError(
         "RFDETR_EXPERIMENT_MODE must be one of: matrix, ssl_triage."
