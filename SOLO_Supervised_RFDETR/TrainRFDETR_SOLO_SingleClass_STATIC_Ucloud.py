@@ -1073,11 +1073,9 @@ def find_best_val(output_dir: Path) -> dict:
 # ───────────────────────────────────────────────────────────────────────────────
 SEARCH_RESOLUTION = PATCH_SIZE if USE_PATCH_224 else FULL_RESOLUTION
 
-MATRIX_QUICK_DEFAULTS = {
+MATRIX_QUICK_DEFAULTS_SHARED = {
     # Shared matrix controls
     "RFDETR_MODEL_CLS": "RFDETRLarge",
-    "RFDETR_EPI_EPOCHS": "50",
-    "RFDETR_LEU_EPOCHS": "70",
     # Init regimes:
     # - default: RF-DETR default pretrained weights
     # - scratch: no pretraining
@@ -1097,21 +1095,33 @@ MATRIX_QUICK_DEFAULTS = {
     "RFDETR_EARLY_STOPPING_PATIENCE": "10",
     "RFDETR_EARLY_STOPPING_MIN_DELTA": "0.001",
     "RFDETR_EARLY_STOPPING_USE_EMA": "0",
-    # Class-specific defaults
+}
+
+MATRIX_QUICK_DEFAULTS_EPI = {
+    "RFDETR_EPI_EPOCHS": "50",
     "RFDETR_EPI_LR": "5e-5",
-    "RFDETR_LEU_LR": "8e-5",
+    "RFDETR_EPI_NUM_QUERIES": "120",
     "RFDETR_EPI_SSL_CKPT": "",
+}
+
+MATRIX_QUICK_DEFAULTS_LEU = {
+    "RFDETR_LEU_EPOCHS": "70",
+    "RFDETR_LEU_LR": "8e-5",
+    "RFDETR_LEU_NUM_QUERIES": "400",
     "RFDETR_LEU_SSL_CKPT": "",
+}
+
+MATRIX_QUICK_DEFAULTS = {
+    **MATRIX_QUICK_DEFAULTS_SHARED,
+    **MATRIX_QUICK_DEFAULTS_EPI,
+    **MATRIX_QUICK_DEFAULTS_LEU,
 }
 
 def _matrix_dynamic_defaults() -> dict:
     default_batch = 16 if USE_PATCH_224 else 4
-    default_queries = 200 if USE_PATCH_224 else 120
     return {
         "RFDETR_EPI_BATCH": str(default_batch),
         "RFDETR_LEU_BATCH": str(default_batch),
-        "RFDETR_EPI_NUM_QUERIES": str(default_queries),
-        "RFDETR_LEU_NUM_QUERIES": str(default_queries),
     }
 
 def _cfg_text(name: str) -> str:
