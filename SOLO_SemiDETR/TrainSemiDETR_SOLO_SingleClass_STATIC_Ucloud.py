@@ -157,6 +157,8 @@ def _build_unsup_images(
     images_root: Path,
     unlabeled_per_labeled: int,
     unlabeled_max_images: int,
+    unlabeled_max_width: int,
+    unlabeled_max_height: int,
     seed: int,
     cache_root: Path,
 ) -> dict[str, Any]:
@@ -177,25 +179,53 @@ def _build_unsup_images(
         target_unsup = min(target_unsup, unlabeled_max_images)
 
     rng = random.Random(seed)
-    if len(leftover_rel) > target_unsup:
-        rng.shuffle(leftover_rel)
-        selected_rel = leftover_rel[:target_unsup]
-    else:
-        selected_rel = list(leftover_rel)
-        need_more = max(0, target_unsup - len(selected_rel))
-        ext = list(external_pool)
-        rng.shuffle(ext)
-        selected_rel.extend(ext[:need_more])
+    rng.shuffle(leftover_rel)
+    ext = list(external_pool)
+    rng.shuffle(ext)
+    candidates = list(leftover_rel) + ext
 
     unsup_images = []
-    for new_id, rel in enumerate(selected_rel, start=1):
+    seen: set[str] = set()
+    skipped_missing = 0
+    skipped_open = 0
+    skipped_size = 0
+    for rel in candidates:
+        if rel in seen:
+            continue
+        seen.add(rel)
         wh = image_meta.get(rel)
         if wh is None:
             img_path = images_root / rel
             if not img_path.exists():
-                raise FileNotFoundError(f"Unlabeled image not found: {img_path}")
-            wh = _image_size(img_path)
-        unsup_images.append({"id": new_id, "file_name": rel, "width": wh[0], "height": wh[1]})
+                skipped_missing += 1
+                continue
+            try:
+                wh = _image_size(img_path)
+            except Exception:
+                skipped_open += 1
+                continue
+        if (unlabeled_max_width > 0 and wh[0] > unlabeled_max_width) or (
+            unlabeled_max_height > 0 and wh[1] > unlabeled_max_height
+        ):
+            skipped_size += 1
+            continue
+        unsup_images.append({"id": len(unsup_images) + 1, "file_name": rel, "width": wh[0], "height": wh[1]})
+        if len(unsup_images) >= target_unsup:
+            break
+
+    if not unsup_images:
+        raise RuntimeError(
+            "No usable unlabeled images found. "
+            f"Try increasing --unlabeled-max-width/--unlabeled-max-height or lowering --unlabeled-per-labeled."
+        )
+    if len(unsup_images) < target_unsup:
+        print(
+            "[UNLABELED][WARN] Requested",
+            target_unsup,
+            "images, but prepared",
+            len(unsup_images),
+            f"(skipped_missing={skipped_missing}, skipped_open={skipped_open}, skipped_size={skipped_size}).",
+        )
 
     unsup_js = {
         "images": unsup_images,
@@ -404,6 +434,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--labeled-percent", type=float, default=50.0)
     p.add_argument("--unlabeled-per-labeled", type=int, default=6)
     p.add_argument("--unlabeled-max-images", type=int, default=0)
+    p.add_argument("--unlabeled-max-width", type=int, default=2048)
+    p.add_argument("--unlabeled-max-height", type=int, default=2048)
     p.add_argument("--samples-per-gpu", type=int, default=5)
     p.add_argument("--workers-per-gpu", type=int, default=5)
     p.add_argument("--sample-ratio", type=str, default="1,4")
@@ -469,6 +501,8 @@ def main() -> None:
         images_root=images_root,
         unlabeled_per_labeled=int(args.unlabeled_per_labeled),
         unlabeled_max_images=int(args.unlabeled_max_images),
+        unlabeled_max_width=int(args.unlabeled_max_width),
+        unlabeled_max_height=int(args.unlabeled_max_height),
         seed=int(args.seed),
         cache_root=cache_root,
     )
@@ -517,6 +551,8 @@ def main() -> None:
         "labeled_images": len(sup_js.get("images", [])),
         "labeled_annotations": len(sup_js.get("annotations", [])),
         "unlabeled_images": len(unsup_js.get("images", [])),
+        "unlabeled_max_width": int(args.unlabeled_max_width),
+        "unlabeled_max_height": int(args.unlabeled_max_height),
         "config_path": str(cfg_path),
     }
     _write_json(run_root / "run_summary.json", summary)
