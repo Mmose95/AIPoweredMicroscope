@@ -294,6 +294,7 @@ def _write_run_config(
     samples_per_gpu: int,
     workers_per_gpu: int,
     dist_backend: str,
+    use_tensorboard: bool,
     load_from: Path | None,
     backbone_checkpoint: Path | None,
 ) -> Path:
@@ -311,6 +312,10 @@ def _write_run_config(
         if backbone_checkpoint
         else "model = dict(backbone=dict(init_cfg=None), bbox_head=dict(num_classes=1))\n\n"
     )
+
+    log_hooks = "[dict(type='TextLoggerHook')]"
+    if use_tensorboard:
+        log_hooks = "[dict(type='TextLoggerHook'), dict(type='TensorboardLoggerHook')]"
 
     cfg_text = (
         f"_base_ = r'''{repo_wsl}/configs/detr_ssod/base_dino_detr_ssod_coco.py'''\n\n"
@@ -340,7 +345,7 @@ def _write_run_config(
         f"evaluation = dict(type='SubModulesDistEvalHook', interval={eval_interval})\n"
         f"runner = dict(_delete_=True, type='IterBasedRunner', max_iters={max_iters})\n"
         f"checkpoint_config = dict(by_epoch=False, interval={ckpt_interval}, max_keep_ckpts=5, create_symlink=False)\n"
-        "log_config = dict(interval=50, hooks=[dict(type='TextLoggerHook'), dict(type='TensorboardLoggerHook')])\n"
+        f"log_config = dict(interval=50, hooks={log_hooks})\n"
         f"dist_params = dict(backend={dist_backend!r})\n"
         f"{load_from_line}"
         f"work_dir = r'''{work_dir_wsl}'''\n"
@@ -456,6 +461,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cuda-visible-devices", type=str, default="0")
     p.add_argument("--launcher", choices=["pytorch", "none"], default="pytorch")
     p.add_argument("--dist-backend", choices=["gloo", "nccl"], default="gloo")
+    p.add_argument("--use-tensorboard", action="store_true")
     p.add_argument("--master-port", type=int, default=0)
     return p
 
@@ -541,6 +547,7 @@ def main() -> None:
         samples_per_gpu=int(args.samples_per_gpu),
         workers_per_gpu=int(args.workers_per_gpu),
         dist_backend=str(args.dist_backend),
+        use_tensorboard=bool(args.use_tensorboard),
         load_from=load_from,
         backbone_checkpoint=backbone_checkpoint,
     )
@@ -558,6 +565,7 @@ def main() -> None:
         "unlabeled_max_width": int(args.unlabeled_max_width),
         "unlabeled_max_height": int(args.unlabeled_max_height),
         "dist_backend": str(args.dist_backend),
+        "use_tensorboard": bool(args.use_tensorboard),
         "config_path": str(cfg_path),
     }
     _write_json(run_root / "run_summary.json", summary)
