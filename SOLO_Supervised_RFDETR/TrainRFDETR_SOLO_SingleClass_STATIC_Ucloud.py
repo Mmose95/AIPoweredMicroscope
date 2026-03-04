@@ -93,6 +93,22 @@ RFDETR_SOFT_TEACHER_UNLABELED_BATCH = int(os.getenv("RFDETR_SOFT_TEACHER_UNLABEL
 RFDETR_SOFT_TEACHER_BURNIN_EPOCHS = float(os.getenv("RFDETR_SOFT_TEACHER_BURNIN_EPOCHS", "1.0"))
 RFDETR_SOFT_TEACHER_MIN_BOX_WH = float(os.getenv("RFDETR_SOFT_TEACHER_MIN_BOX_WH", "0.005"))
 RFDETR_SOFT_TEACHER_MAX_IMAGES = int(os.getenv("RFDETR_SOFT_TEACHER_MAX_IMAGES", "0") or 0)
+RFDETR_SOFT_TEACHER_EXCLUDE_LABELED = _env_bool("RFDETR_SOFT_TEACHER_EXCLUDE_LABELED", "1")
+RFDETR_SOFT_TEACHER_UNLABELED_FIRST_SAMPLE = int(
+    os.getenv("RFDETR_SOFT_TEACHER_UNLABELED_FIRST_SAMPLE", "0") or 0
+)
+RFDETR_SOFT_TEACHER_UNLABELED_LAST_SAMPLE = int(
+    os.getenv("RFDETR_SOFT_TEACHER_UNLABELED_LAST_SAMPLE", "0") or 0
+)
+if (
+    RFDETR_SOFT_TEACHER_UNLABELED_FIRST_SAMPLE > 0
+    and RFDETR_SOFT_TEACHER_UNLABELED_LAST_SAMPLE > 0
+    and RFDETR_SOFT_TEACHER_UNLABELED_FIRST_SAMPLE > RFDETR_SOFT_TEACHER_UNLABELED_LAST_SAMPLE
+):
+    raise ValueError(
+        "RFDETR_SOFT_TEACHER_UNLABELED_FIRST_SAMPLE must be <= "
+        "RFDETR_SOFT_TEACHER_UNLABELED_LAST_SAMPLE."
+    )
 
 _main_print(f"[HPO] Target classes: {HPO_TARGET!r} (env RFDETR_HPO_TARGET)")
 _main_print(f"[INPUT MODE] RFDETR_INPUT_MODE={INPUT_MODE}  USE_PATCH_224={USE_PATCH_224}")
@@ -562,6 +578,16 @@ IMAGES_FALLBACK_ROOT = env_path(
 )
 
 if RFDETR_USE_SOFT_TEACHER:
+    if (
+        RFDETR_SOFT_TEACHER_UNLABELED_FIRST_SAMPLE > 0
+        or RFDETR_SOFT_TEACHER_UNLABELED_LAST_SAMPLE > 0
+    ):
+        sample_range_text = (
+            f"{RFDETR_SOFT_TEACHER_UNLABELED_FIRST_SAMPLE or '-inf'}.."
+            f"{RFDETR_SOFT_TEACHER_UNLABELED_LAST_SAMPLE or '+inf'}"
+        )
+    else:
+        sample_range_text = "all"
     _main_print(
         "[SOFT-TEACHER] enabled "
         f"unlabeled_dir={RFDETR_UNLABELED_DATASET_DIR or '<missing>'} "
@@ -569,7 +595,9 @@ if RFDETR_USE_SOFT_TEACHER:
         f"thresh={RFDETR_SOFT_TEACHER_PSEUDO_THRESH} "
         f"topk={RFDETR_SOFT_TEACHER_TOPK} "
         f"burnin={RFDETR_SOFT_TEACHER_BURNIN_EPOCHS} "
-        f"max_images={(RFDETR_SOFT_TEACHER_MAX_IMAGES if RFDETR_SOFT_TEACHER_MAX_IMAGES > 0 else 'auto')}"
+        f"max_images={(RFDETR_SOFT_TEACHER_MAX_IMAGES if RFDETR_SOFT_TEACHER_MAX_IMAGES > 0 else 'auto')} "
+        f"exclude_labeled={RFDETR_SOFT_TEACHER_EXCLUDE_LABELED} "
+        f"sample_range={sample_range_text}"
     )
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -666,7 +694,47 @@ def _resolve_coco_image_path(file_name: str, json_parent: Path, dataset_root: Pa
     return None
 
 
-def _collect_unlabeled_images(unlabeled_root: Path) -> list[Path]:
+_SAMPLE_DIR_RE = re.compile(r"(?:^|[\\/])Sample\s+(\d+)(?:[\\/]|$)", re.IGNORECASE)
+
+
+def _extract_sample_index(path: Path) -> int | None:
+    m = _SAMPLE_DIR_RE.search(str(path))
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except Exception:
+        return None
+
+
+def _collect_labeled_image_paths(labeled_root: Path) -> set[str]:
+    refs: set[str] = set()
+    for split in ("train", "valid", "test"):
+        ann_json = labeled_root / split / "_annotations.coco.json"
+        if not ann_json.exists():
+            continue
+        try:
+            data = json.loads(ann_json.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"[SOFT-TEACHER][WARN] Failed to parse labeled json {ann_json}: {e}")
+            continue
+        for im in data.get("images", []):
+            p = _resolve_coco_image_path(
+                file_name=str(im.get("file_name", "")),
+                json_parent=ann_json.parent,
+                dataset_root=labeled_root,
+            )
+            if p is not None:
+                refs.add(str(p))
+    return refs
+
+
+def _collect_unlabeled_images(
+    unlabeled_root: Path,
+    exclude_abs_paths: set[str] | None = None,
+    sample_first: int = 0,
+    sample_last: int = 0,
+) -> tuple[list[Path], dict]:
     train_json = unlabeled_root / "train" / "_annotations.coco.json"
     image_paths = []
     if train_json.exists():
@@ -690,7 +758,37 @@ def _collect_unlabeled_images(unlabeled_root: Path) -> list[Path]:
     for p in image_paths:
         dedup[str(p)] = p
     ordered = sorted(dedup.values(), key=lambda x: str(x))
-    return ordered
+    stats = {
+        "source_images": len(image_paths),
+        "deduped_images": len(ordered),
+        "removed_no_sample_tag": 0,
+        "removed_outside_sample_range": 0,
+        "removed_labeled_overlap": 0,
+        "selected_images": len(ordered),
+    }
+
+    if sample_first > 0 or sample_last > 0:
+        lo = sample_first if sample_first > 0 else 0
+        hi = sample_last if sample_last > 0 else 10**9
+        filtered = []
+        for p in ordered:
+            sidx = _extract_sample_index(p)
+            if sidx is None:
+                stats["removed_no_sample_tag"] += 1
+                continue
+            if sidx < lo or sidx > hi:
+                stats["removed_outside_sample_range"] += 1
+                continue
+            filtered.append(p)
+        ordered = filtered
+
+    if exclude_abs_paths:
+        before = len(ordered)
+        ordered = [p for p in ordered if str(p) not in exclude_abs_paths]
+        stats["removed_labeled_overlap"] = before - len(ordered)
+
+    stats["selected_images"] = len(ordered)
+    return ordered, stats
 
 
 def _predict_one_for_pseudo(model, img_pil: Image.Image, score_floor: float):
@@ -797,12 +895,16 @@ def _build_soft_teacher_pseudo_split(
     model,
     unlabeled_root: Path,
     labeled_train_json: Path,
+    labeled_dataset_root: Path | None,
     out_root: Path,
     score_thresh: float,
     topk: int,
     min_box_wh: float,
     unsup_weight: float,
     max_images_cap: int,
+    exclude_labeled: bool,
+    sample_first: int,
+    sample_last: int,
     seed: int,
 ) -> dict:
     rng = random.Random(int(seed))
@@ -812,15 +914,34 @@ def _build_soft_teacher_pseudo_split(
     target_cat_id = int(labeled_categories[0]["id"]) if labeled_categories else 1
     categories = labeled_categories if labeled_categories else [{"id": target_cat_id, "name": "pseudo"}]
 
-    unlabeled_images = _collect_unlabeled_images(unlabeled_root)
+    exclude_refs = set()
+    if exclude_labeled and labeled_dataset_root is not None and labeled_dataset_root.exists():
+        exclude_refs = _collect_labeled_image_paths(labeled_dataset_root)
+    unlabeled_images, unlabeled_stats = _collect_unlabeled_images(
+        unlabeled_root=unlabeled_root,
+        exclude_abs_paths=exclude_refs,
+        sample_first=int(sample_first),
+        sample_last=int(sample_last),
+    )
+    print(
+        "[SOFT-TEACHER] unlabeled selection "
+        f"source={unlabeled_stats.get('source_images', 0)} "
+        f"deduped={unlabeled_stats.get('deduped_images', 0)} "
+        f"selected={unlabeled_stats.get('selected_images', 0)} "
+        f"removed_labeled_overlap={unlabeled_stats.get('removed_labeled_overlap', 0)} "
+        f"removed_outside_sample_range={unlabeled_stats.get('removed_outside_sample_range', 0)} "
+        f"removed_no_sample_tag={unlabeled_stats.get('removed_no_sample_tag', 0)}"
+    )
     if not unlabeled_images:
         return {
             "pseudo_root": None,
             "pseudo_train_json": None,
-            "source_unlabeled_images": 0,
+            "source_unlabeled_images": int(unlabeled_stats.get("source_images", 0)),
+            "candidate_unlabeled_images": int(unlabeled_stats.get("selected_images", 0)),
             "pseudo_images": 0,
             "pseudo_annotations": 0,
             "selected_pseudo_images": 0,
+            "unlabeled_filter_stats": unlabeled_stats,
         }
 
     records = []
@@ -891,10 +1012,12 @@ def _build_soft_teacher_pseudo_split(
         return {
             "pseudo_root": None,
             "pseudo_train_json": None,
-            "source_unlabeled_images": len(unlabeled_images),
+            "source_unlabeled_images": int(unlabeled_stats.get("source_images", len(unlabeled_images))),
+            "candidate_unlabeled_images": int(unlabeled_stats.get("selected_images", len(unlabeled_images))),
             "pseudo_images": 0,
             "pseudo_annotations": 0,
             "selected_pseudo_images": 0,
+            "unlabeled_filter_stats": unlabeled_stats,
         }
 
     cap_from_weight = 0
@@ -957,13 +1080,15 @@ def _build_soft_teacher_pseudo_split(
     return {
         "pseudo_root": str(pseudo_root),
         "pseudo_train_json": str(pseudo_train_json),
-        "source_unlabeled_images": len(unlabeled_images),
+        "source_unlabeled_images": int(unlabeled_stats.get("source_images", len(unlabeled_images))),
+        "candidate_unlabeled_images": int(unlabeled_stats.get("selected_images", len(unlabeled_images))),
         "pseudo_images": len(records),
         "selected_pseudo_images": len(selected),
         "pseudo_annotations": len(out_anns),
         "cap_from_weight": cap_from_weight if cap_from_weight > 0 else None,
         "cap_max_images": int(max_images_cap) if int(max_images_cap) > 0 else None,
         "cap_final": cap_final if cap_final > 0 else None,
+        "unlabeled_filter_stats": unlabeled_stats,
     }
 
 
@@ -1537,12 +1662,16 @@ def train_one_run(target_name: str,
                 model=model,
                 unlabeled_root=unlabeled_dir_effective,
                 labeled_train_json=labeled_train_json,
+                labeled_dataset_root=data_dir,
                 out_root=out_dir,
                 score_thresh=float(RFDETR_SOFT_TEACHER_PSEUDO_THRESH),
                 topk=int(RFDETR_SOFT_TEACHER_TOPK),
                 min_box_wh=float(RFDETR_SOFT_TEACHER_MIN_BOX_WH),
                 unsup_weight=float(RFDETR_SOFT_TEACHER_UNSUP_WEIGHT),
                 max_images_cap=int(RFDETR_SOFT_TEACHER_MAX_IMAGES),
+                exclude_labeled=bool(RFDETR_SOFT_TEACHER_EXCLUDE_LABELED),
+                sample_first=int(RFDETR_SOFT_TEACHER_UNLABELED_FIRST_SAMPLE),
+                sample_last=int(RFDETR_SOFT_TEACHER_UNLABELED_LAST_SAMPLE),
                 seed=int(seed),
             )
 
@@ -1575,6 +1704,9 @@ def train_one_run(target_name: str,
                 "teacher_epochs": int(burnin_epochs),
                 "student_epochs": int(student_epochs),
                 "unlabeled_dir_effective": str(unlabeled_dir_effective),
+                "exclude_labeled": bool(RFDETR_SOFT_TEACHER_EXCLUDE_LABELED),
+                "sample_first": int(RFDETR_SOFT_TEACHER_UNLABELED_FIRST_SAMPLE),
+                "sample_last": int(RFDETR_SOFT_TEACHER_UNLABELED_LAST_SAMPLE),
                 "pseudo": pseudo_report,
                 "merged_dataset_dir": (str(merged_dir) if merged_dir is not None else None),
                 "merged_stats": merged_stats,
