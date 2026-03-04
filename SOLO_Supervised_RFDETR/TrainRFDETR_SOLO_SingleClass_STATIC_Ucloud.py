@@ -84,7 +84,7 @@ def _env_bool(name: str, default: str = "0") -> bool:
 
 
 # SoftTeacher toggles (global for all runs in this launcher invocation).
-RFDETR_USE_SOFT_TEACHER = _env_bool("RFDETR_USE_SOFT_TEACHER", "0")
+RFDETR_USE_SOFT_TEACHER = _env_bool("RFDETR_USE_SOFT_TEACHER", "1")
 RFDETR_UNLABELED_DATASET_DIR = os.getenv("RFDETR_UNLABELED_DATASET_DIR", "").strip()
 RFDETR_SOFT_TEACHER_UNSUP_WEIGHT = float(os.getenv("RFDETR_SOFT_TEACHER_UNSUP_WEIGHT", "1.0"))
 RFDETR_SOFT_TEACHER_PSEUDO_THRESH = float(os.getenv("RFDETR_SOFT_TEACHER_PSEUDO_THRESH", "0.7"))
