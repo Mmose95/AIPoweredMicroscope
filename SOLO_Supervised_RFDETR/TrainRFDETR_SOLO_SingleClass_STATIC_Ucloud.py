@@ -2,7 +2,7 @@ from __future__ import annotations
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
-import os, json, glob, os.path as op, itertools, time, csv, multiprocessing as mp
+import os, json, glob, os.path as op, itertools, time, csv, multiprocessing as mp, shutil
 import re
 import random
 from collections import defaultdict as ddict
@@ -84,7 +84,6 @@ def _env_bool(name: str, default: str = "0") -> bool:
 
 
 # SoftTeacher toggles (global for all runs in this launcher invocation).
-RFDETR_USE_LOCAL_BACKEND = _env_bool("RFDETR_USE_LOCAL_BACKEND", "1")
 RFDETR_USE_SOFT_TEACHER = _env_bool("RFDETR_USE_SOFT_TEACHER", "0")
 RFDETR_UNLABELED_DATASET_DIR = os.getenv("RFDETR_UNLABELED_DATASET_DIR", "").strip()
 RFDETR_SOFT_TEACHER_UNSUP_WEIGHT = float(os.getenv("RFDETR_SOFT_TEACHER_UNSUP_WEIGHT", "1.0"))
@@ -93,11 +92,11 @@ RFDETR_SOFT_TEACHER_TOPK = int(os.getenv("RFDETR_SOFT_TEACHER_TOPK", "100"))
 RFDETR_SOFT_TEACHER_UNLABELED_BATCH = int(os.getenv("RFDETR_SOFT_TEACHER_UNLABELED_BATCH", "0") or 0)
 RFDETR_SOFT_TEACHER_BURNIN_EPOCHS = float(os.getenv("RFDETR_SOFT_TEACHER_BURNIN_EPOCHS", "1.0"))
 RFDETR_SOFT_TEACHER_MIN_BOX_WH = float(os.getenv("RFDETR_SOFT_TEACHER_MIN_BOX_WH", "0.005"))
+RFDETR_SOFT_TEACHER_MAX_IMAGES = int(os.getenv("RFDETR_SOFT_TEACHER_MAX_IMAGES", "0") or 0)
 
 _main_print(f"[HPO] Target classes: {HPO_TARGET!r} (env RFDETR_HPO_TARGET)")
 _main_print(f"[INPUT MODE] RFDETR_INPUT_MODE={INPUT_MODE}  USE_PATCH_224={USE_PATCH_224}")
 _main_print(f"[INPUT SIZE] PATCH_SIZE={PATCH_SIZE}  FULL_RESOLUTION={FULL_RESOLUTION}")
-_main_print(f"[BACKEND] local_rfdetr={RFDETR_USE_LOCAL_BACKEND}")
 if RFDETR_USE_SOFT_TEACHER:
     _main_print(
         "[SOFT-TEACHER] enabled "
@@ -105,7 +104,8 @@ if RFDETR_USE_SOFT_TEACHER:
         f"unsup_weight={RFDETR_SOFT_TEACHER_UNSUP_WEIGHT} "
         f"thresh={RFDETR_SOFT_TEACHER_PSEUDO_THRESH} "
         f"topk={RFDETR_SOFT_TEACHER_TOPK} "
-        f"burnin={RFDETR_SOFT_TEACHER_BURNIN_EPOCHS}"
+        f"burnin={RFDETR_SOFT_TEACHER_BURNIN_EPOCHS} "
+        f"max_images={(RFDETR_SOFT_TEACHER_MAX_IMAGES if RFDETR_SOFT_TEACHER_MAX_IMAGES > 0 else 'auto')}"
     )
 if os.getenv("RFDETR_INPUT_MODE", "").strip():
     _main_print("[INPUT MODE] RFDETR_INPUT_MODE is authoritative; legacy RFDETR_USE_PATCH_224/RFDETR_PATCH_SIZE are ignored.")
@@ -645,6 +645,401 @@ def get_or_build_unlabeled_cache(dataset_dir: Path, root_out: Path) -> Path:
         stride=PATCH_SIZE,
     )
 
+
+def _resolve_coco_image_path(file_name: str, json_parent: Path, dataset_root: Path) -> Path | None:
+    raw = (file_name or "").strip()
+    if not raw:
+        return None
+    rel = raw.replace("\\", "/")
+    p_raw = Path(rel)
+    candidates = []
+    if p_raw.is_absolute():
+        candidates.append(p_raw)
+    candidates.append(json_parent / rel)
+    candidates.append(dataset_root / rel)
+    candidates.append(json_parent / p_raw.name)
+    candidates.append(dataset_root / p_raw.name)
+    for cand in candidates:
+        if cand.exists():
+            return cand.resolve()
+    return None
+
+
+def _collect_unlabeled_images(unlabeled_root: Path) -> list[Path]:
+    train_json = unlabeled_root / "train" / "_annotations.coco.json"
+    image_paths = []
+    if train_json.exists():
+        try:
+            data = json.loads(train_json.read_text(encoding="utf-8"))
+            for im in data.get("images", []):
+                p = _resolve_coco_image_path(
+                    file_name=str(im.get("file_name", "")),
+                    json_parent=train_json.parent,
+                    dataset_root=unlabeled_root,
+                )
+                if p is not None:
+                    image_paths.append(p)
+        except Exception as e:
+            print(f"[SOFT-TEACHER][WARN] Failed to parse {train_json}: {e}")
+    else:
+        for p in unlabeled_root.rglob("*"):
+            if p.is_file() and p.suffix.lower() in VALID_EXTS:
+                image_paths.append(p.resolve())
+    dedup = {}
+    for p in image_paths:
+        dedup[str(p)] = p
+    ordered = sorted(dedup.values(), key=lambda x: str(x))
+    return ordered
+
+
+def _predict_one_for_pseudo(model, img_pil: Image.Image, score_floor: float):
+    import torch
+
+    arr = np.array(img_pil.convert("RGB"))
+    ten = torch.from_numpy(arr).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+
+    out = None
+    for name in ("predict", "infer", "inference", "forward_inference"):
+        fn = getattr(model, name, None)
+        if not callable(fn):
+            continue
+        for inp in (img_pil, arr, ten):
+            for kw in ({"threshold": float(score_floor)}, {}):
+                try:
+                    out = fn(inp, **kw)
+                    break
+                except TypeError:
+                    out = None
+                except Exception:
+                    out = None
+            if out is not None:
+                break
+        if out is not None:
+            break
+
+    if out is None:
+        forward = getattr(model, "forward", None)
+        if callable(forward):
+            out = forward(ten)
+        else:
+            raise RuntimeError("Model has no supported inference method for pseudo-labeling.")
+
+    try:
+        import supervision as sv
+        if isinstance(out, sv.Detections):
+            boxes = out.xyxy.astype(np.float32)
+            scores = (
+                out.confidence.astype(np.float32)
+                if getattr(out, "confidence", None) is not None
+                else np.ones((len(boxes),), dtype=np.float32)
+            )
+            labels = (
+                out.class_id.astype(np.int64)
+                if getattr(out, "class_id", None) is not None
+                else np.zeros((len(boxes),), dtype=np.int64)
+            )
+            return boxes, scores, labels
+    except Exception:
+        pass
+
+    if isinstance(out, (list, tuple)) and len(out) == 1:
+        out = out[0]
+    if isinstance(out, (list, tuple)) and len(out) == 3:
+        out = {"boxes": out[0], "scores": out[1], "labels": out[2]}
+
+    if not isinstance(out, dict):
+        raise RuntimeError(f"Prediction output type not recognized: {type(out)}")
+
+    key_sets = [
+        ("boxes", "scores", "labels"),
+        ("pred_boxes", "scores", "labels"),
+        ("bboxes", "scores", "classes"),
+        ("boxes_xyxy", "scores", "labels"),
+        ("detections", None, None),
+    ]
+    boxes = scores = labels = None
+    for kb, ks, kl in key_sets:
+        if kb not in out:
+            continue
+        if ks is not None and ks not in out:
+            continue
+        if kl is not None and kl not in out:
+            continue
+        if kb == "detections":
+            d = out["detections"]
+            boxes = d.get("boxes") or d.get("bboxes")
+            scores = d.get("scores")
+            labels = d.get("labels") or d.get("classes")
+        else:
+            boxes = out[kb]
+            scores = out.get(ks)
+            labels = out.get(kl)
+        break
+
+    if boxes is None:
+        raise RuntimeError(f"Unrecognized prediction output keys: {list(out.keys())}")
+
+    def _to_np(x):
+        if x is None:
+            return None
+        if hasattr(x, "detach"):
+            return x.detach().cpu().numpy()
+        return np.asarray(x)
+
+    boxes_np = _to_np(boxes).astype(np.float32)
+    scores_np = _to_np(scores).astype(np.float32) if scores is not None else np.ones((len(boxes_np),), dtype=np.float32)
+    labels_np = _to_np(labels).astype(np.int64) if labels is not None else np.zeros((len(boxes_np),), dtype=np.int64)
+    return boxes_np, scores_np, labels_np
+
+
+def _build_soft_teacher_pseudo_split(
+    model,
+    unlabeled_root: Path,
+    labeled_train_json: Path,
+    out_root: Path,
+    score_thresh: float,
+    topk: int,
+    min_box_wh: float,
+    unsup_weight: float,
+    max_images_cap: int,
+    seed: int,
+) -> dict:
+    rng = random.Random(int(seed))
+    labeled_data = json.loads(labeled_train_json.read_text(encoding="utf-8"))
+    labeled_images = labeled_data.get("images", [])
+    labeled_categories = labeled_data.get("categories", [])
+    target_cat_id = int(labeled_categories[0]["id"]) if labeled_categories else 1
+    categories = labeled_categories if labeled_categories else [{"id": target_cat_id, "name": "pseudo"}]
+
+    unlabeled_images = _collect_unlabeled_images(unlabeled_root)
+    if not unlabeled_images:
+        return {
+            "pseudo_root": None,
+            "pseudo_train_json": None,
+            "source_unlabeled_images": 0,
+            "pseudo_images": 0,
+            "pseudo_annotations": 0,
+            "selected_pseudo_images": 0,
+        }
+
+    records = []
+    for idx, img_path in enumerate(unlabeled_images, start=1):
+        try:
+            img = Image.open(img_path).convert("RGB")
+        except Exception as e:
+            print(f"[SOFT-TEACHER][WARN] Failed to open unlabeled image {img_path}: {e}")
+            continue
+
+        width, height = img.size
+        try:
+            boxes, scores, _ = _predict_one_for_pseudo(model, img, score_floor=score_thresh)
+        except Exception as e:
+            print(f"[SOFT-TEACHER][WARN] Inference failed on {img_path.name}: {e}")
+            continue
+
+        if boxes is None or len(boxes) == 0:
+            continue
+        if scores is None or len(scores) == 0:
+            scores = np.ones((len(boxes),), dtype=np.float32)
+
+        order = np.argsort(-scores.astype(np.float32))
+        if topk > 0:
+            order = order[:topk]
+
+        min_w = (float(min_box_wh) * float(width)) if float(min_box_wh) <= 1.0 else float(min_box_wh)
+        min_h = (float(min_box_wh) * float(height)) if float(min_box_wh) <= 1.0 else float(min_box_wh)
+
+        anns = []
+        max_score = 0.0
+        for oi in order:
+            sc = float(scores[oi])
+            if sc < float(score_thresh):
+                continue
+            x1, y1, x2, y2 = [float(v) for v in boxes[oi]]
+            x1 = max(0.0, min(x1, float(width)))
+            y1 = max(0.0, min(y1, float(height)))
+            x2 = max(0.0, min(x2, float(width)))
+            y2 = max(0.0, min(y2, float(height)))
+            bw = x2 - x1
+            bh = y2 - y1
+            if bw < min_w or bh < min_h:
+                continue
+            anns.append({
+                "bbox": [x1, y1, bw, bh],
+                "score": sc,
+            })
+            if sc > max_score:
+                max_score = sc
+
+        if not anns:
+            continue
+
+        records.append({
+            "path": str(img_path),
+            "width": int(width),
+            "height": int(height),
+            "anns": anns,
+            "max_score": float(max_score),
+            "rand_tie": rng.random(),
+        })
+
+        if idx % 200 == 0:
+            print(f"[SOFT-TEACHER] pseudo pass: processed {idx}/{len(unlabeled_images)} images")
+
+    if not records:
+        return {
+            "pseudo_root": None,
+            "pseudo_train_json": None,
+            "source_unlabeled_images": len(unlabeled_images),
+            "pseudo_images": 0,
+            "pseudo_annotations": 0,
+            "selected_pseudo_images": 0,
+        }
+
+    cap_from_weight = 0
+    if float(unsup_weight) > 0.0 and len(labeled_images) > 0:
+        cap_from_weight = max(1, int(round(len(labeled_images) * float(unsup_weight))))
+    cap_final = 0
+    if cap_from_weight > 0 and int(max_images_cap) > 0:
+        cap_final = min(cap_from_weight, int(max_images_cap))
+    elif cap_from_weight > 0:
+        cap_final = cap_from_weight
+    elif int(max_images_cap) > 0:
+        cap_final = int(max_images_cap)
+
+    ranked = sorted(records, key=lambda r: (r["max_score"], r["rand_tie"]), reverse=True)
+    if cap_final > 0:
+        ranked = ranked[:cap_final]
+    selected = sorted(ranked, key=lambda r: r["path"])
+
+    pseudo_root = out_root / "_soft_teacher_pseudo"
+    if pseudo_root.exists():
+        shutil.rmtree(pseudo_root)
+    pseudo_train_dir = pseudo_root / "train"
+    pseudo_train_dir.mkdir(parents=True, exist_ok=True)
+    pseudo_train_json = pseudo_train_dir / "_annotations.coco.json"
+
+    out_images = []
+    out_anns = []
+    img_id = 1
+    ann_id = 1
+    for rec in selected:
+        out_images.append({
+            "id": img_id,
+            "file_name": rec["path"],
+            "width": rec["width"],
+            "height": rec["height"],
+        })
+        for a in rec["anns"]:
+            bbox = a["bbox"]
+            out_anns.append({
+                "id": ann_id,
+                "image_id": img_id,
+                "category_id": target_cat_id,
+                "bbox": [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])],
+                "area": float(bbox[2] * bbox[3]),
+                "iscrowd": 0,
+                "score": float(a["score"]),
+            })
+            ann_id += 1
+        img_id += 1
+
+    pseudo_train_json.write_text(
+        json.dumps({
+            "images": out_images,
+            "annotations": out_anns,
+            "categories": categories,
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    return {
+        "pseudo_root": str(pseudo_root),
+        "pseudo_train_json": str(pseudo_train_json),
+        "source_unlabeled_images": len(unlabeled_images),
+        "pseudo_images": len(records),
+        "selected_pseudo_images": len(selected),
+        "pseudo_annotations": len(out_anns),
+        "cap_from_weight": cap_from_weight if cap_from_weight > 0 else None,
+        "cap_max_images": int(max_images_cap) if int(max_images_cap) > 0 else None,
+        "cap_final": cap_final if cap_final > 0 else None,
+    }
+
+
+def _build_soft_teacher_merged_dataset(labeled_root: Path, pseudo_train_json: Path, out_root: Path) -> tuple[Path, dict]:
+    merged_root = out_root / "_soft_teacher_merged"
+    if merged_root.exists():
+        shutil.rmtree(merged_root)
+    merged_root.mkdir(parents=True, exist_ok=True)
+
+    for split in ("valid", "test"):
+        src = labeled_root / split / "_annotations.coco.json"
+        if not src.exists():
+            continue
+        dst = merged_root / split / "_annotations.coco.json"
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+
+    labeled_train_json = labeled_root / "train" / "_annotations.coco.json"
+    labeled_train = json.loads(labeled_train_json.read_text(encoding="utf-8"))
+    pseudo_train = json.loads(Path(pseudo_train_json).read_text(encoding="utf-8"))
+
+    labeled_images = list(labeled_train.get("images", []))
+    labeled_anns = list(labeled_train.get("annotations", []))
+    categories = labeled_train.get("categories", []) or pseudo_train.get("categories", [])
+
+    merged_images = list(labeled_images)
+    merged_anns = list(labeled_anns)
+
+    next_img_id = (max((int(im.get("id", 0)) for im in merged_images), default=0) + 1)
+    next_ann_id = (max((int(an.get("id", 0)) for an in merged_anns), default=0) + 1)
+
+    pseudo_image_id_map = {}
+    for pim in pseudo_train.get("images", []):
+        old_id = int(pim["id"])
+        new_id = next_img_id
+        next_img_id += 1
+        pseudo_image_id_map[old_id] = new_id
+        nim = dict(pim)
+        nim["id"] = new_id
+        merged_images.append(nim)
+
+    pseudo_added_anns = 0
+    for pan in pseudo_train.get("annotations", []):
+        old_img_id = int(pan.get("image_id", -1))
+        if old_img_id not in pseudo_image_id_map:
+            continue
+        nan = dict(pan)
+        nan["id"] = next_ann_id
+        next_ann_id += 1
+        nan["image_id"] = pseudo_image_id_map[old_img_id]
+        nan["is_pseudo"] = 1
+        merged_anns.append(nan)
+        pseudo_added_anns += 1
+
+    merged_train_json = merged_root / "train" / "_annotations.coco.json"
+    merged_train_json.parent.mkdir(parents=True, exist_ok=True)
+    merged_train_json.write_text(
+        json.dumps({
+            "images": merged_images,
+            "annotations": merged_anns,
+            "categories": categories,
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (merged_root / ".SOFT_TEACHER_MERGED_OK").write_text("ok", encoding="utf-8")
+
+    stats = {
+        "labeled_train_images": len(labeled_images),
+        "labeled_train_annotations": len(labeled_anns),
+        "pseudo_train_images": len(pseudo_train.get("images", [])),
+        "pseudo_train_annotations": len(pseudo_train.get("annotations", [])),
+        "merged_train_images": len(merged_images),
+        "merged_train_annotations": len(merged_anns),
+        "pseudo_annotations_added": pseudo_added_anns,
+    }
+    return merged_root, stats
+
 # ───────────────────────────────────────────────────────────────────────────────
 # Training (single run). Called in worker processes.
 # ───────────────────────────────────────────────────────────────────────────────
@@ -927,7 +1322,11 @@ def train_one_run(target_name: str,
                 raise FileNotFoundError(
                     f"RFDETR_UNLABELED_DATASET_DIR does not exist: {unlabeled_src}"
                 )
-            unlabeled_dir_effective = get_or_build_unlabeled_cache(unlabeled_src, OUTPUT_ROOT)
+            unlabeled_has_coco = (unlabeled_src / "train" / "_annotations.coco.json").exists()
+            if unlabeled_has_coco:
+                unlabeled_dir_effective = get_or_build_unlabeled_cache(unlabeled_src, OUTPUT_ROOT)
+            else:
+                unlabeled_dir_effective = unlabeled_src
 
     # Optionally reduce the TRAIN split size
     if train_fraction < 0.999:
@@ -1046,22 +1445,6 @@ def train_one_run(target_name: str,
         checkpoint_interval=10,
         run_test=True,
     )
-    if soft_teacher_enabled and unlabeled_dir_effective is not None:
-        kwargs["use_soft_teacher"] = True
-        kwargs["unlabeled_dataset_dir"] = str(unlabeled_dir_effective)
-        kwargs["unlabeled_batch_size"] = (
-            int(RFDETR_SOFT_TEACHER_UNLABELED_BATCH)
-            if RFDETR_SOFT_TEACHER_UNLABELED_BATCH > 0
-            else int(batch_size * grad_accum_steps)
-        )
-        kwargs["soft_teacher_unsup_weight"] = float(RFDETR_SOFT_TEACHER_UNSUP_WEIGHT)
-        kwargs["soft_teacher_pseudo_thresh"] = float(RFDETR_SOFT_TEACHER_PSEUDO_THRESH)
-        kwargs["soft_teacher_topk"] = int(RFDETR_SOFT_TEACHER_TOPK)
-        kwargs["soft_teacher_burnin_epochs"] = float(RFDETR_SOFT_TEACHER_BURNIN_EPOCHS)
-        kwargs["soft_teacher_min_box_wh"] = float(RFDETR_SOFT_TEACHER_MIN_BOX_WH)
-        # SoftTeacher requires an EMA teacher.
-        kwargs["use_ema"] = True
-
     if lr_encoder is not None:
         kwargs["lr_encoder"] = float(lr_encoder)
     if warmup_epochs is not None:
@@ -1123,6 +1506,92 @@ def train_one_run(target_name: str,
             json.dumps(ssl_load_report, indent=2),
             encoding="utf-8",
         )
+
+    soft_teacher_report = None
+    if soft_teacher_enabled and unlabeled_dir_effective is not None:
+        if int(epochs) < 2:
+            print(
+                "[SOFT-TEACHER][WARN] epochs < 2; need at least 2 epochs for "
+                "teacher burn-in + student stage. Running supervised only."
+            )
+        else:
+            burnin_epochs = max(1, int(round(float(RFDETR_SOFT_TEACHER_BURNIN_EPOCHS))))
+            burnin_epochs = min(burnin_epochs, int(epochs) - 1)
+            student_epochs = int(epochs) - burnin_epochs
+
+            teacher_dir = out_dir / "_soft_teacher_teacher"
+            teacher_dir.mkdir(parents=True, exist_ok=True)
+            teacher_kwargs = dict(kwargs)
+            teacher_kwargs["output_dir"] = str(teacher_dir)
+            teacher_kwargs["epochs"] = int(burnin_epochs)
+
+            print(
+                f"[SOFT-TEACHER] Stage 1/2 teacher burn-in: epochs={burnin_epochs} "
+                f"dataset={teacher_kwargs['dataset_dir']} -> {teacher_dir}"
+            )
+            model.train(**teacher_kwargs)
+
+            labeled_train_json = data_dir / "train" / "_annotations.coco.json"
+            pseudo_report = _build_soft_teacher_pseudo_split(
+                model=model,
+                unlabeled_root=unlabeled_dir_effective,
+                labeled_train_json=labeled_train_json,
+                out_root=out_dir,
+                score_thresh=float(RFDETR_SOFT_TEACHER_PSEUDO_THRESH),
+                topk=int(RFDETR_SOFT_TEACHER_TOPK),
+                min_box_wh=float(RFDETR_SOFT_TEACHER_MIN_BOX_WH),
+                unsup_weight=float(RFDETR_SOFT_TEACHER_UNSUP_WEIGHT),
+                max_images_cap=int(RFDETR_SOFT_TEACHER_MAX_IMAGES),
+                seed=int(seed),
+            )
+
+            merged_dir = None
+            merged_stats = None
+            if (
+                pseudo_report.get("selected_pseudo_images", 0) > 0
+                and pseudo_report.get("pseudo_annotations", 0) > 0
+            ):
+                merged_dir, merged_stats = _build_soft_teacher_merged_dataset(
+                    labeled_root=data_dir,
+                    pseudo_train_json=Path(pseudo_report["pseudo_train_json"]),
+                    out_root=out_dir,
+                )
+                kwargs["dataset_dir"] = str(merged_dir)
+            else:
+                print(
+                    "[SOFT-TEACHER][WARN] No pseudo annotations produced after burn-in; "
+                    "continuing student stage on labeled-only data."
+                )
+
+            kwargs["epochs"] = int(student_epochs)
+            (meta / "train_kwargs_student.json").write_text(
+                json.dumps(kwargs, indent=2),
+                encoding="utf-8",
+            )
+
+            soft_teacher_report = {
+                "enabled": True,
+                "teacher_epochs": int(burnin_epochs),
+                "student_epochs": int(student_epochs),
+                "unlabeled_dir_effective": str(unlabeled_dir_effective),
+                "pseudo": pseudo_report,
+                "merged_dataset_dir": (str(merged_dir) if merged_dir is not None else None),
+                "merged_stats": merged_stats,
+            }
+            (meta / "soft_teacher_report.json").write_text(
+                json.dumps(soft_teacher_report, indent=2),
+                encoding="utf-8",
+            )
+            if merged_dir is not None:
+                print(
+                    f"[SOFT-TEACHER] Stage 2/2 student: epochs={student_epochs} "
+                    f"dataset={merged_dir} -> {out_dir}"
+                )
+            else:
+                print(
+                    f"[SOFT-TEACHER] Stage 2/2 student: epochs={student_epochs} "
+                    f"dataset={data_dir} -> {out_dir}"
+                )
 
     print(f"[TRAIN] {model.__class__.__name__} - {target_name} -> {out_dir}")
     model.train(**kwargs)
@@ -1751,12 +2220,6 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
 
         import torch  # import AFTER masking
         torch.cuda.set_device(0)  # within this worker, the masked GPU is cuda:0
-
-        if RFDETR_USE_LOCAL_BACKEND:
-            import sys
-            repo_root = Path(__file__).resolve().parents[1]
-            if str(repo_root) not in sys.path:
-                sys.path.insert(0, str(repo_root))
 
         # Import model classes AFTER masking
         from rfdetr import RFDETRSmall, RFDETRMedium, RFDETRLarge
