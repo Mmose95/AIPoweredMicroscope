@@ -16,7 +16,7 @@ import numpy as np
 #  - "leu"  -> only Leucocyte
 #  - "epi"  -> only Squamous Epithelial Cell
 #  - "all"  -> both
-HPO_TARGET = os.environ.get("RFDETR_HPO_TARGET", "leu").lower()
+HPO_TARGET = os.environ.get("RFDETR_HPO_TARGET", "all").lower()
 BACKBONE_BLOCK_SIZE = 56
 
 def _is_main_process() -> bool:
@@ -84,13 +84,13 @@ def _env_bool(name: str, default: str = "0") -> bool:
 
 
 # SoftTeacher toggles (global for all runs in this launcher invocation).
-RFDETR_USE_SOFT_TEACHER = _env_bool("RFDETR_USE_SOFT_TEACHER", "1")
+RFDETR_USE_SOFT_TEACHER = _env_bool("RFDETR_USE_SOFT_TEACHER", "0")
 RFDETR_UNLABELED_DATASET_DIR = os.getenv("RFDETR_UNLABELED_DATASET_DIR", "").strip()
 RFDETR_SOFT_TEACHER_UNSUP_WEIGHT = float(os.getenv("RFDETR_SOFT_TEACHER_UNSUP_WEIGHT", "1.0"))
 RFDETR_SOFT_TEACHER_PSEUDO_THRESH = float(os.getenv("RFDETR_SOFT_TEACHER_PSEUDO_THRESH", "0.7"))
 RFDETR_SOFT_TEACHER_TOPK = int(os.getenv("RFDETR_SOFT_TEACHER_TOPK", "100"))
 RFDETR_SOFT_TEACHER_UNLABELED_BATCH = int(os.getenv("RFDETR_SOFT_TEACHER_UNLABELED_BATCH", "0") or 0)
-RFDETR_SOFT_TEACHER_BURNIN_EPOCHS = float(os.getenv("RFDETR_SOFT_TEACHER_BURNIN_EPOCHS", "10.0"))
+RFDETR_SOFT_TEACHER_BURNIN_EPOCHS = float(os.getenv("RFDETR_SOFT_TEACHER_BURNIN_EPOCHS", "1.0"))
 RFDETR_SOFT_TEACHER_MIN_BOX_WH = float(os.getenv("RFDETR_SOFT_TEACHER_MIN_BOX_WH", "0.005"))
 RFDETR_SOFT_TEACHER_MAX_IMAGES = int(os.getenv("RFDETR_SOFT_TEACHER_MAX_IMAGES", "0") or 0)
 
@@ -561,9 +561,6 @@ IMAGES_FALLBACK_ROOT = env_path(
     WORK_ROOT / "CellScanData" / "Zoom10x - Quality Assessment_Cleaned",
 )
 
-if not RFDETR_UNLABELED_DATASET_DIR:
-    RFDETR_UNLABELED_DATASET_DIR = str(IMAGES_FALLBACK_ROOT)
-
 if RFDETR_USE_SOFT_TEACHER:
     _main_print(
         "[SOFT-TEACHER] enabled "
@@ -578,37 +575,12 @@ if RFDETR_USE_SOFT_TEACHER:
 # ───────────────────────────────────────────────────────────────────────────────
 # ====== STATIC OVR DATASETS (jsons live in repo / project tree) ======
 # ───────────────────────────────────────────────────────────────────────────────
-STAT_DATASETS_ROOT = env_path(
-    "STAT_DATASETS_ROOT",
-    Path(__file__).resolve().parent / "Stat_Dataset",
-)
-
-
-def _latest_dataset_dir(root: Path, pattern: str) -> Path | None:
-    if not root.exists():
-        return None
-    cands = [p for p in root.glob(pattern) if p.is_dir()]
-    if not cands:
-        return None
-    return sorted(cands, key=lambda p: p.name)[-1]
-
-
-_default_leu_ds = (
-    _latest_dataset_dir(STAT_DATASETS_ROOT, "*Leucocyte*_OVR_*")
-    or _latest_dataset_dir(STAT_DATASETS_ROOT, "*Leucocyte*")
-)
-_default_epi_ds = (
-    _latest_dataset_dir(STAT_DATASETS_ROOT, "*SquamousEpithelialCell*_OVR_*")
-    or _latest_dataset_dir(STAT_DATASETS_ROOT, "*SquamousEpithelialCell*")
-    or _latest_dataset_dir(STAT_DATASETS_ROOT, "*Epithelial*")
-)
-
-DATASET_LEUCO_RAW = os.getenv("DATASET_LEUCO", "").strip() or (str(_default_leu_ds) if _default_leu_ds is not None else "")
-DATASET_EPI_RAW = os.getenv("DATASET_EPI", "").strip() or (str(_default_epi_ds) if _default_epi_ds is not None else "")
+DATASET_LEUCO_RAW = os.getenv("DATASET_LEUCO", "").strip()
+DATASET_EPI_RAW = os.getenv("DATASET_EPI", "").strip()
 if not DATASET_LEUCO_RAW or not DATASET_EPI_RAW:
     raise ValueError(
-        "DATASET_LEUCO and DATASET_EPI are not set and could not be auto-resolved. "
-        f"Checked STAT_DATASETS_ROOT={STAT_DATASETS_ROOT}"
+        "DATASET_LEUCO and DATASET_EPI must be set by the launcher environment "
+        "(for example in RunRFDETR_Solo_SingleClass_STATIC_Ucloud.ipynb)."
     )
 
 DATASET_LEUCO = Path(DATASET_LEUCO_RAW).expanduser().resolve()
@@ -617,10 +589,6 @@ if not DATASET_LEUCO.exists():
     raise FileNotFoundError(f"DATASET_LEUCO does not exist: {DATASET_LEUCO}")
 if not DATASET_EPI.exists():
     raise FileNotFoundError(f"DATASET_EPI does not exist: {DATASET_EPI}")
-if not os.getenv("DATASET_LEUCO", "").strip():
-    _main_print(f"[DATASET][AUTO] DATASET_LEUCO={DATASET_LEUCO}")
-if not os.getenv("DATASET_EPI", "").strip():
-    _main_print(f"[DATASET][AUTO] DATASET_EPI={DATASET_EPI}")
 
 # Where to put all outputs (HPO runs + leaderboards + final selections)
 OUTPUT_ROOT = env_path("OUTPUT_ROOT", WORK_ROOT / "RFDETR_SOLO_OUTPUT" / "HPO_BOTH_OVR")
@@ -1693,7 +1661,7 @@ MATRIX_QUICK_DEFAULTS_SHARED = {
     # - default: RF-DETR default pretrained weights
     # - scratch: no pretraining
     # - ssl: no detector pretrain + load SSL backbone checkpoint
-    "RFDETR_INIT_MODES": "scratch",
+    "RFDETR_INIT_MODES": "default,scratch,ssl",
     # Legacy alias kept for backward compatibility; used only if RFDETR_INIT_MODES is unset.
     "RFDETR_SSL_MODES": "none,ssl",
     "RFDETR_TRAIN_FRACTIONS": "1.0",
@@ -1703,13 +1671,13 @@ MATRIX_QUICK_DEFAULTS_SHARED = {
     "RFDETR_GRAD_ACCUM_STEPS": "1",
     "RFDETR_WEIGHT_DECAY": "7e-4",
     "RFDETR_DROPOUT": "0.15",
-    "RFDETR_MULTI_SCALE": "1",
+    "RFDETR_MULTI_SCALE": "0",
     "RFDETR_EXPANDED_SCALES": "0",
     "RFDETR_AUG_COPIES": "0",
     "RFDETR_EARLY_STOPPING": "1",
-    "RFDETR_EARLY_STOPPING_PATIENCE": "20",
+    "RFDETR_EARLY_STOPPING_PATIENCE": "10",
     "RFDETR_EARLY_STOPPING_MIN_DELTA": "0.001",
-    "RFDETR_EARLY_STOPPING_USE_EMA": "1",
+    "RFDETR_EARLY_STOPPING_USE_EMA": "0",
     # Optional optimizer/backbone overrides for all matrix runs.
     "RFDETR_LR_ENCODER": "",
     "RFDETR_WARMUP_EPOCHS": "",
@@ -2047,7 +2015,7 @@ def _build_ssl_triage_cfgs_for_target(target_key: str, matrix_cfg: dict) -> list
     return cfgs
 
 # One-click matrix mode (both classes, with/without SSL, chosen fractions) with env flags.
-EXPERIMENT_MODE = os.getenv("RFDETR_EXPERIMENT_MODE", "matrix").strip().lower()
+EXPERIMENT_MODE = os.getenv("RFDETR_EXPERIMENT_MODE", "ssl_triage").strip().lower()
 if EXPERIMENT_MODE not in ("matrix", "ssl_triage"):
     raise ValueError(
         "RFDETR_EXPERIMENT_MODE must be one of: matrix, ssl_triage."
