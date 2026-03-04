@@ -77,9 +77,36 @@ if not USE_PATCH_224 and FULL_RESOLUTION % BACKBONE_BLOCK_SIZE != 0:
         f"{BACKBONE_BLOCK_SIZE}; using {FULL_RESOLUTION}."
     )
 
+
+def _env_bool(name: str, default: str = "0") -> bool:
+    raw = os.getenv(name, default).strip().lower()
+    return raw in ("1", "true", "yes", "y", "on")
+
+
+# SoftTeacher toggles (global for all runs in this launcher invocation).
+RFDETR_USE_LOCAL_BACKEND = _env_bool("RFDETR_USE_LOCAL_BACKEND", "1")
+RFDETR_USE_SOFT_TEACHER = _env_bool("RFDETR_USE_SOFT_TEACHER", "0")
+RFDETR_UNLABELED_DATASET_DIR = os.getenv("RFDETR_UNLABELED_DATASET_DIR", "").strip()
+RFDETR_SOFT_TEACHER_UNSUP_WEIGHT = float(os.getenv("RFDETR_SOFT_TEACHER_UNSUP_WEIGHT", "1.0"))
+RFDETR_SOFT_TEACHER_PSEUDO_THRESH = float(os.getenv("RFDETR_SOFT_TEACHER_PSEUDO_THRESH", "0.7"))
+RFDETR_SOFT_TEACHER_TOPK = int(os.getenv("RFDETR_SOFT_TEACHER_TOPK", "100"))
+RFDETR_SOFT_TEACHER_UNLABELED_BATCH = int(os.getenv("RFDETR_SOFT_TEACHER_UNLABELED_BATCH", "0") or 0)
+RFDETR_SOFT_TEACHER_BURNIN_EPOCHS = float(os.getenv("RFDETR_SOFT_TEACHER_BURNIN_EPOCHS", "1.0"))
+RFDETR_SOFT_TEACHER_MIN_BOX_WH = float(os.getenv("RFDETR_SOFT_TEACHER_MIN_BOX_WH", "0.005"))
+
 _main_print(f"[HPO] Target classes: {HPO_TARGET!r} (env RFDETR_HPO_TARGET)")
 _main_print(f"[INPUT MODE] RFDETR_INPUT_MODE={INPUT_MODE}  USE_PATCH_224={USE_PATCH_224}")
 _main_print(f"[INPUT SIZE] PATCH_SIZE={PATCH_SIZE}  FULL_RESOLUTION={FULL_RESOLUTION}")
+_main_print(f"[BACKEND] local_rfdetr={RFDETR_USE_LOCAL_BACKEND}")
+if RFDETR_USE_SOFT_TEACHER:
+    _main_print(
+        "[SOFT-TEACHER] enabled "
+        f"unlabeled_dir={RFDETR_UNLABELED_DATASET_DIR or '<missing>'} "
+        f"unsup_weight={RFDETR_SOFT_TEACHER_UNSUP_WEIGHT} "
+        f"thresh={RFDETR_SOFT_TEACHER_PSEUDO_THRESH} "
+        f"topk={RFDETR_SOFT_TEACHER_TOPK} "
+        f"burnin={RFDETR_SOFT_TEACHER_BURNIN_EPOCHS}"
+    )
 if os.getenv("RFDETR_INPUT_MODE", "").strip():
     _main_print("[INPUT MODE] RFDETR_INPUT_MODE is authoritative; legacy RFDETR_USE_PATCH_224/RFDETR_PATCH_SIZE are ignored.")
 if PATCH_SIZE <= 0:
@@ -600,6 +627,24 @@ def get_or_build_aug_cache(target_name: str, dataset_dir: Path, root_out: Path, 
     )
     return patch_dir
 
+
+def get_or_build_unlabeled_cache(dataset_dir: Path, root_out: Path) -> Path:
+    """
+    Resolve/patchify unlabeled data directory in the same way as labeled data.
+    Expects COCO-style splits with at least train/_annotations.coco.json.
+    """
+    cache_name = f"{dataset_dir.name}_UNLABELED"
+    resolved_cache = root_out / f"{cache_name}_RESOLVED"
+    resolved_dir = build_resolved_static_dataset(dataset_dir, resolved_cache)
+    if not USE_PATCH_224:
+        return resolved_dir
+    return build_patchified_dataset(
+        resolved_root=resolved_dir,
+        cache_root=root_out,
+        patch_size=PATCH_SIZE,
+        stride=PATCH_SIZE,
+    )
+
 # ───────────────────────────────────────────────────────────────────────────────
 # Training (single run). Called in worker processes.
 # ───────────────────────────────────────────────────────────────────────────────
@@ -869,6 +914,21 @@ def train_one_run(target_name: str,
     # Build resolved / optional patchified dataset
     data_dir = get_or_build_aug_cache(target_name, dataset_dir, OUTPUT_ROOT, aug_copies)
 
+    soft_teacher_enabled = bool(RFDETR_USE_SOFT_TEACHER)
+    unlabeled_dir_effective: Path | None = None
+    if soft_teacher_enabled:
+        unlabeled_raw = RFDETR_UNLABELED_DATASET_DIR
+        if not unlabeled_raw:
+            print("[SOFT-TEACHER][WARN] RFDETR_USE_SOFT_TEACHER=1 but RFDETR_UNLABELED_DATASET_DIR is empty. Disabling SoftTeacher.")
+            soft_teacher_enabled = False
+        else:
+            unlabeled_src = Path(unlabeled_raw).expanduser().resolve()
+            if not unlabeled_src.exists():
+                raise FileNotFoundError(
+                    f"RFDETR_UNLABELED_DATASET_DIR does not exist: {unlabeled_src}"
+                )
+            unlabeled_dir_effective = get_or_build_unlabeled_cache(unlabeled_src, OUTPUT_ROOT)
+
     # Optionally reduce the TRAIN split size
     if train_fraction < 0.999:
         frac_seed = seed if fraction_seed is None else int(fraction_seed)
@@ -986,6 +1046,22 @@ def train_one_run(target_name: str,
         checkpoint_interval=10,
         run_test=True,
     )
+    if soft_teacher_enabled and unlabeled_dir_effective is not None:
+        kwargs["use_soft_teacher"] = True
+        kwargs["unlabeled_dataset_dir"] = str(unlabeled_dir_effective)
+        kwargs["unlabeled_batch_size"] = (
+            int(RFDETR_SOFT_TEACHER_UNLABELED_BATCH)
+            if RFDETR_SOFT_TEACHER_UNLABELED_BATCH > 0
+            else int(batch_size * grad_accum_steps)
+        )
+        kwargs["soft_teacher_unsup_weight"] = float(RFDETR_SOFT_TEACHER_UNSUP_WEIGHT)
+        kwargs["soft_teacher_pseudo_thresh"] = float(RFDETR_SOFT_TEACHER_PSEUDO_THRESH)
+        kwargs["soft_teacher_topk"] = int(RFDETR_SOFT_TEACHER_TOPK)
+        kwargs["soft_teacher_burnin_epochs"] = float(RFDETR_SOFT_TEACHER_BURNIN_EPOCHS)
+        kwargs["soft_teacher_min_box_wh"] = float(RFDETR_SOFT_TEACHER_MIN_BOX_WH)
+        # SoftTeacher requires an EMA teacher.
+        kwargs["use_ema"] = True
+
     if lr_encoder is not None:
         kwargs["lr_encoder"] = float(lr_encoder)
     if warmup_epochs is not None:
@@ -1038,7 +1114,9 @@ def train_one_run(target_name: str,
     (meta / "dataset_info.json").write_text(json.dumps({
         "dataset_dir_original": str(dataset_dir),
         "dataset_dir_effective": str(data_dir),
-        "target_name": target_name
+        "target_name": target_name,
+        "soft_teacher_enabled": bool(soft_teacher_enabled),
+        "unlabeled_dir_effective": (str(unlabeled_dir_effective) if unlabeled_dir_effective is not None else None),
     }, indent=2), encoding="utf-8")
     if ssl_load_report is not None:
         (meta / "ssl_load_report.json").write_text(
@@ -1674,6 +1752,12 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
         import torch  # import AFTER masking
         torch.cuda.set_device(0)  # within this worker, the masked GPU is cuda:0
 
+        if RFDETR_USE_LOCAL_BACKEND:
+            import sys
+            repo_root = Path(__file__).resolve().parents[1]
+            if str(repo_root) not in sys.path:
+                sys.path.insert(0, str(repo_root))
+
         # Import model classes AFTER masking
         from rfdetr import RFDETRSmall, RFDETRMedium, RFDETRLarge
         name2cls = {
@@ -1827,6 +1911,8 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
             "use_patch_224": USE_PATCH_224,
             "patch_size": PATCH_SIZE if USE_PATCH_224 else None,
             "full_resolution": None if USE_PATCH_224 else FULL_RESOLUTION,
+            "soft_teacher_enabled": bool(RFDETR_USE_SOFT_TEACHER),
+            "soft_teacher_unlabeled_dataset_dir": (RFDETR_UNLABELED_DATASET_DIR or None),
         }
         (run_dir / "hpo_record.json").write_text(json.dumps(row, indent=2), encoding="utf-8")
         result_q.put(("ok", row))

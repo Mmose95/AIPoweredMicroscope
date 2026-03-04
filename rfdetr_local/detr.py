@@ -57,7 +57,7 @@ class RFDETR:
     def get_model_config(self, **kwargs):
         return ModelConfig(**kwargs)
 
-    def train(self, trackExperiment, **kwargs):
+    def train(self, trackExperiment=False, **kwargs):
         config = self.get_train_config(**kwargs)
         self.train_from_config(config=config, trackExperiment=trackExperiment, **kwargs)
 
@@ -336,3 +336,17 @@ class RFDETRLarge(RFDETR):
 
     def get_train_config(self, **kwargs):
         return TrainConfig(**kwargs)
+
+
+class RFDETRSmall(RFDETRBase):
+    """
+    Compatibility alias.
+    The local backend currently uses the base config for the small variant entrypoint.
+    """
+
+
+class RFDETRMedium(RFDETRBase):
+    """
+    Compatibility alias.
+    The local backend currently uses the base config for the medium variant entrypoint.
+    """

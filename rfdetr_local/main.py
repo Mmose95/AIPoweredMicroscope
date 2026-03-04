@@ -201,6 +201,65 @@ class Model:
         data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
                                      collate_fn=utils.collate_fn, num_workers=args.num_workers)
 
+        def _as_bool(v, default=False):
+            if v is None:
+                return default
+            if isinstance(v, bool):
+                return v
+            if isinstance(v, str):
+                x = v.strip().lower()
+                if x in ("1", "true", "yes", "y", "on"):
+                    return True
+                if x in ("0", "false", "no", "n", "off"):
+                    return False
+            return bool(v)
+
+        data_loader_unlabeled = None
+        sampler_unlabeled = None
+        if _as_bool(getattr(args, "use_soft_teacher", False), default=False):
+            unlabeled_dir = str(getattr(args, "unlabeled_dataset_dir", "") or "").strip()
+            if unlabeled_dir:
+                unlabeled_args = copy.deepcopy(args)
+                unlabeled_args.dataset_dir = unlabeled_dir
+                dataset_unlabeled = build_dataset('train', unlabeled_args, resolution=args.resolution)
+
+                unlabeled_batch_size = int(
+                    getattr(args, "unlabeled_batch_size", 0) or effective_batch_size
+                )
+                if unlabeled_batch_size < 1:
+                    unlabeled_batch_size = effective_batch_size
+
+                sampler_unlabeled = (
+                    DistributedSampler(dataset_unlabeled)
+                    if args.distributed
+                    else RandomSampler(dataset_unlabeled)
+                )
+                batch_sampler_unlabeled = BatchSampler(
+                    sampler_unlabeled,
+                    unlabeled_batch_size,
+                    drop_last=True,
+                )
+                data_loader_unlabeled = DataLoader(
+                    dataset_unlabeled,
+                    batch_sampler=batch_sampler_unlabeled,
+                    collate_fn=utils.collate_fn,
+                    num_workers=args.num_workers,
+                )
+                if len(data_loader_unlabeled) == 0:
+                    print(
+                        "[SOFT-TEACHER][WARN] Unlabeled loader is empty with current batch/drop_last settings. "
+                        "Disabling SSOD branch for this run."
+                    )
+                    data_loader_unlabeled = None
+                    sampler_unlabeled = None
+                if data_loader_unlabeled is not None:
+                    print(
+                        f"[SOFT-TEACHER] enabled | unlabeled_dir={unlabeled_dir} "
+                        f"| unlabeled_batch={unlabeled_batch_size} | unlabeled_images={len(dataset_unlabeled)}"
+                    )
+            else:
+                print("[SOFT-TEACHER][WARN] use_soft_teacher=True but unlabeled_dataset_dir is empty. Disabling SSOD branch.")
+
         lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
 
         # EMA setup
@@ -240,12 +299,17 @@ class Model:
         for epoch in range(args.start_epoch, args.epochs):
             if args.distributed:
                 sampler_train.set_epoch(epoch)
+                if sampler_unlabeled is not None:
+                    sampler_unlabeled.set_epoch(epoch)
 
 
             # Train
             train_stats, last_train_step = train_one_epoch(
                 model, criterion, lr_scheduler, data_loader_train, optimizer, device, epoch,
-                effective_batch_size, args.clip_max_norm, self.ema_m, args=args, callbacks=callbacks, num_training_steps_per_epoch=num_training_steps_per_epoch)
+                effective_batch_size, args.clip_max_norm, self.ema_m, args=args, callbacks=callbacks,
+                num_training_steps_per_epoch=num_training_steps_per_epoch,
+                data_loader_unlabeled=data_loader_unlabeled,
+            )
 
             # Evaluation
             test_stats, coco_evaluator = evaluate(model, criterion, postprocessors, data_loader_val, base_ds, device, args,  start_step=last_train_step + 1, epoch=epoch)
