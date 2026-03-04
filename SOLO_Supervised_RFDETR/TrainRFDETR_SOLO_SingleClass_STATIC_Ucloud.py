@@ -94,6 +94,7 @@ RFDETR_SOFT_TEACHER_BURNIN_EPOCHS = float(os.getenv("RFDETR_SOFT_TEACHER_BURNIN_
 RFDETR_SOFT_TEACHER_MIN_BOX_WH = float(os.getenv("RFDETR_SOFT_TEACHER_MIN_BOX_WH", "0.005"))
 RFDETR_SOFT_TEACHER_MAX_IMAGES = int(os.getenv("RFDETR_SOFT_TEACHER_MAX_IMAGES", "0") or 0)
 RFDETR_SOFT_TEACHER_EXCLUDE_LABELED = _env_bool("RFDETR_SOFT_TEACHER_EXCLUDE_LABELED", "1")
+RFDETR_SOFT_TEACHER_PROGRESS_EVERY = int(os.getenv("RFDETR_SOFT_TEACHER_PROGRESS_EVERY", "100") or 100)
 RFDETR_SOFT_TEACHER_UNLABELED_FIRST_SAMPLE = int(
     os.getenv("RFDETR_SOFT_TEACHER_UNLABELED_FIRST_SAMPLE", "0") or 0
 )
@@ -109,6 +110,27 @@ if (
         "RFDETR_SOFT_TEACHER_UNLABELED_FIRST_SAMPLE must be <= "
         "RFDETR_SOFT_TEACHER_UNLABELED_LAST_SAMPLE."
     )
+if RFDETR_SOFT_TEACHER_PROGRESS_EVERY <= 0:
+    RFDETR_SOFT_TEACHER_PROGRESS_EVERY = 100
+
+
+def _soft_teacher_log(stage: str, msg: str) -> None:
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[SOFT-TEACHER][{stage}][{ts}] {msg}")
+
+
+def _write_soft_teacher_status(status_path: Path | None, payload: dict) -> None:
+    if status_path is None:
+        return
+    try:
+        blob = {
+            "updated_at": datetime.now().isoformat(),
+            **payload,
+        }
+        status_path.parent.mkdir(parents=True, exist_ok=True)
+        status_path.write_text(json.dumps(blob, indent=2), encoding="utf-8")
+    except Exception as e:
+        print(f"[SOFT-TEACHER][WARN] Failed writing status file {status_path}: {e}")
 
 _main_print(f"[HPO] Target classes: {HPO_TARGET!r} (env RFDETR_HPO_TARGET)")
 _main_print(f"[INPUT MODE] RFDETR_INPUT_MODE={INPUT_MODE}  USE_PATCH_224={USE_PATCH_224}")
@@ -597,7 +619,8 @@ if RFDETR_USE_SOFT_TEACHER:
         f"burnin={RFDETR_SOFT_TEACHER_BURNIN_EPOCHS} "
         f"max_images={(RFDETR_SOFT_TEACHER_MAX_IMAGES if RFDETR_SOFT_TEACHER_MAX_IMAGES > 0 else 'auto')} "
         f"exclude_labeled={RFDETR_SOFT_TEACHER_EXCLUDE_LABELED} "
-        f"sample_range={sample_range_text}"
+        f"sample_range={sample_range_text} "
+        f"progress_every={RFDETR_SOFT_TEACHER_PROGRESS_EVERY}"
     )
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -906,7 +929,11 @@ def _build_soft_teacher_pseudo_split(
     sample_first: int,
     sample_last: int,
     seed: int,
+    status_path: Path | None = None,
+    progress_every: int = 100,
 ) -> dict:
+    pseudo_t0 = time.time()
+    progress_every = max(1, int(progress_every))
     rng = random.Random(int(seed))
     labeled_data = json.loads(labeled_train_json.read_text(encoding="utf-8"))
     labeled_images = labeled_data.get("images", [])
@@ -923,17 +950,32 @@ def _build_soft_teacher_pseudo_split(
         sample_first=int(sample_first),
         sample_last=int(sample_last),
     )
-    print(
-        "[SOFT-TEACHER] unlabeled selection "
+    _soft_teacher_log(
+        "PSEUDO",
+        "unlabeled selection "
         f"source={unlabeled_stats.get('source_images', 0)} "
         f"deduped={unlabeled_stats.get('deduped_images', 0)} "
         f"selected={unlabeled_stats.get('selected_images', 0)} "
         f"removed_labeled_overlap={unlabeled_stats.get('removed_labeled_overlap', 0)} "
         f"removed_outside_sample_range={unlabeled_stats.get('removed_outside_sample_range', 0)} "
-        f"removed_no_sample_tag={unlabeled_stats.get('removed_no_sample_tag', 0)}"
+        f"removed_no_sample_tag={unlabeled_stats.get('removed_no_sample_tag', 0)}",
+    )
+    _write_soft_teacher_status(
+        status_path,
+        {
+            "stage": "pseudo_labeling",
+            "state": "running",
+            "progress": {
+                "processed_images": 0,
+                "total_candidate_images": int(len(unlabeled_images)),
+                "candidate_with_boxes": 0,
+                "candidate_annotations": 0,
+            },
+            "unlabeled_filter_stats": unlabeled_stats,
+        },
     )
     if not unlabeled_images:
-        return {
+        report = {
             "pseudo_root": None,
             "pseudo_train_json": None,
             "source_unlabeled_images": int(unlabeled_stats.get("source_images", 0)),
@@ -943,8 +985,19 @@ def _build_soft_teacher_pseudo_split(
             "selected_pseudo_images": 0,
             "unlabeled_filter_stats": unlabeled_stats,
         }
+        _write_soft_teacher_status(
+            status_path,
+            {
+                "stage": "pseudo_labeling",
+                "state": "completed_empty",
+                "report": report,
+                "duration_seconds": round(time.time() - pseudo_t0, 2),
+            },
+        )
+        return report
 
     records = []
+    running_candidate_anns = 0
     for idx, img_path in enumerate(unlabeled_images, start=1):
         try:
             img = Image.open(img_path).convert("RGB")
@@ -1004,12 +1057,40 @@ def _build_soft_teacher_pseudo_split(
             "max_score": float(max_score),
             "rand_tie": rng.random(),
         })
+        running_candidate_anns += int(len(anns))
 
-        if idx % 200 == 0:
-            print(f"[SOFT-TEACHER] pseudo pass: processed {idx}/{len(unlabeled_images)} images")
+        if idx % progress_every == 0 or idx == len(unlabeled_images):
+            elapsed = max(1e-9, time.time() - pseudo_t0)
+            speed = idx / elapsed
+            remaining = max(0, len(unlabeled_images) - idx)
+            eta_sec = int(remaining / speed) if speed > 0 else -1
+            eta_str = f"{eta_sec}s" if eta_sec >= 0 else "n/a"
+            _soft_teacher_log(
+                "PSEUDO",
+                f"processed={idx}/{len(unlabeled_images)} "
+                f"({(100.0 * idx / max(1, len(unlabeled_images))):.1f}%) "
+                f"candidate_with_boxes={len(records)} "
+                f"candidate_annotations={running_candidate_anns} "
+                f"eta={eta_str}",
+            )
+            _write_soft_teacher_status(
+                status_path,
+                {
+                    "stage": "pseudo_labeling",
+                    "state": "running",
+                    "progress": {
+                        "processed_images": int(idx),
+                        "total_candidate_images": int(len(unlabeled_images)),
+                        "candidate_with_boxes": int(len(records)),
+                        "candidate_annotations": int(running_candidate_anns),
+                        "estimated_eta_seconds": int(eta_sec) if eta_sec >= 0 else None,
+                    },
+                    "unlabeled_filter_stats": unlabeled_stats,
+                },
+            )
 
     if not records:
-        return {
+        report = {
             "pseudo_root": None,
             "pseudo_train_json": None,
             "source_unlabeled_images": int(unlabeled_stats.get("source_images", len(unlabeled_images))),
@@ -1019,6 +1100,17 @@ def _build_soft_teacher_pseudo_split(
             "selected_pseudo_images": 0,
             "unlabeled_filter_stats": unlabeled_stats,
         }
+        _soft_teacher_log("PSEUDO", "no candidate pseudo labels after inference pass")
+        _write_soft_teacher_status(
+            status_path,
+            {
+                "stage": "pseudo_labeling",
+                "state": "completed_empty",
+                "report": report,
+                "duration_seconds": round(time.time() - pseudo_t0, 2),
+            },
+        )
+        return report
 
     cap_from_weight = 0
     if float(unsup_weight) > 0.0 and len(labeled_images) > 0:
@@ -1077,7 +1169,7 @@ def _build_soft_teacher_pseudo_split(
         encoding="utf-8",
     )
 
-    return {
+    report = {
         "pseudo_root": str(pseudo_root),
         "pseudo_train_json": str(pseudo_train_json),
         "source_unlabeled_images": int(unlabeled_stats.get("source_images", len(unlabeled_images))),
@@ -1089,7 +1181,23 @@ def _build_soft_teacher_pseudo_split(
         "cap_max_images": int(max_images_cap) if int(max_images_cap) > 0 else None,
         "cap_final": cap_final if cap_final > 0 else None,
         "unlabeled_filter_stats": unlabeled_stats,
+        "pseudo_generation_seconds": round(time.time() - pseudo_t0, 2),
     }
+    _soft_teacher_log(
+        "PSEUDO",
+        f"completed in {report['pseudo_generation_seconds']}s | "
+        f"pseudo_images={report['pseudo_images']} selected={report['selected_pseudo_images']} "
+        f"pseudo_annotations={report['pseudo_annotations']}",
+    )
+    _write_soft_teacher_status(
+        status_path,
+        {
+            "stage": "pseudo_labeling",
+            "state": "completed",
+            "report": report,
+        },
+    )
+    return report
 
 
 def _build_soft_teacher_merged_dataset(labeled_root: Path, pseudo_train_json: Path, out_root: Path) -> tuple[Path, dict]:
@@ -1600,6 +1708,7 @@ def train_one_run(target_name: str,
     # Log meta
     meta = out_dir / "run_meta"
     meta.mkdir(parents=True, exist_ok=True)
+    soft_teacher_status_path = meta / "soft_teacher_status.json"
     kwargs["train_fraction"] = float(train_fraction)
     kwargs["fraction_seed"] = (int(seed) if fraction_seed is None else int(fraction_seed))
     kwargs["init_mode"] = init_mode
@@ -1635,10 +1744,28 @@ def train_one_run(target_name: str,
 
     soft_teacher_report = None
     if soft_teacher_enabled and unlabeled_dir_effective is not None:
+        _write_soft_teacher_status(
+            soft_teacher_status_path,
+            {
+                "stage": "soft_teacher",
+                "state": "initialized",
+                "target_name": target_name,
+                "output_dir": str(out_dir),
+                "unlabeled_dir_effective": str(unlabeled_dir_effective),
+            },
+        )
         if int(epochs) < 2:
             print(
                 "[SOFT-TEACHER][WARN] epochs < 2; need at least 2 epochs for "
                 "teacher burn-in + student stage. Running supervised only."
+            )
+            _write_soft_teacher_status(
+                soft_teacher_status_path,
+                {
+                    "stage": "soft_teacher",
+                    "state": "disabled_fallback",
+                    "reason": "epochs_lt_2",
+                },
             )
         else:
             burnin_epochs = max(1, int(round(float(RFDETR_SOFT_TEACHER_BURNIN_EPOCHS))))
@@ -1651,13 +1778,38 @@ def train_one_run(target_name: str,
             teacher_kwargs["output_dir"] = str(teacher_dir)
             teacher_kwargs["epochs"] = int(burnin_epochs)
 
-            print(
-                f"[SOFT-TEACHER] Stage 1/2 teacher burn-in: epochs={burnin_epochs} "
-                f"dataset={teacher_kwargs['dataset_dir']} -> {teacher_dir}"
+            _soft_teacher_log(
+                "STAGE1",
+                f"START teacher burn-in: epochs={burnin_epochs} "
+                f"dataset={teacher_kwargs['dataset_dir']} -> {teacher_dir}",
             )
+            _write_soft_teacher_status(
+                soft_teacher_status_path,
+                {
+                    "stage": "stage1_teacher_burnin",
+                    "state": "running",
+                    "teacher_epochs": int(burnin_epochs),
+                    "teacher_output_dir": str(teacher_dir),
+                    "dataset_dir": str(teacher_kwargs["dataset_dir"]),
+                },
+            )
+            t_stage1 = time.time()
             model.train(**teacher_kwargs)
+            _soft_teacher_log(
+                "STAGE1",
+                f"END teacher burn-in in {round(time.time() - t_stage1, 2)}s",
+            )
+            _write_soft_teacher_status(
+                soft_teacher_status_path,
+                {
+                    "stage": "stage1_teacher_burnin",
+                    "state": "completed",
+                    "duration_seconds": round(time.time() - t_stage1, 2),
+                },
+            )
 
             labeled_train_json = data_dir / "train" / "_annotations.coco.json"
+            _soft_teacher_log("STAGE1", "START pseudo-label generation")
             pseudo_report = _build_soft_teacher_pseudo_split(
                 model=model,
                 unlabeled_root=unlabeled_dir_effective,
@@ -1673,6 +1825,8 @@ def train_one_run(target_name: str,
                 sample_first=int(RFDETR_SOFT_TEACHER_UNLABELED_FIRST_SAMPLE),
                 sample_last=int(RFDETR_SOFT_TEACHER_UNLABELED_LAST_SAMPLE),
                 seed=int(seed),
+                status_path=soft_teacher_status_path,
+                progress_every=int(RFDETR_SOFT_TEACHER_PROGRESS_EVERY),
             )
 
             merged_dir = None
@@ -1687,6 +1841,14 @@ def train_one_run(target_name: str,
                     out_root=out_dir,
                 )
                 kwargs["dataset_dir"] = str(merged_dir)
+                _soft_teacher_log(
+                    "MERGE",
+                    f"merged dataset ready: {merged_dir} | "
+                    f"labeled_train_images={merged_stats.get('labeled_train_images')} "
+                    f"pseudo_train_images={merged_stats.get('pseudo_train_images')} "
+                    f"merged_train_images={merged_stats.get('merged_train_images')} "
+                    f"pseudo_annotations_added={merged_stats.get('pseudo_annotations_added')}",
+                )
             else:
                 print(
                     "[SOFT-TEACHER][WARN] No pseudo annotations produced after burn-in; "
@@ -1716,20 +1878,51 @@ def train_one_run(target_name: str,
                 encoding="utf-8",
             )
             if merged_dir is not None:
-                print(
-                    f"[SOFT-TEACHER] Stage 2/2 student: epochs={student_epochs} "
-                    f"dataset={merged_dir} -> {out_dir}"
+                _soft_teacher_log(
+                    "STAGE2",
+                    f"START student: epochs={student_epochs} "
+                    f"dataset={merged_dir} -> {out_dir}",
                 )
             else:
-                print(
-                    f"[SOFT-TEACHER] Stage 2/2 student: epochs={student_epochs} "
-                    f"dataset={data_dir} -> {out_dir}"
+                _soft_teacher_log(
+                    "STAGE2",
+                    f"START student: epochs={student_epochs} "
+                    f"dataset={data_dir} -> {out_dir}",
                 )
+            _write_soft_teacher_status(
+                soft_teacher_status_path,
+                {
+                    "stage": "stage2_student",
+                    "state": "running",
+                    "student_epochs": int(student_epochs),
+                    "dataset_dir": str(kwargs["dataset_dir"]),
+                },
+            )
 
     print(f"[TRAIN] {model.__class__.__name__} - {target_name} -> {out_dir}")
+    t_train = time.time()
     model.train(**kwargs)
+    if soft_teacher_enabled and unlabeled_dir_effective is not None:
+        _soft_teacher_log("STAGE2", f"END student in {round(time.time() - t_train, 2)}s")
+        _write_soft_teacher_status(
+            soft_teacher_status_path,
+            {
+                "stage": "stage2_student",
+                "state": "completed",
+                "duration_seconds": round(time.time() - t_train, 2),
+            },
+        )
     best = find_best_val(out_dir)
     (out_dir / "val_best_summary.json").write_text(json.dumps(best, indent=2), encoding="utf-8")
+    if soft_teacher_enabled and unlabeled_dir_effective is not None:
+        _write_soft_teacher_status(
+            soft_teacher_status_path,
+            {
+                "stage": "completed",
+                "state": "done",
+                "best": best,
+            },
+        )
     return best
 
 # ───────────────────────────────────────────────────────────────────────────────
