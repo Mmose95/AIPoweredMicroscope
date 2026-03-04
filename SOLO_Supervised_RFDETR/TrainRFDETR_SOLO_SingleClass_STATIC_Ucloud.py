@@ -95,6 +95,14 @@ RFDETR_SOFT_TEACHER_MIN_BOX_WH = float(os.getenv("RFDETR_SOFT_TEACHER_MIN_BOX_WH
 RFDETR_SOFT_TEACHER_MAX_IMAGES = int(os.getenv("RFDETR_SOFT_TEACHER_MAX_IMAGES", "0") or 0)
 RFDETR_SOFT_TEACHER_EXCLUDE_LABELED = _env_bool("RFDETR_SOFT_TEACHER_EXCLUDE_LABELED", "1")
 RFDETR_SOFT_TEACHER_PROGRESS_EVERY = int(os.getenv("RFDETR_SOFT_TEACHER_PROGRESS_EVERY", "100") or 100)
+RFDETR_SOFT_TEACHER_PATCH_ONLY = _env_bool("RFDETR_SOFT_TEACHER_PATCH_ONLY", "1")
+RFDETR_SOFT_TEACHER_PATCH_DIR_HINT = os.getenv(
+    "RFDETR_SOFT_TEACHER_PATCH_DIR_HINT",
+    "Patches for Sample",
+).strip()
+RFDETR_SOFT_TEACHER_PRESELECT_MAX_IMAGES = int(
+    os.getenv("RFDETR_SOFT_TEACHER_PRESELECT_MAX_IMAGES", "0") or 0
+)
 RFDETR_SOFT_TEACHER_UNLABELED_FIRST_SAMPLE = int(
     os.getenv("RFDETR_SOFT_TEACHER_UNLABELED_FIRST_SAMPLE", "0") or 0
 )
@@ -112,6 +120,8 @@ if (
     )
 if RFDETR_SOFT_TEACHER_PROGRESS_EVERY <= 0:
     RFDETR_SOFT_TEACHER_PROGRESS_EVERY = 100
+if RFDETR_SOFT_TEACHER_PRESELECT_MAX_IMAGES < 0:
+    RFDETR_SOFT_TEACHER_PRESELECT_MAX_IMAGES = 0
 
 
 def _soft_teacher_log(stage: str, msg: str) -> None:
@@ -620,6 +630,9 @@ if RFDETR_USE_SOFT_TEACHER:
         f"max_images={(RFDETR_SOFT_TEACHER_MAX_IMAGES if RFDETR_SOFT_TEACHER_MAX_IMAGES > 0 else 'auto')} "
         f"exclude_labeled={RFDETR_SOFT_TEACHER_EXCLUDE_LABELED} "
         f"sample_range={sample_range_text} "
+        f"patch_only={RFDETR_SOFT_TEACHER_PATCH_ONLY} "
+        f"patch_dir_hint={RFDETR_SOFT_TEACHER_PATCH_DIR_HINT or '<none>'} "
+        f"preselect_max_images={(RFDETR_SOFT_TEACHER_PRESELECT_MAX_IMAGES if RFDETR_SOFT_TEACHER_PRESELECT_MAX_IMAGES > 0 else 'off')} "
         f"progress_every={RFDETR_SOFT_TEACHER_PROGRESS_EVERY}"
     )
 
@@ -757,9 +770,16 @@ def _collect_unlabeled_images(
     exclude_abs_paths: set[str] | None = None,
     sample_first: int = 0,
     sample_last: int = 0,
+    patch_only: bool = True,
+    patch_dir_hint: str = "",
+    preselect_max_images: int = 0,
+    seed: int = 42,
 ) -> tuple[list[Path], dict]:
+    hint_norm = (patch_dir_hint or "").strip().lower().replace("\\", "/")
     train_json = unlabeled_root / "train" / "_annotations.coco.json"
     image_paths = []
+    scan_mode = "coco_train_json" if train_json.exists() else "filesystem_full"
+    patch_dirs_found = 0
     if train_json.exists():
         try:
             data = json.loads(train_json.read_text(encoding="utf-8"))
@@ -774,9 +794,33 @@ def _collect_unlabeled_images(
         except Exception as e:
             print(f"[SOFT-TEACHER][WARN] Failed to parse {train_json}: {e}")
     else:
-        for p in unlabeled_root.rglob("*"):
-            if p.is_file() and p.suffix.lower() in VALID_EXTS:
-                image_paths.append(p.resolve())
+        if patch_only and hint_norm:
+            patch_dirs = []
+            for d in unlabeled_root.rglob("*"):
+                if not d.is_dir():
+                    continue
+                d_norm = str(d).lower().replace("\\", "/")
+                if hint_norm in d_norm:
+                    patch_dirs.append(d)
+            patch_dirs = sorted({str(d.resolve()): d.resolve() for d in patch_dirs}.values(), key=lambda x: str(x))
+            patch_dirs_found = len(patch_dirs)
+            if patch_dirs:
+                scan_mode = "filesystem_patch_dirs"
+                for d in patch_dirs:
+                    for p in d.rglob("*"):
+                        if p.is_file() and p.suffix.lower() in VALID_EXTS:
+                            image_paths.append(p.resolve())
+            else:
+                print(
+                    f"[SOFT-TEACHER][WARN] patch_only=1 but no directories matched "
+                    f"hint='{patch_dir_hint}'. Falling back to full recursive scan."
+                )
+
+        if not image_paths:
+            scan_mode = "filesystem_full"
+            for p in unlabeled_root.rglob("*"):
+                if p.is_file() and p.suffix.lower() in VALID_EXTS:
+                    image_paths.append(p.resolve())
     dedup = {}
     for p in image_paths:
         dedup[str(p)] = p
@@ -784,11 +828,26 @@ def _collect_unlabeled_images(
     stats = {
         "source_images": len(image_paths),
         "deduped_images": len(ordered),
+        "removed_non_patch_dir": 0,
         "removed_no_sample_tag": 0,
         "removed_outside_sample_range": 0,
         "removed_labeled_overlap": 0,
+        "removed_preselect_cap": 0,
         "selected_images": len(ordered),
+        "scan_mode": scan_mode,
+        "patch_dirs_found": patch_dirs_found,
     }
+
+    if patch_only:
+        hint = hint_norm
+        filtered = []
+        for p in ordered:
+            pl = str(p).lower().replace("\\", "/")
+            if hint and hint not in pl:
+                stats["removed_non_patch_dir"] += 1
+                continue
+            filtered.append(p)
+        ordered = filtered
 
     if sample_first > 0 or sample_last > 0:
         lo = sample_first if sample_first > 0 else 0
@@ -809,6 +868,13 @@ def _collect_unlabeled_images(
         before = len(ordered)
         ordered = [p for p in ordered if str(p) not in exclude_abs_paths]
         stats["removed_labeled_overlap"] = before - len(ordered)
+
+    if int(preselect_max_images) > 0 and len(ordered) > int(preselect_max_images):
+        before = len(ordered)
+        rng = random.Random(int(seed))
+        chosen = rng.sample(ordered, int(preselect_max_images))
+        ordered = sorted(chosen, key=lambda q: str(q))
+        stats["removed_preselect_cap"] = before - len(ordered)
 
     stats["selected_images"] = len(ordered)
     return ordered, stats
@@ -949,16 +1015,24 @@ def _build_soft_teacher_pseudo_split(
         exclude_abs_paths=exclude_refs,
         sample_first=int(sample_first),
         sample_last=int(sample_last),
+        patch_only=bool(RFDETR_SOFT_TEACHER_PATCH_ONLY),
+        patch_dir_hint=str(RFDETR_SOFT_TEACHER_PATCH_DIR_HINT),
+        preselect_max_images=int(RFDETR_SOFT_TEACHER_PRESELECT_MAX_IMAGES),
+        seed=int(seed),
     )
     _soft_teacher_log(
         "PSEUDO",
         "unlabeled selection "
+        f"scan_mode={unlabeled_stats.get('scan_mode', 'n/a')} "
+        f"patch_dirs_found={unlabeled_stats.get('patch_dirs_found', 0)} "
         f"source={unlabeled_stats.get('source_images', 0)} "
         f"deduped={unlabeled_stats.get('deduped_images', 0)} "
         f"selected={unlabeled_stats.get('selected_images', 0)} "
+        f"removed_non_patch_dir={unlabeled_stats.get('removed_non_patch_dir', 0)} "
         f"removed_labeled_overlap={unlabeled_stats.get('removed_labeled_overlap', 0)} "
         f"removed_outside_sample_range={unlabeled_stats.get('removed_outside_sample_range', 0)} "
-        f"removed_no_sample_tag={unlabeled_stats.get('removed_no_sample_tag', 0)}",
+        f"removed_no_sample_tag={unlabeled_stats.get('removed_no_sample_tag', 0)} "
+        f"removed_preselect_cap={unlabeled_stats.get('removed_preselect_cap', 0)}",
     )
     _write_soft_teacher_status(
         status_path,
