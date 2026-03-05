@@ -146,6 +146,11 @@ class RFDETR:
                 if isinstance(v, (int, float, str, bool)):
                     mlflow.log_param(k, v)
 
+        # Important for multi-stage workflows (e.g., SoftTeacher burn-in + student):
+        # callbacks must be scoped per train() call, otherwise metric sinks from stage 1
+        # keep receiving stage 2 updates and produce mixed plots/logs.
+        self.callbacks = defaultdict(list)
+
         metrics_plot_sink = MetricsPlotSink(output_dir=config.output_dir)
         self.callbacks["on_fit_epoch_end"].append(metrics_plot_sink.update)
         self.callbacks["on_train_end"].append(metrics_plot_sink.save)
