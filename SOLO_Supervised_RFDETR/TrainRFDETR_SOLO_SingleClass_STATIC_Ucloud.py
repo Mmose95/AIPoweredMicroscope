@@ -83,7 +83,7 @@ def _env_bool(name: str, default: str = "0") -> bool:
     return raw in ("1", "true", "yes", "y", "on")
 
 
-# SoftTeacher toggles (global for all runs in this launcher invocation).
+# SoftTeacher defaults (can be overridden per run by cfg["USE_SOFT_TEACHER"]).
 RFDETR_USE_SOFT_TEACHER = _env_bool("RFDETR_USE_SOFT_TEACHER", "0")
 RFDETR_UNLABELED_DATASET_DIR = os.getenv("RFDETR_UNLABELED_DATASET_DIR", "").strip()
 RFDETR_SOFT_TEACHER_UNSUP_WEIGHT = float(os.getenv("RFDETR_SOFT_TEACHER_UNSUP_WEIGHT", "1.0"))
@@ -1612,17 +1612,21 @@ def train_one_run(target_name: str,
                   seed: int = 42,
                   num_workers: int = 8,
                   pin_memory: bool = True,
-                  persistent_workers: bool = True) -> dict:
+                  persistent_workers: bool = True,
+                  use_soft_teacher: bool | None = None) -> dict:
 
     # Build resolved / optional patchified dataset
     data_dir = get_or_build_aug_cache(target_name, dataset_dir, OUTPUT_ROOT, aug_copies)
 
-    soft_teacher_enabled = bool(RFDETR_USE_SOFT_TEACHER)
+    soft_teacher_enabled = bool(RFDETR_USE_SOFT_TEACHER) if use_soft_teacher is None else bool(use_soft_teacher)
     unlabeled_dir_effective: Path | None = None
     if soft_teacher_enabled:
         unlabeled_raw = RFDETR_UNLABELED_DATASET_DIR
         if not unlabeled_raw:
-            print("[SOFT-TEACHER][WARN] RFDETR_USE_SOFT_TEACHER=1 but RFDETR_UNLABELED_DATASET_DIR is empty. Disabling SoftTeacher.")
+            print(
+                "[SOFT-TEACHER][WARN] SoftTeacher is enabled for this run, "
+                "but RFDETR_UNLABELED_DATASET_DIR is empty. Disabling SoftTeacher."
+            )
             soft_teacher_enabled = False
         else:
             unlabeled_src = Path(unlabeled_raw).expanduser().resolve()
@@ -2313,6 +2317,7 @@ def _build_matrix_space_for_target(target_key: str, matrix_cfg: dict) -> dict:
         "INIT_MODE":       matrix_cfg["init_modes"],
         "SSL_CKPT":        [tcfg["ssl_ckpt"]],
         "RUN_VARIANT":     ["matrix_default"],
+        "USE_SOFT_TEACHER": [bool(RFDETR_USE_SOFT_TEACHER)],
         "RESOLUTION":      [SEARCH_RESOLUTION],
         "EPOCHS":          [tcfg["epochs"]],
         "LR":              [tcfg["lr"]],
@@ -2410,14 +2415,90 @@ def _build_ssl_triage_cfgs_for_target(target_key: str, matrix_cfg: dict) -> list
                     cfg["TRAIN_FRACTION"] = train_fraction
                     cfg["FRACTION_SEED"] = fraction_seed
                     cfg["SEED"] = seed
+                    cfg["USE_SOFT_TEACHER"] = False
                     cfgs.append(cfg)
+    return cfgs
+
+def _combo_fraction_for_target(target_key: str) -> float:
+    if target_key == "epi":
+        env_name, default = "RFDETR_COMBO_EPI_FRACTION", "0.25"
+    elif target_key == "leu":
+        env_name, default = "RFDETR_COMBO_LEU_FRACTION", "1.0"
+    else:
+        raise ValueError(f"Unsupported target_key={target_key!r}")
+
+    raw = os.getenv(env_name, default).strip()
+    try:
+        frac = float(raw)
+    except Exception as e:
+        raise ValueError(f"{env_name} must be a float in (0,1], got {raw!r}") from e
+    if not (0.0 < frac <= 1.0):
+        raise ValueError(f"{env_name} must be in (0,1], got {frac}")
+    return frac
+
+def _build_combo_cfgs_for_target(target_key: str, matrix_cfg: dict) -> list[dict]:
+    """
+    Build fixed 2-run combo for one target:
+    1) scratch supervised only
+    2) scratch + SoftTeacher
+
+    Fractions are controlled by:
+      - RFDETR_COMBO_EPI_FRACTION (default 0.25)
+      - RFDETR_COMBO_LEU_FRACTION (default 1.0)
+    """
+    if target_key not in ("epi", "leu"):
+        raise ValueError(f"Unsupported target_key={target_key!r}")
+
+    tcfg = matrix_cfg[target_key]
+    train_fraction = _combo_fraction_for_target(target_key)
+
+    shared = {
+        "MODEL_CLS": matrix_cfg["model_cls"],
+        "INIT_MODE": "scratch",
+        "SSL_CKPT": "",
+        "RESOLUTION": SEARCH_RESOLUTION,
+        "EPOCHS": tcfg["epochs"],
+        "LR": tcfg["lr"],
+        "LR_ENCODER": matrix_cfg["lr_encoder"],
+        "WARMUP_EPOCHS": matrix_cfg["warmup_epochs"],
+        "FREEZE_ENCODER": matrix_cfg["freeze_encoder"],
+        "GRAD_ACCUM_STEPS": matrix_cfg["grad_accum_steps"],
+        "BATCH": tcfg["batch"],
+        "WEIGHT_DECAY": matrix_cfg["weight_decay"],
+        "DROPOUT": matrix_cfg["dropout"],
+        "MULTI_SCALE": matrix_cfg["multi_scale"],
+        "EXPANDED_SCALES": matrix_cfg["expanded_scales"],
+        "NUM_QUERIES": tcfg["num_queries"],
+        "AUG_COPIES": matrix_cfg["aug_copies"],
+        "EARLY_STOPPING": matrix_cfg["early_stopping"],
+        "EARLY_STOPPING_PATIENCE": matrix_cfg["early_stopping_patience"],
+        "EARLY_STOPPING_MIN_DELTA": matrix_cfg["early_stopping_min_delta"],
+        "EARLY_STOPPING_USE_EMA": matrix_cfg["early_stopping_use_ema"],
+        "TRAIN_FRACTION": train_fraction,
+    }
+
+    variants = [
+        ("combo_scratch_supervised", False),
+        ("combo_scratch_softteacher", True),
+    ]
+
+    cfgs: list[dict] = []
+    for fraction_seed in matrix_cfg["fraction_seeds"]:
+        for seed in matrix_cfg["seeds"]:
+            for run_variant, use_soft_teacher in variants:
+                cfg = dict(shared)
+                cfg["RUN_VARIANT"] = run_variant
+                cfg["USE_SOFT_TEACHER"] = use_soft_teacher
+                cfg["FRACTION_SEED"] = fraction_seed
+                cfg["SEED"] = seed
+                cfgs.append(cfg)
     return cfgs
 
 # One-click matrix mode (both classes, with/without SSL, chosen fractions) with env flags.
 EXPERIMENT_MODE = os.getenv("RFDETR_EXPERIMENT_MODE", "ssl_triage").strip().lower()
-if EXPERIMENT_MODE not in ("matrix", "ssl_triage"):
+if EXPERIMENT_MODE not in ("matrix", "ssl_triage", "combo"):
     raise ValueError(
-        "RFDETR_EXPERIMENT_MODE must be one of: matrix, ssl_triage."
+        "RFDETR_EXPERIMENT_MODE must be one of: matrix, ssl_triage, combo."
     )
 
 MATRIX_CFG = _build_matrix_runtime_config()
@@ -2432,7 +2513,7 @@ if EXPERIMENT_MODE == "matrix":
         f"fraction_seeds={','.join(str(x) for x in MATRIX_CFG['fraction_seeds'])} "
         f"seeds={','.join(str(x) for x in MATRIX_CFG['seeds'])}"
     )
-else:
+elif EXPERIMENT_MODE == "ssl_triage":
     SEARCH_LEUCO = _build_ssl_triage_cfgs_for_target("leu", MATRIX_CFG) if need_leu else []
     SEARCH_EPI = _build_ssl_triage_cfgs_for_target("epi", MATRIX_CFG) if need_epi else []
     _main_print(
@@ -2442,6 +2523,18 @@ else:
         f"fractions={','.join(str(x) for x in MATRIX_CFG['train_fractions'])} "
         f"fraction_seeds={','.join(str(x) for x in MATRIX_CFG['fraction_seeds'])} "
         f"seeds={','.join(str(x) for x in MATRIX_CFG['seeds'])}"
+    )
+else:
+    SEARCH_LEUCO = _build_combo_cfgs_for_target("leu", MATRIX_CFG) if need_leu else []
+    SEARCH_EPI = _build_combo_cfgs_for_target("epi", MATRIX_CFG) if need_epi else []
+    _main_print(
+        f"[EXPERIMENT] mode=combo "
+        f"epi_fraction={_combo_fraction_for_target('epi')} "
+        f"leu_fraction={_combo_fraction_for_target('leu')} "
+        f"fraction_seeds={','.join(str(x) for x in MATRIX_CFG['fraction_seeds'])} "
+        f"seeds={','.join(str(x) for x in MATRIX_CFG['seeds'])} "
+        f"epochs_epi={MATRIX_CFG['epi']['epochs']} "
+        f"epochs_leu={MATRIX_CFG['leu']['epochs']}"
     )
 
 
@@ -2477,6 +2570,7 @@ def _build_training_plan_rows(jobs: list[dict]) -> list[dict]:
             "target": job["target_name"],
             "model": cfg.get("MODEL_CLS"),
             "run_variant": cfg.get("RUN_VARIANT", "matrix_default"),
+            "use_soft_teacher": bool(cfg.get("USE_SOFT_TEACHER", RFDETR_USE_SOFT_TEACHER)),
             "init_mode": init_mode,
             "ssl_ckpt": (str(ckpt) if ckpt else ""),
             "ssl_ckpt_name": _short_ckpt_name(ckpt),
@@ -2524,7 +2618,7 @@ def _print_and_save_training_plan(plan_rows: list[dict], session_root: Path):
         print(f"[PLAN] {target_name}: runs={len(rows)} {counts_txt}")
 
     concise_cols = [
-        "run_idx", "target", "run_variant", "init_mode", "train_fraction", "fraction_seed", "seed", "epochs", "lr",
+        "run_idx", "target", "run_variant", "use_soft_teacher", "init_mode", "train_fraction", "fraction_seed", "seed", "epochs", "lr",
         "lr_encoder", "warmup_epochs", "freeze_encoder",
         "batch", "grad_accum_steps", "multi_scale", "expanded_scales", "num_queries", "weight_decay", "dropout",
         "early_stopping", "early_stopping_patience", "early_stopping_min_delta",
@@ -2649,6 +2743,7 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
         run_variant = str(cfg.get("RUN_VARIANT", "matrix_default"))
         ssl_ckpt = cfg.get("SSL_CKPT")
         backbone_ckpt = ssl_ckpt if init_mode == "ssl" else None
+        use_soft_teacher = bool(cfg.get("USE_SOFT_TEACHER", RFDETR_USE_SOFT_TEACHER))
         train_fraction = float(cfg.get("TRAIN_FRACTION", 1.0))
         fraction_seed = int(cfg.get("FRACTION_SEED", cfg.get("SEED", SEED)))
         run_seed = int(cfg.get("SEED", SEED))
@@ -2696,6 +2791,7 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
                     num_workers=workers_now,
                     pin_memory=pin_now,
                     persistent_workers=persist_now,
+                    use_soft_teacher=use_soft_teacher,
                 )
                 break
             except RuntimeError as e:
@@ -2774,7 +2870,7 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
             "use_patch_224": USE_PATCH_224,
             "patch_size": PATCH_SIZE if USE_PATCH_224 else None,
             "full_resolution": None if USE_PATCH_224 else FULL_RESOLUTION,
-            "soft_teacher_enabled": bool(RFDETR_USE_SOFT_TEACHER),
+            "soft_teacher_enabled": bool(use_soft_teacher),
             "soft_teacher_unlabeled_dataset_dir": (RFDETR_UNLABELED_DATASET_DIR or None),
         }
         (run_dir / "hpo_record.json").write_text(json.dumps(row, indent=2), encoding="utf-8")
