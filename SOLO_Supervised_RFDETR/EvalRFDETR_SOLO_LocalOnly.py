@@ -8,6 +8,7 @@ This script is intentionally local-only:
 - Assumes model checkpoint + COCO test json + image files are available locally.
 
 Outputs:
+- under: <output-dir>_<TargetName>/<YYYYMMDD-HHMMSS>/
 - eval_summary.json
 - predictions_coco.json
 - iou_sweep_metrics.csv
@@ -91,6 +92,9 @@ class LocalEvalConfig:
     checkpoint: Path
     test_json: Path
     output_dir: Path
+    output_root_dir: Path
+    run_timestamp: str
+    target_name: str
     images_root: Optional[Path]
     model_class: str
     model_resolution: Optional[int]
@@ -122,6 +126,100 @@ def ensure_deps() -> None:
         missing.append("pycocotools")
     if missing:
         raise ImportError("Missing dependencies: " + ", ".join(missing))
+
+
+def normalize_target_name(raw: str) -> str:
+    txt = (raw or "").strip()
+    if not txt:
+        return "Unknown"
+
+    low = txt.lower()
+    if any(k in low for k in ("leucocyte", "leukocyte", "leuco", "leuko", " wbc", "wbc ")):
+        return "Leucocyte"
+    if any(k in low for k in ("epithelial", "squamous")):
+        return "Epithelial"
+    if low in {"epi", "epithelial"}:
+        return "Epithelial"
+    if low in {"leu", "leucocyte", "leukocyte"}:
+        return "Leucocyte"
+
+    compact = re.sub(r"\s+", " ", txt)
+    return compact or "Unknown"
+
+
+def infer_target_name_from_coco_json(test_json: Path) -> Optional[str]:
+    try:
+        payload = json.loads(test_json.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    categories = payload.get("categories", [])
+    names = [str(c.get("name", "")).strip() for c in categories if isinstance(c, dict)]
+    if not names:
+        return None
+
+    for name in names:
+        normalized = normalize_target_name(name)
+        if normalized in {"Epithelial", "Leucocyte"}:
+            return normalized
+
+    if len(names) == 1:
+        return normalize_target_name(names[0])
+    return None
+
+
+def infer_target_name_from_path(path: Path) -> Optional[str]:
+    text = str(path).lower()
+    has_epi = any(tok in text for tok in ("epithelial", "squamous", "_epi", "-epi", "\\epi\\", "/epi/"))
+    has_leu = any(tok in text for tok in ("leucocyte", "leukocyte", "leuco", "leuko", "_leu", "-leu", "\\leu\\", "/leu/"))
+    if has_epi and not has_leu:
+        return "Epithelial"
+    if has_leu and not has_epi:
+        return "Leucocyte"
+    return None
+
+
+def sanitize_target_suffix(target_name: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "", normalize_target_name(target_name))
+    return cleaned or "Unknown"
+
+
+def resolve_target_name(args: argparse.Namespace, checkpoint: Path, test_json: Path) -> str:
+    explicit_name = (args.target_name or "").strip()
+    if explicit_name:
+        return normalize_target_name(explicit_name)
+
+    if args.target == "epithelial":
+        return "Epithelial"
+    if args.target == "leucocyte":
+        return "Leucocyte"
+
+    coco_target = infer_target_name_from_coco_json(test_json)
+    if coco_target:
+        return coco_target
+
+    path_target = infer_target_name_from_path(test_json) or infer_target_name_from_path(checkpoint)
+    if path_target:
+        return path_target
+
+    return "Unknown"
+
+
+def build_output_dir(base_output_dir: Path, target_name: str) -> Tuple[Path, Path, str]:
+    suffix = sanitize_target_suffix(target_name)
+    base_name = base_output_dir.name
+    suffix_tag = f"_{suffix.lower()}"
+    if base_name.lower().endswith(suffix_tag):
+        root_dir = base_output_dir.parent / base_name
+    else:
+        root_dir = base_output_dir.parent / f"{base_name}_{suffix}"
+    run_stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    out_dir = root_dir / run_stamp
+    counter = 2
+    while out_dir.exists():
+        out_dir = root_dir / f"{run_stamp}_{counter:02d}"
+        counter += 1
+    return out_dir, root_dir, out_dir.name
 
 
 def json_dump(path: Path, payload: Any) -> None:
@@ -676,6 +774,9 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
         raise FileNotFoundError(f"test_json not found: {cfg.test_json}")
 
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[LOCAL EVAL] Target={cfg.target_name}")
+    print(f"[LOCAL EVAL] Model checkpoint={cfg.checkpoint}")
+    print(f"[LOCAL EVAL] Output directory={cfg.output_dir}")
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
 
@@ -963,12 +1064,21 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
     summary = {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "mode": "local_only",
+        "target_name": cfg.target_name,
+        "run_timestamp": cfg.run_timestamp,
         "checkpoint": str(cfg.checkpoint),
         "test_json": str(cfg.test_json),
         "output_dir": str(cfg.output_dir),
+        "output_root_dir": str(cfg.output_root_dir),
         "images_root": str(cfg.images_root) if cfg.images_root is not None else None,
         "model_class": cfg.model_class,
         "model_resolution": cfg.model_resolution,
+        "used_model": {
+            "checkpoint_path": str(cfg.checkpoint),
+            "checkpoint_file": cfg.checkpoint.name,
+            "model_class": cfg.model_class,
+            "model_resolution": cfg.model_resolution,
+        },
         "images_total_requested": len(img_ids),
         "images_processed": len(processed_ids),
         "images_missing": len(missing),
@@ -1019,12 +1129,14 @@ def build_config(args: argparse.Namespace) -> LocalEvalConfig:
 
     checkpoint = args.checkpoint.resolve()
     test_json = args.test_json.resolve()
-    output_dir = args.output_dir.resolve()
+    base_output_dir = args.output_dir.resolve()
     images_root = args.images_root.resolve() if args.images_root is not None else None
     model_meta_root = checkpoint.parent.parent if checkpoint.parent.name.lower() == "rfdetr_run" else checkpoint.parent
 
     model_resolution = infer_model_resolution(checkpoint)
     model_class = infer_model_class(model_meta_root, checkpoint) if args.model_class == "auto" else args.model_class
+    target_name = resolve_target_name(args, checkpoint, test_json)
+    output_dir, output_root_dir, run_timestamp = build_output_dir(base_output_dir, target_name)
 
     if args.iou_step <= 0:
         raise ValueError("--iou-step must be > 0")
@@ -1037,6 +1149,9 @@ def build_config(args: argparse.Namespace) -> LocalEvalConfig:
         checkpoint=checkpoint,
         test_json=test_json,
         output_dir=output_dir,
+        output_root_dir=output_root_dir,
+        run_timestamp=run_timestamp,
+        target_name=target_name,
         images_root=images_root,
         model_class=model_class,
         model_resolution=model_resolution,
@@ -1063,6 +1178,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--test-json", type=Path, default=_optional_path(TEST_JSON), help="Path to COCO test annotations JSON.")
     p.add_argument("--output-dir", type=Path, default=_optional_path(OUTPUT_DIR), help="Directory to write evaluation outputs.")
     p.add_argument("--images-root", type=Path, default=_optional_path(IMAGE_ROOT), help="Prefix root for relative image file_name entries.")
+    p.add_argument(
+        "--target",
+        type=str,
+        default="auto",
+        choices=["auto", "epithelial", "leucocyte"],
+        help="Evaluation target name used for output folder naming.",
+    )
+    p.add_argument(
+        "--target-name",
+        type=str,
+        default="",
+        help="Optional custom target display name; overrides --target when provided.",
+    )
     p.add_argument("--model-class", type=str, default="auto", choices=["auto", "RFDETRSmall", "RFDETRMedium", "RFDETRLarge"])
 
     p.add_argument("--score-floor", type=float, default=0.001, help="Prediction floor retained for curves/AP.")
