@@ -441,9 +441,9 @@ def _default_dataset_dir() -> Path:
         return Path(raw).expanduser()
     candidates = [
         Path(
-            r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\SOLO_Supervised_RFDETR\Stat_Dataset\QA-2025v2_SquamousEpithelialCell_OVR_20260217-093944"
+            r"/SOLO_Supervised_RFDETR/Stat_Dataset/QA-2025v1_SquamousEpithelialCell_OVR_20260217-093944"
         ),
-        Path(__file__).resolve().parent / "Stat_Dataset" / "QA-2025v2_SquamousEpithelialCell_OVR_20260217-093944",
+        Path(__file__).resolve().parent / "Stat_Dataset" / "QA-2025v1_SquamousEpithelialCell_OVR_20260217-093944",
     ]
     for c in candidates:
         if c.exists():
