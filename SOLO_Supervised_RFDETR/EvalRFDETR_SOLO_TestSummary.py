@@ -16,6 +16,11 @@ Two modes:
    - Threshold sweep (precision/recall/F1 + FROC points)
    - PR and ROC-style curves from IoU-matched detections
    - Optional overlay images
+
+Optional PyCharm workflow:
+- edit the PYCHARM_* config block near the top of this file
+- set PYCHARM_USE_TOP_LEVEL_CONFIG = True
+- run the script with no command-line arguments
 """
 
 from __future__ import annotations
@@ -32,6 +37,44 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+# -----------------------------------------------------------------------------
+# Optional top-level config for running directly from PyCharm
+# -----------------------------------------------------------------------------
+# Leave disabled for normal CLI usage.
+PYCHARM_USE_TOP_LEVEL_CONFIG = False
+PYCHARM_MODE = "evaluate"  # "evaluate" or "summarize"
+
+PYCHARM_SUMMARIZE = {
+    "eval_runs_root": "",
+    "out_csv": "",
+    "out_json": "",
+    "target_filter": "Leucocyte",
+}
+
+PYCHARM_EVALUATE = {
+    "run_dir": "",
+    "checkpoint": "",
+    "test_json": "",
+    "output_dir": "",
+    "model_class": "RFDETRLarge",
+    "score_floor": 0.001,
+    "score_threshold": 0.30,
+    "confmat_iou": 0.50,
+    "curve_iou": 0.50,
+    "iou_min": 0.10,
+    "iou_max": 0.95,
+    "iou_step": 0.05,
+    "threshold_points": 51,
+    "max_images": None,
+    "num_overlays": 8,
+    "image_max_side": 1600,
+    "seed": 42,
+    "path_rewrite": "",
+    "images_root": "",
+    "skip_missing_images": False,
+    "no_plots": False,
+}
 
 # Optional imports for evaluate mode only (kept optional so summarize mode can run
 # even if these dependencies are missing).
@@ -89,6 +132,58 @@ def env_bool(name: str, default: bool) -> bool:
     if not raw:
         return default
     return raw in {"1", "true", "yes", "y", "on"}
+
+
+def _append_optional_arg(argv: List[str], flag: str, value: Any) -> None:
+    if value is None:
+        return
+    if isinstance(value, bool):
+        if value:
+            argv.append(flag)
+        return
+    text = str(value).strip()
+    if not text:
+        return
+    argv.extend([flag, text])
+
+
+def build_pycharm_argv() -> List[str]:
+    mode = str(PYCHARM_MODE).strip().lower()
+    if mode not in {"summarize", "evaluate"}:
+        raise ValueError(f"PYCHARM_MODE must be 'summarize' or 'evaluate', got {PYCHARM_MODE!r}")
+
+    argv: List[str] = [mode]
+    if mode == "summarize":
+        cfg = PYCHARM_SUMMARIZE
+        _append_optional_arg(argv, "--eval-runs-root", cfg.get("eval_runs_root"))
+        _append_optional_arg(argv, "--out-csv", cfg.get("out_csv"))
+        _append_optional_arg(argv, "--out-json", cfg.get("out_json"))
+        _append_optional_arg(argv, "--target-filter", cfg.get("target_filter"))
+        return argv
+
+    cfg = PYCHARM_EVALUATE
+    _append_optional_arg(argv, "--run-dir", cfg.get("run_dir"))
+    _append_optional_arg(argv, "--checkpoint", cfg.get("checkpoint"))
+    _append_optional_arg(argv, "--test-json", cfg.get("test_json"))
+    _append_optional_arg(argv, "--output-dir", cfg.get("output_dir"))
+    _append_optional_arg(argv, "--model-class", cfg.get("model_class"))
+    _append_optional_arg(argv, "--score-floor", cfg.get("score_floor"))
+    _append_optional_arg(argv, "--score-threshold", cfg.get("score_threshold"))
+    _append_optional_arg(argv, "--confmat-iou", cfg.get("confmat_iou"))
+    _append_optional_arg(argv, "--curve-iou", cfg.get("curve_iou"))
+    _append_optional_arg(argv, "--iou-min", cfg.get("iou_min"))
+    _append_optional_arg(argv, "--iou-max", cfg.get("iou_max"))
+    _append_optional_arg(argv, "--iou-step", cfg.get("iou_step"))
+    _append_optional_arg(argv, "--threshold-points", cfg.get("threshold_points"))
+    _append_optional_arg(argv, "--max-images", cfg.get("max_images"))
+    _append_optional_arg(argv, "--num-overlays", cfg.get("num_overlays"))
+    _append_optional_arg(argv, "--image-max-side", cfg.get("image_max_side"))
+    _append_optional_arg(argv, "--seed", cfg.get("seed"))
+    _append_optional_arg(argv, "--path-rewrite", cfg.get("path_rewrite"))
+    _append_optional_arg(argv, "--images-root", cfg.get("images_root"))
+    _append_optional_arg(argv, "--skip-missing-images", cfg.get("skip_missing_images"))
+    _append_optional_arg(argv, "--no-plots", cfg.get("no_plots"))
+    return argv
 
 
 def json_dump(path: Path, payload: Any) -> None:
@@ -1429,6 +1524,8 @@ def normalize_argv(argv: Sequence[str]) -> List[str]:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
+    if argv is None and PYCHARM_USE_TOP_LEVEL_CONFIG and not sys.argv[1:]:
+        argv = build_pycharm_argv()
     parser = build_parser()
     args = parser.parse_args(normalize_argv(sys.argv[1:] if argv is None else argv))
 
