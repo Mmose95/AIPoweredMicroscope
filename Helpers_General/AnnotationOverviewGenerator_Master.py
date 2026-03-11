@@ -51,7 +51,7 @@ DEBUG_FRAME = ""  # e.g. "Sample14 - BF.2_3_patch_x1280_y0.tif"
 
 
 def ts_name() -> str:
-    return datetime.now().strftime("%Y-%m-%d_%H%M")
+    return datetime.now().strftime("%Y-%d-%m_%H%M")
 
 
 def norm_str(s: pd.Series) -> pd.Series:

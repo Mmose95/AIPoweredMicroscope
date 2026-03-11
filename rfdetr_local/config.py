@@ -10,6 +10,9 @@ from typing import List, Optional, Literal, Type
 import torch
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
+EarlyStoppingMetric = Literal["map50", "map5095"]
+
+
 class ModelConfig(BaseModel):
     encoder: Literal["dinov2_windowed_small", "dinov2_windowed_base"]
     out_feature_indexes: List[int]
@@ -83,6 +86,7 @@ class TrainConfig(BaseModel):
     early_stopping_patience: int = 10
     early_stopping_min_delta: float = 0.001
     early_stopping_use_ema: bool = False
+    early_stopping_metric: EarlyStoppingMetric = "map5095"
     tensorboard: bool = True
     wandb: bool = False
     project: Optional[str] = None

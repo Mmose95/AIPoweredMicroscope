@@ -1606,6 +1606,7 @@ def train_one_run(target_name: str,
                   early_stopping_patience: int,
                   early_stopping_min_delta: float,
                   early_stopping_use_ema: bool,
+                  early_stopping_metric: str,
                   backbone_ckpt: str | None = None,
                   train_fraction: float = 1.0,
                   fraction_seed: int | None = None,
@@ -1750,6 +1751,7 @@ def train_one_run(target_name: str,
         early_stopping_patience=early_stopping_patience,
         early_stopping_min_delta=early_stopping_min_delta,
         early_stopping_use_ema=early_stopping_use_ema,
+        early_stopping_metric=str(early_stopping_metric),
         checkpoint_interval=10,
         run_test=True,
     )
@@ -2091,13 +2093,15 @@ MATRIX_QUICK_DEFAULTS_EPI = {
     "RFDETR_EPI_EPOCHS": "50",
     "RFDETR_EPI_LR": "5e-5",
     "RFDETR_EPI_NUM_QUERIES": "120",
+    "RFDETR_EPI_EARLY_STOPPING_METRIC": "map5095",
     "RFDETR_EPI_SSL_CKPT": "",
 }
 
 MATRIX_QUICK_DEFAULTS_LEU = {
-    "RFDETR_LEU_EPOCHS": "70",
+    "RFDETR_LEU_EPOCHS": "120",
     "RFDETR_LEU_LR": "8e-5",
     "RFDETR_LEU_NUM_QUERIES": "400",
+    "RFDETR_LEU_EARLY_STOPPING_METRIC": "map50",
     "RFDETR_LEU_SSL_CKPT": "",
 }
 
@@ -2118,6 +2122,15 @@ def _cfg_text(name: str) -> str:
     dyn = _matrix_dynamic_defaults()
     default = dyn.get(name, MATRIX_QUICK_DEFAULTS.get(name, ""))
     return os.getenv(name, default).strip()
+
+
+def _cfg_early_stopping_metric(name: str) -> str:
+    value = _cfg_text(name).strip().lower()
+    if value not in {"map50", "map5095"}:
+        raise ValueError(
+            f"{name} must be one of: map50, map5095. Got {value!r}"
+        )
+    return value
 
 def _cfg_train_fractions_text() -> str:
     # Primary env: RFDETR_TRAIN_FRACTIONS (CSV).
@@ -2249,6 +2262,7 @@ def _build_matrix_runtime_config() -> dict:
             "lr": float(_cfg_text("RFDETR_EPI_LR")),
             "batch": int(_cfg_text("RFDETR_EPI_BATCH")),
             "num_queries": int(_cfg_text("RFDETR_EPI_NUM_QUERIES")),
+            "early_stopping_metric": _cfg_early_stopping_metric("RFDETR_EPI_EARLY_STOPPING_METRIC"),
             "ssl_ckpt": _cfg_text("RFDETR_EPI_SSL_CKPT"),
         },
         "leu": {
@@ -2256,6 +2270,7 @@ def _build_matrix_runtime_config() -> dict:
             "lr": float(_cfg_text("RFDETR_LEU_LR")),
             "batch": int(_cfg_text("RFDETR_LEU_BATCH")),
             "num_queries": int(_cfg_text("RFDETR_LEU_NUM_QUERIES")),
+            "early_stopping_metric": _cfg_early_stopping_metric("RFDETR_LEU_EARLY_STOPPING_METRIC"),
             "ssl_ckpt": _cfg_text("RFDETR_LEU_SSL_CKPT"),
         },
     }
@@ -2331,6 +2346,7 @@ def _build_matrix_space_for_target(target_key: str, matrix_cfg: dict) -> dict:
         "EARLY_STOPPING_PATIENCE":    [matrix_cfg["early_stopping_patience"]],
         "EARLY_STOPPING_MIN_DELTA":   [matrix_cfg["early_stopping_min_delta"]],
         "EARLY_STOPPING_USE_EMA":     [matrix_cfg["early_stopping_use_ema"]],
+        "EARLY_STOPPING_METRIC":      [tcfg["early_stopping_metric"]],
         "TRAIN_FRACTION":  matrix_cfg["train_fractions"],
         "FRACTION_SEED":   matrix_cfg["fraction_seeds"],
         "SEED":            matrix_cfg["seeds"],
@@ -2373,6 +2389,7 @@ def _build_ssl_triage_cfgs_for_target(target_key: str, matrix_cfg: dict) -> list
         "EARLY_STOPPING_PATIENCE": matrix_cfg["early_stopping_patience"],
         "EARLY_STOPPING_MIN_DELTA": matrix_cfg["early_stopping_min_delta"],
         "EARLY_STOPPING_USE_EMA": matrix_cfg["early_stopping_use_ema"],
+        "EARLY_STOPPING_METRIC": tcfg["early_stopping_metric"],
     }
 
     variants = [
@@ -2499,6 +2516,7 @@ def _build_training_plan_rows(jobs: list[dict]) -> list[dict]:
             "early_stopping_patience": cfg.get("EARLY_STOPPING_PATIENCE"),
             "early_stopping_min_delta": cfg.get("EARLY_STOPPING_MIN_DELTA"),
             "early_stopping_use_ema": cfg.get("EARLY_STOPPING_USE_EMA"),
+            "early_stopping_metric": cfg.get("EARLY_STOPPING_METRIC"),
             "resolution": cfg.get("RESOLUTION"),
             "input_mode": INPUT_MODE,
             "dataset_dir": job["dataset_dir"],
@@ -2528,7 +2546,7 @@ def _print_and_save_training_plan(plan_rows: list[dict], session_root: Path):
         "lr_encoder", "warmup_epochs", "freeze_encoder",
         "batch", "grad_accum_steps", "multi_scale", "expanded_scales", "num_queries", "weight_decay", "dropout",
         "early_stopping", "early_stopping_patience", "early_stopping_min_delta",
-        "early_stopping_use_ema", "ssl_ckpt_name",
+        "early_stopping_use_ema", "early_stopping_metric", "ssl_ckpt_name",
     ]
     if print_rows:
         print("[PLAN] Columns: " + ", ".join(concise_cols))
@@ -2689,6 +2707,7 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
                     early_stopping_patience=try_cfg["EARLY_STOPPING_PATIENCE"],
                     early_stopping_min_delta=try_cfg["EARLY_STOPPING_MIN_DELTA"],
                     early_stopping_use_ema=try_cfg["EARLY_STOPPING_USE_EMA"],
+                    early_stopping_metric=try_cfg["EARLY_STOPPING_METRIC"],
                     backbone_ckpt=backbone_ckpt,
                     train_fraction=train_fraction,
                     fraction_seed=fraction_seed,

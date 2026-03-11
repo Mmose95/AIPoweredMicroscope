@@ -42,6 +42,7 @@ from rfdetr.engine import evaluate, train_one_epoch
 from rfdetr.models import build_model, build_criterion_and_postprocessors
 from rfdetr.util.benchmark import benchmark
 from rfdetr.util.drop_scheduler import drop_scheduler
+from rfdetr.util.early_stopping import EARLY_STOPPING_METRIC_LABEL, extract_coco_eval_metric
 from rfdetr.util.files import download_file
 from rfdetr.util.get_param_dicts import get_param_dict
 from rfdetr.util.utils import ModelEma, BestMetricHolder, clean_state_dict
@@ -293,6 +294,7 @@ class Model:
 
         best_map_holder = BestMetricHolder(use_ema=args.use_ema)
         num_training_steps_per_epoch = len(data_loader_train)
+        best_metric_label = EARLY_STOPPING_METRIC_LABEL.get(args.early_stopping_metric, args.early_stopping_metric)
 
 
         # Training loop
@@ -338,35 +340,37 @@ class Model:
                 }, checkpoint_path)
 
             # --- Best checkpoint logic ---
-            map50 = test_stats.get("coco_eval_bbox", [None])[0]
-            print(f"[DEBUG] Epoch {epoch}: mAP50 = {map50}")
+            metric_value = extract_coco_eval_metric(test_stats, "coco_eval_bbox", args.early_stopping_metric)
+            print(f"[DEBUG] Epoch {epoch}: {best_metric_label} = {metric_value}")
 
-            if map50 is not None:
-                if best_map_holder.update(map50, epoch, is_ema=False):
+            if metric_value is not None:
+                if best_map_holder.update(metric_value, epoch, is_ema=False):
                     best_regular_ckpt = output_dir / 'checkpoint_best_regular.pth'
                     shutil.copy(checkpoint_paths[0], best_regular_ckpt)
                     mlflow.log_artifact(str(best_regular_ckpt))
             else:
                 print(
-                    f"[WARNING] Epoch {epoch}: No mAP50 found in test_stats['coco_eval_bbox'], skipping regular model checkpoint update.")
+                    f"[WARNING] Epoch {epoch}: No {best_metric_label} found in test_stats['coco_eval_bbox'], skipping regular model checkpoint update.")
 
             # --- EMA evaluation (if enabled) ---
+            callback_stats = {**train_stats, **test_stats}
             if args.use_ema:
                 ema_test_stats, _ = evaluate(self.ema_m.module, criterion, postprocessors, data_loader_val, base_ds, device, args, epoch=epoch)
-                ema_map50 = ema_test_stats.get("coco_eval_bbox", [None])[0]
-                print(f"[DEBUG] Epoch {epoch}: EMA mAP50 = {ema_map50}")
+                callback_stats["ema_test_coco_eval_bbox"] = ema_test_stats.get("coco_eval_bbox")
+                ema_metric_value = extract_coco_eval_metric(ema_test_stats, "coco_eval_bbox", args.early_stopping_metric)
+                print(f"[DEBUG] Epoch {epoch}: EMA {best_metric_label} = {ema_metric_value}")
 
-                if ema_map50 is not None:
-                    if best_map_holder.update(ema_map50, epoch, is_ema=True):
+                if ema_metric_value is not None:
+                    if best_map_holder.update(ema_metric_value, epoch, is_ema=True):
                         best_ema_ckpt = output_dir / 'checkpoint_best_ema.pth'
                         torch.save(self.ema_m.module.state_dict(), best_ema_ckpt)
                         mlflow.log_artifact(str(best_ema_ckpt))
                 else:
-                    print(f"[WARNING] Epoch {epoch}: No EMA mAP50 found, skipping EMA checkpoint update.")
+                    print(f"[WARNING] Epoch {epoch}: No EMA {best_metric_label} found, skipping EMA checkpoint update.")
 
             # Callbacks per epoch
             for callback in callbacks["on_fit_epoch_end"]:
-                callback({**train_stats, **test_stats})
+                callback(callback_stats)
 
             if self.stop_early:
                 print(f"Early stopping at epoch {epoch}")
@@ -714,6 +718,8 @@ def get_args_parser():
                         help='Minimum change in mAP to qualify as an improvement')
     parser.add_argument('--early_stopping_use_ema', action='store_true',
                         help='Use EMA model metrics for early stopping')
+    parser.add_argument('--early_stopping_metric', default='map5095', choices=['map50', 'map5095'],
+                        help='Validation metric used for early stopping and best-checkpoint selection')
     # subparsers
     subparsers = parser.add_subparsers(title='sub-commands', dest='subcommand',
         description='valid subcommands', help='additional help')
@@ -849,6 +855,7 @@ def populate_args(
     early_stopping_patience=10,
     early_stopping_min_delta=0.001,
     early_stopping_use_ema=False,
+    early_stopping_metric='map5095',
     gradient_checkpointing=False,
     # Additional
     subcommand=None,
@@ -948,6 +955,7 @@ def populate_args(
         early_stopping_patience=early_stopping_patience,
         early_stopping_min_delta=early_stopping_min_delta,
         early_stopping_use_ema=early_stopping_use_ema,
+        early_stopping_metric=early_stopping_metric,
         gradient_checkpointing=gradient_checkpointing,
         **extra_kwargs
     )

@@ -176,7 +176,8 @@ class RFDETR:
                 model=self.model,
                 patience=config.early_stopping_patience,
                 min_delta=config.early_stopping_min_delta,
-                use_ema=config.early_stopping_use_ema
+                use_ema=config.early_stopping_use_ema,
+                metric=config.early_stopping_metric,
             )
             self.callbacks["on_fit_epoch_end"].append(early_stopping_callback.update)
 
