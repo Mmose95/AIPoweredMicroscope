@@ -2062,7 +2062,7 @@ MATRIX_QUICK_DEFAULTS_SHARED = {
     # - default: RF-DETR default pretrained weights
     # - scratch: no pretraining
     # - ssl: no detector pretrain + load SSL backbone checkpoint
-    "RFDETR_INIT_MODES": "default,scratch,ssl",
+    "RFDETR_INIT_MODES": "default",
     # Legacy alias kept for backward compatibility; used only if RFDETR_INIT_MODES is unset.
     "RFDETR_SSL_MODES": "none,ssl",
     "RFDETR_TRAIN_FRACTIONS": "1.0",
@@ -2431,7 +2431,7 @@ def _build_ssl_triage_cfgs_for_target(target_key: str, matrix_cfg: dict) -> list
     return cfgs
 
 # One-click matrix mode (both classes, with/without SSL, chosen fractions) with env flags.
-EXPERIMENT_MODE = os.getenv("RFDETR_EXPERIMENT_MODE", "ssl_triage").strip().lower()
+EXPERIMENT_MODE = os.getenv("RFDETR_EXPERIMENT_MODE", "matrix").strip().lower()
 if EXPERIMENT_MODE not in ("matrix", "ssl_triage"):
     raise ValueError(
         "RFDETR_EXPERIMENT_MODE must be one of: matrix, ssl_triage."
