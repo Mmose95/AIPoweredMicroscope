@@ -1,0 +1,109 @@
+{
+  "dataset_name": "QA-2025v1_SquamousEpithelialCell_OVR_V2_20260323-120604",
+  "source_coco": "D:\\PHD\\PhdData\\CellScanData\\Annotation_Backups\\Quality Assessment Backups\\23-03-2026\\annotations\\instances_default.json",
+  "images_root": "D:/PHD/PhdData/CellScanData/Zoom10x - Quality Assessment_Cleaned",
+  "target_class": "Squamous Epithelial Cell",
+  "seed": 42,
+  "split_ratio": {
+    "train": 0.7,
+    "valid": 0.15,
+    "test": 0.15
+  },
+  "split_strategy": "forced_test_annotation_aware",
+  "forced_test_samples_requested": [
+    "Sample 25",
+    "Sample 14",
+    "Sample 13",
+    "Sample 12",
+    "Sample 15",
+    "Sample 17",
+    "Sample 18",
+    "Sample 16"
+  ],
+  "forced_test_samples_used": [
+    "Sample 25",
+    "Sample 14",
+    "Sample 13",
+    "Sample 12",
+    "Sample 15",
+    "Sample 17",
+    "Sample 18",
+    "Sample 16"
+  ],
+  "forced_test_samples_without_target_annotations": [],
+  "target_box_planning": {
+    "total_target_boxes": 6436,
+    "ratio_targets": {
+      "train": 4505.2,
+      "valid": 965.4,
+      "test": 965.4
+    },
+    "assignment_targets": {
+      "train": 4505.2,
+      "valid": 965.4,
+      "test": 965.4
+    },
+    "actual_sample_assignment": {
+      "train": 4505,
+      "valid": 966,
+      "test": 965
+    }
+  },
+  "file_name_mode": "relative",
+  "samples": {
+    "train": [
+      "Sample 21",
+      "Sample 31",
+      "Sample 33",
+      "Sample 36",
+      "Sample 37",
+      "Sample 51",
+      "Sample 54",
+      "Sample 55",
+      "Sample 57",
+      "Sample 68"
+    ],
+    "valid": [
+      "Sample 19",
+      "Sample 20",
+      "Sample 24",
+      "Sample 27",
+      "Sample 30",
+      "Sample 34",
+      "Sample 53",
+      "Sample 56",
+      "Sample 67",
+      "Sample 70"
+    ],
+    "test": [
+      "Sample 12",
+      "Sample 13",
+      "Sample 14",
+      "Sample 15",
+      "Sample 16",
+      "Sample 17",
+      "Sample 18",
+      "Sample 23",
+      "Sample 25",
+      "Sample 32",
+      "Sample 52"
+    ]
+  },
+  "counts": {
+    "train": {
+      "n_samples": 10,
+      "n_images": 1394,
+      "n_target_boxes": 4505
+    },
+    "valid": {
+      "n_samples": 10,
+      "n_images": 388,
+      "n_target_boxes": 966
+    },
+    "test": {
+      "n_samples": 11,
+      "n_images": 178,
+      "n_target_boxes": 965
+    }
+  }
+}

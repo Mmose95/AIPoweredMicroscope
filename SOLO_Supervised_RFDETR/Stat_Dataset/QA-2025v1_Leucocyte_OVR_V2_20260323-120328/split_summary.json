@@ -1,0 +1,118 @@
+{
+  "dataset_name": "QA-2025v1_Leucocyte_OVR_V2_20260323-120328",
+  "source_coco": "D:\\PHD\\PhdData\\CellScanData\\Annotation_Backups\\Quality Assessment Backups\\23-03-2026\\annotations\\instances_default.json",
+  "images_root": "D:/PHD/PhdData/CellScanData/Zoom10x - Quality Assessment_Cleaned",
+  "target_class": "Leucocyte",
+  "seed": 42,
+  "split_ratio": {
+    "train": 0.7,
+    "valid": 0.15,
+    "test": 0.15
+  },
+  "split_strategy": "forced_test_annotation_aware",
+  "forced_test_samples_requested": [
+    "Sample 25",
+    "Sample 14",
+    "Sample 13",
+    "Sample 12",
+    "Sample 15",
+    "Sample 17",
+    "Sample 18",
+    "Sample 16"
+  ],
+  "forced_test_samples_used": [
+    "Sample 25",
+    "Sample 14",
+    "Sample 13",
+    "Sample 12",
+    "Sample 15",
+    "Sample 18"
+  ],
+  "forced_test_samples_without_target_annotations": [
+    "Sample 17",
+    "Sample 16"
+  ],
+  "target_box_planning": {
+    "total_target_boxes": 11704,
+    "ratio_targets": {
+      "train": 8192.8,
+      "valid": 1755.6,
+      "test": 1755.6
+    },
+    "assignment_targets": {
+      "train": 8192.8,
+      "valid": 1755.6,
+      "test": 1755.6
+    },
+    "actual_sample_assignment": {
+      "train": 8192,
+      "valid": 1758,
+      "test": 1754
+    }
+  },
+  "file_name_mode": "relative",
+  "samples": {
+    "train": [
+      "Sample 19",
+      "Sample 27",
+      "Sample 28",
+      "Sample 32",
+      "Sample 33",
+      "Sample 35",
+      "Sample 36",
+      "Sample 37",
+      "Sample 38",
+      "Sample 40",
+      "Sample 41",
+      "Sample 46",
+      "Sample 49",
+      "Sample 50",
+      "Sample 53",
+      "Sample 54",
+      "Sample 55",
+      "Sample 61",
+      "Sample 62",
+      "Sample 66",
+      "Sample 67"
+    ],
+    "valid": [
+      "Sample 22",
+      "Sample 23",
+      "Sample 30",
+      "Sample 42",
+      "Sample 51",
+      "Sample 52",
+      "Sample 58",
+      "Sample 68"
+    ],
+    "test": [
+      "Sample 12",
+      "Sample 13",
+      "Sample 14",
+      "Sample 15",
+      "Sample 18",
+      "Sample 25",
+      "Sample 31",
+      "Sample 48",
+      "Sample 57",
+      "Sample 70"
+    ]
+  },
+  "counts": {
+    "train": {
+      "n_samples": 21,
+      "n_images": 437,
+      "n_target_boxes": 8192
+    },
+    "valid": {
+      "n_samples": 8,
+      "n_images": 90,
+      "n_target_boxes": 1758
+    },
+    "test": {
+      "n_samples": 10,
+      "n_images": 114,
+      "n_target_boxes": 1754
+    }
+  }
+}
