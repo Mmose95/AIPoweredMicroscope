@@ -20,6 +20,7 @@ Outputs:
 - pr_curve_overall.csv (if sklearn available)
 - roc_curve_overall.csv (if sklearn available and both classes present)
 - optional PNG plots + overlays/
+- optional error_overlays/ containing missed GT and false-positive images
 """
 
 from __future__ import annotations
@@ -36,17 +37,46 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # ============================================================================
-# USER PATH INPUTS (EDIT THESE)
+# USER PRESETS (EDIT THESE)
 # ============================================================================
-# Set explicit local paths here.
-# You can also override each one from CLI:
-#   --checkpoint ... --test-json ... --output-dir ... --images-root ...
-CHECKPOINT = r"D:\PHD\Results\Quality Assessment\Epi+Leu for ESCMID Conference\first full Epi model no SSL\HPO_Config_003/checkpoint_best_total.pth"
-TEST_JSON = r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\SOLO_Supervised_RFDETR\Stat_Dataset\QA-2025v2_SquamousEpithelialCell_OVR_20260217-093944\test/_annotations.coco.json"
-OUTPUT_DIR = r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\EvaluationOutput"
+# Pick which preset to run by default.
+# CLI can still override any field:
+#   --preset leucocyte --checkpoint ... --test-json ... --output-dir ... --images-root ...
+ACTIVE_PRESET = "leucocyte"
+
+DEFAULT_OUTPUT_DIR = r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\EvaluationOutput"
 # Prefix applied to relative file_name entries from COCO JSON, e.g.
 # "Sample 15/Patches for Sample 15/....tif"
-IMAGE_ROOT = r"D:\PHD\PhdData\CellScanData\Zoom10x - Quality Assessment_Cleaned"
+DEFAULT_IMAGES_ROOT = r"D:\PHD\PhdData\CellScanData\Zoom10x - Quality Assessment_Cleaned"
+
+# Overlay selection:
+#   "all"  -> generate overlays for all processed test images
+#   "25"   -> generate 25 randomly selected overlays
+#   "0"    -> disable overlay generation
+OVERLAY_SELECTION = "all"
+
+# Error overlay selection:
+#   "all"  -> generate error overlays for all images containing errors
+#   "25"   -> generate 25 randomly selected error overlays
+#   "0"    -> disable error overlay generation
+ERROR_OVERLAY_SELECTION = "all"
+
+EVAL_PRESETS = {
+    "leucocyte": {
+        "target_name": "Leucocyte",
+        "checkpoint": r"D:\PHD\Results\Quality Assessment\General results\Lucocyte model default pretrained 40% AP@50\Leucocyte\HPO_Config_001\checkpoint_best_total.pth",
+        "test_json": r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\SOLO_Supervised_RFDETR\Stat_Dataset\QA-2025v1_Leucocyte_OVR_V2_20260323-120328\test\_annotations.coco.json",
+        "images_root": DEFAULT_IMAGES_ROOT,
+        "model_class": "auto",
+    },
+    "epithelial": {
+        "target_name": "Epithelial",
+        "checkpoint": r"D:\PHD\Results\Quality Assessment\Epi+Leu for ESCMID Conference\first full Epi model no SSL\HPO_Config_003\checkpoint_best_total.pth",
+        "test_json": r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\SOLO_Supervised_RFDETR\Stat_Dataset\QA-2025v1_SquamousEpithelialCell_OVR_V2_20260323-120604\test\_annotations.coco.json",
+        "images_root": DEFAULT_IMAGES_ROOT,
+        "model_class": "auto",
+    },
+}
 
 
 def _optional_path(raw: str) -> Optional[Path]:
@@ -54,6 +84,27 @@ def _optional_path(raw: str) -> Optional[Path]:
     if not raw:
         return None
     return Path(raw).expanduser()
+
+
+def _resolve_preset(name: str) -> Dict[str, str]:
+    key = (name or "").strip().lower()
+    if key not in EVAL_PRESETS:
+        raise ValueError(
+            f"Unknown preset {name!r}. Available presets: {', '.join(sorted(EVAL_PRESETS))}"
+        )
+    return EVAL_PRESETS[key]
+
+
+def parse_overlay_selection(raw: Any) -> int:
+    txt = str(raw).strip().lower()
+    if txt in {"all", "*"}:
+        return -1
+    if txt in {"none", "off", "0"}:
+        return 0
+    value = int(txt)
+    if value < 0:
+        raise ValueError("Overlay selection must be 'all', '0', or a positive integer.")
+    return value
 
 try:
     import numpy as np
@@ -89,6 +140,7 @@ except Exception:
 
 @dataclass
 class LocalEvalConfig:
+    preset_name: str
     checkpoint: Path
     test_json: Path
     output_dir: Path
@@ -107,7 +159,10 @@ class LocalEvalConfig:
     iou_step: float
     threshold_points: int
     max_images: Optional[int]
+    overlay_selection: str
     num_overlays: int
+    error_overlay_selection: str
+    num_error_overlays: int
     image_max_side: int
     seed: int
     skip_missing_images: bool
@@ -184,7 +239,12 @@ def sanitize_target_suffix(target_name: str) -> str:
     return cleaned or "Unknown"
 
 
-def resolve_target_name(args: argparse.Namespace, checkpoint: Path, test_json: Path) -> str:
+def resolve_target_name(
+    args: argparse.Namespace,
+    checkpoint: Path,
+    test_json: Path,
+    preset_target_name: str = "",
+) -> str:
     explicit_name = (args.target_name or "").strip()
     if explicit_name:
         return normalize_target_name(explicit_name)
@@ -193,6 +253,9 @@ def resolve_target_name(args: argparse.Namespace, checkpoint: Path, test_json: P
         return "Epithelial"
     if args.target == "leucocyte":
         return "Leucocyte"
+
+    if preset_target_name:
+        return normalize_target_name(preset_target_name)
 
     coco_target = infer_target_name_from_coco_json(test_json)
     if coco_target:
@@ -552,6 +615,34 @@ def detection_counts(samples: Sequence[Dict[str, Any]], score_threshold: float, 
     return tp, fp, fn
 
 
+def match_errors_for_sample(sample: Dict[str, Any], score_threshold: float, iou_thr: float) -> Dict[str, Any]:
+    gt_boxes = sample["gt_boxes"]
+    gt_cls = sample["gt_cls"]
+
+    keep = sample["pred_scores"] >= score_threshold
+    pred_boxes = sample["pred_boxes"][keep]
+    pred_cls = sample["pred_cls"][keep]
+    pred_scores = sample["pred_scores"][keep]
+
+    ious = iou_matrix(gt_boxes, pred_boxes)
+    valid = gt_cls[:, None] == pred_cls[None, :] if len(gt_boxes) and len(pred_boxes) else None
+    matches = greedy_match(ious, iou_thr=iou_thr, valid_pairs=valid)
+
+    matched_gt = {gi for gi, _ in matches}
+    matched_pr = {pj for _, pj in matches}
+    false_negative_idx = [gi for gi in range(len(gt_cls)) if gi not in matched_gt]
+    false_positive_idx = [pj for pj in range(len(pred_cls)) if pj not in matched_pr]
+
+    return {
+        "pred_boxes_kept": pred_boxes,
+        "pred_cls_kept": pred_cls,
+        "pred_scores_kept": pred_scores,
+        "matches": matches,
+        "false_negative_idx": false_negative_idx,
+        "false_positive_idx": false_positive_idx,
+    }
+
+
 def build_binary_curve_samples_for_class(samples: Sequence[Dict[str, Any]], class_idx: int, iou_thr: float) -> Tuple[np.ndarray, np.ndarray]:
     y_true: List[int] = []
     y_score: List[float] = []
@@ -660,19 +751,33 @@ def draw_overlay(
         new_wh = (int(img.width * scale), int(img.height * scale))
         img = img.resize(new_wh, Image.BILINEAR)
     draw = ImageDraw.Draw(img)
+    gt_color = (0, 200, 0)
+    pred_color = (220, 30, 30)
+    text_fill = (255, 255, 255)
 
     def sc(box: np.ndarray) -> List[float]:
         return [float(box[0] * scale), float(box[1] * scale), float(box[2] * scale), float(box[3] * scale)]
 
+    def draw_label(x: float, y: float, text: str, fill_color: Tuple[int, int, int]) -> None:
+        if hasattr(draw, "textbbox"):
+            left, top, right, bottom = draw.textbbox((x, y), text)
+            pad_x = 4
+            pad_y = 2
+            draw.rectangle(
+                [left - pad_x, top - pad_y, right + pad_x, bottom + pad_y],
+                fill=fill_color,
+            )
+        draw.text((x, y), text, fill=text_fill)
+
     for b, n in zip(gt_boxes, gt_names):
         x1, y1, x2, y2 = sc(b)
-        draw.rectangle([x1, y1, x2, y2], outline=(0, 255, 0), width=2)
-        draw.text((x1 + 2, y1 + 2), str(n), fill=(0, 255, 0))
+        draw.rectangle([x1, y1, x2, y2], outline=gt_color, width=3)
+        draw_label(x1 + 3, max(0.0, y1 + 3), f"GT: {n}", gt_color)
 
     for b, n, s in zip(pred_boxes, pred_names, pred_scores):
         x1, y1, x2, y2 = sc(b)
-        draw.rectangle([x1, y1, x2, y2], outline=(255, 0, 0), width=2)
-        draw.text((x1 + 2, y1 + 2), f"{float(s):.2f} {n}", fill=(255, 0, 0))
+        draw.rectangle([x1, y1, x2, y2], outline=pred_color, width=3)
+        draw_label(x1 + 3, min(max(0.0, y2 - 14), img.height - 16), f"Pred: {n} {float(s):.2f}", pred_color)
 
     # Top-left legend
     legend_x = 8
@@ -689,8 +794,78 @@ def draw_overlay(
     )
     y1 = legend_y + pad
     y2 = y1 + row_h
-    draw.text((legend_x + 8, y1), "Green: Ground Truth", fill=(0, 120, 0))
-    draw.text((legend_x + 8, y2), "Red: Prediction", fill=(180, 0, 0))
+    draw.text((legend_x + 8, y1), "Green: Ground Truth", fill=gt_color)
+    draw.text((legend_x + 8, y2), "Red: Prediction + score", fill=pred_color)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(out_path)
+
+
+def draw_error_overlay(
+    img_path: Path,
+    missed_gt_boxes: np.ndarray,
+    missed_gt_names: List[str],
+    false_pos_boxes: np.ndarray,
+    false_pos_names: List[str],
+    false_pos_scores: np.ndarray,
+    out_path: Path,
+    image_max_side: int,
+) -> None:
+    img = Image.open(img_path).convert("RGB")
+    scale = min(1.0, float(image_max_side) / float(max(img.size)))
+    if scale < 0.999:
+        new_wh = (int(img.width * scale), int(img.height * scale))
+        img = img.resize(new_wh, Image.BILINEAR)
+    draw = ImageDraw.Draw(img)
+    missed_color = (245, 170, 0)
+    false_pos_color = (220, 30, 30)
+    text_fill = (255, 255, 255)
+
+    def sc(box: np.ndarray) -> List[float]:
+        return [float(box[0] * scale), float(box[1] * scale), float(box[2] * scale), float(box[3] * scale)]
+
+    def draw_label(x: float, y: float, text: str, fill_color: Tuple[int, int, int]) -> None:
+        if hasattr(draw, "textbbox"):
+            left, top, right, bottom = draw.textbbox((x, y), text)
+            pad_x = 4
+            pad_y = 2
+            draw.rectangle(
+                [left - pad_x, top - pad_y, right + pad_x, bottom + pad_y],
+                fill=fill_color,
+            )
+        draw.text((x, y), text, fill=text_fill)
+
+    for b, n in zip(missed_gt_boxes, missed_gt_names):
+        x1, y1, x2, y2 = sc(b)
+        draw.rectangle([x1, y1, x2, y2], outline=missed_color, width=3)
+        draw_label(x1 + 3, max(0.0, y1 + 3), f"Missed GT: {n}", missed_color)
+
+    for b, n, s in zip(false_pos_boxes, false_pos_names, false_pos_scores):
+        x1, y1, x2, y2 = sc(b)
+        draw.rectangle([x1, y1, x2, y2], outline=false_pos_color, width=3)
+        draw_label(
+            x1 + 3,
+            min(max(0.0, y2 - 14), img.height - 16),
+            f"False Pos: {n} {float(s):.2f}",
+            false_pos_color,
+        )
+
+    legend_x = 8
+    legend_y = 8
+    row_h = 16
+    pad = 6
+    box_w = 230
+    box_h = pad * 2 + row_h * 2
+    draw.rectangle(
+        [legend_x, legend_y, legend_x + box_w, legend_y + box_h],
+        fill=(255, 255, 255),
+        outline=(0, 0, 0),
+        width=1,
+    )
+    y1 = legend_y + pad
+    y2 = y1 + row_h
+    draw.text((legend_x + 8, y1), "Orange: Missed ground truth", fill=missed_color)
+    draw.text((legend_x + 8, y2), "Red: False positive + score", fill=false_pos_color)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     img.save(out_path)
@@ -774,9 +949,13 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
         raise FileNotFoundError(f"test_json not found: {cfg.test_json}")
 
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[LOCAL EVAL] Preset={cfg.preset_name}")
     print(f"[LOCAL EVAL] Target={cfg.target_name}")
     print(f"[LOCAL EVAL] Model checkpoint={cfg.checkpoint}")
+    print(f"[LOCAL EVAL] Test JSON={cfg.test_json}")
     print(f"[LOCAL EVAL] Output directory={cfg.output_dir}")
+    print(f"[LOCAL EVAL] Overlay selection={cfg.overlay_selection}")
+    print(f"[LOCAL EVAL] Error overlay selection={cfg.error_overlay_selection}")
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
 
@@ -998,8 +1177,25 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
         try_plot_curves(cfg.output_dir, thr_rows, pr_rows, roc_rows)
 
     per_image_count_rows: List[Dict[str, Any]] = []
+    per_image_error_rows: List[Dict[str, Any]] = []
+    error_overlay_samples: List[Dict[str, Any]] = []
+    total_false_negatives = 0
+    total_false_positives = 0
     for s in samples:
         keep = s["pred_scores"] >= cfg.score_threshold
+        error_info = match_errors_for_sample(s, cfg.score_threshold, cfg.confmat_iou)
+        false_negative_idx = error_info["false_negative_idx"]
+        false_positive_idx = error_info["false_positive_idx"]
+        missed_gt_boxes = s["gt_boxes"][false_negative_idx]
+        missed_gt_cls = s["gt_cls"][false_negative_idx]
+        false_pos_boxes = error_info["pred_boxes_kept"][false_positive_idx]
+        false_pos_cls = error_info["pred_cls_kept"][false_positive_idx]
+        false_pos_scores = error_info["pred_scores_kept"][false_positive_idx]
+        false_negative_count = int(len(false_negative_idx))
+        false_positive_count = int(len(false_positive_idx))
+        total_false_negatives += false_negative_count
+        total_false_positives += false_positive_count
+
         per_image_count_rows.append(
             {
                 "image_name": Path(s["img_path"]).name,
@@ -1009,10 +1205,39 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
                 "score_threshold": float(cfg.score_threshold),
             }
         )
+        per_image_error_rows.append(
+            {
+                "image_name": Path(s["img_path"]).name,
+                "image_path": s["img_path"],
+                "false_negatives": false_negative_count,
+                "false_positives": false_positive_count,
+                "total_errors": false_negative_count + false_positive_count,
+                "score_threshold": float(cfg.score_threshold),
+                "iou_threshold": float(cfg.confmat_iou),
+            }
+        )
+        if false_negative_count > 0 or false_positive_count > 0:
+            error_overlay_samples.append(
+                {
+                    "img_path": s["img_path"],
+                    "missed_gt_boxes": missed_gt_boxes,
+                    "missed_gt_names": [labels[int(c)] for c in missed_gt_cls],
+                    "false_pos_boxes": false_pos_boxes,
+                    "false_pos_names": [labels[int(c)] for c in false_pos_cls],
+                    "false_pos_scores": false_pos_scores,
+                    "false_negatives": false_negative_count,
+                    "false_positives": false_positive_count,
+                }
+            )
     write_csv(
         cfg.output_dir / "per_image_object_counts.csv",
         ["image_name", "image_path", "gt_objects", "pred_objects_at_threshold", "score_threshold"],
         per_image_count_rows,
+    )
+    write_csv(
+        cfg.output_dir / "per_image_error_counts.csv",
+        ["image_name", "image_path", "false_negatives", "false_positives", "total_errors", "score_threshold", "iou_threshold"],
+        per_image_error_rows,
     )
 
     if cfg.num_overlays != 0:
@@ -1052,6 +1277,37 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
                 image_max_side=cfg.image_max_side,
             )
 
+    if cfg.num_error_overlays != 0:
+        chosen_error_samples = list(error_overlay_samples)
+        random.shuffle(chosen_error_samples)
+        if cfg.num_error_overlays > 0:
+            chosen_error_samples = chosen_error_samples[: cfg.num_error_overlays]
+        used_error_overlay_names: set[str] = set()
+        for i, s in enumerate(chosen_error_samples, start=1):
+            img_stem = Path(s["img_path"]).stem
+            safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", img_stem).strip("._")
+            if not safe_stem:
+                safe_stem = f"error_image_{i:02d}"
+            base_name = (
+                f"Errors_{safe_stem}_FN{s['false_negatives']}_FP{s['false_positives']}"
+            )
+            overlay_name = f"{base_name}.jpg"
+            suffix = 2
+            while overlay_name in used_error_overlay_names:
+                overlay_name = f"{base_name}_{suffix}.jpg"
+                suffix += 1
+            used_error_overlay_names.add(overlay_name)
+            draw_error_overlay(
+                img_path=Path(s["img_path"]),
+                missed_gt_boxes=s["missed_gt_boxes"],
+                missed_gt_names=s["missed_gt_names"],
+                false_pos_boxes=s["false_pos_boxes"],
+                false_pos_names=s["false_pos_names"],
+                false_pos_scores=s["false_pos_scores"],
+                out_path=cfg.output_dir / "error_overlays" / overlay_name,
+                image_max_side=cfg.image_max_side,
+            )
+
     coco_std_summary = {
         "AP@50:95": float(coco_std.stats[0]),
         "AP@50": float(coco_std.stats[1]),
@@ -1064,6 +1320,7 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
     summary = {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "mode": "local_only",
+        "preset_name": cfg.preset_name,
         "target_name": cfg.target_name,
         "run_timestamp": cfg.run_timestamp,
         "checkpoint": str(cfg.checkpoint),
@@ -1089,6 +1346,8 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
         "score_threshold": cfg.score_threshold,
         "confmat_iou": cfg.confmat_iou,
         "curve_iou": cfg.curve_iou,
+        "overlay_selection": cfg.overlay_selection,
+        "error_overlay_selection": cfg.error_overlay_selection,
         "iou_sweep": {"min": cfg.iou_min, "max": cfg.iou_max, "step": cfg.iou_step, "rows": iou_rows},
         "coco_standard": coco_std_summary,
         "best_f1": best_f1_row,
@@ -1096,6 +1355,14 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
         "roc_auc": roc_auc,
         "roc_note": "ROC/PR are computed from IoU-matched detection samples.",
         "per_image_object_counts_csv": str(cfg.output_dir / "per_image_object_counts.csv"),
+        "per_image_error_counts_csv": str(cfg.output_dir / "per_image_error_counts.csv"),
+        "error_summary": {
+            "images_with_errors": int(len(error_overlay_samples)),
+            "total_false_negatives": int(total_false_negatives),
+            "total_false_positives": int(total_false_positives),
+            "error_iou_threshold": float(cfg.confmat_iou),
+            "error_score_threshold": float(cfg.score_threshold),
+        },
         "timing": {
             "inference_seconds_total": float(inference_seconds_total),
             "inference_images_timed": int(inference_images_timed),
@@ -1116,27 +1383,57 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
         )
     if best_f1_row is not None:
         print(f"[LOCAL EVAL] Best F1={float(best_f1_row['f1']):.4f} at threshold={float(best_f1_row['threshold']):.4f}")
+    print(
+        f"[LOCAL EVAL] Errors at score>={cfg.score_threshold:.2f}, IoU>={cfg.confmat_iou:.2f}: "
+        f"FN={total_false_negatives} FP={total_false_positives} images_with_errors={len(error_overlay_samples)}"
+    )
     print(f"[LOCAL EVAL] Summary -> {(cfg.output_dir / 'eval_summary.json').resolve()}")
 
 
 def build_config(args: argparse.Namespace) -> LocalEvalConfig:
-    if args.checkpoint is None:
-        raise ValueError("CHECKPOINT is not set. Edit CHECKPOINT at top or pass --checkpoint.")
-    if args.test_json is None:
-        raise ValueError("TEST_JSON is not set. Edit TEST_JSON at top or pass --test-json.")
-    if args.output_dir is None:
-        raise ValueError("OUTPUT_DIR is not set. Edit OUTPUT_DIR at top or pass --output-dir.")
+    preset_name = (args.preset or ACTIVE_PRESET).strip().lower()
+    preset = _resolve_preset(preset_name)
 
-    checkpoint = args.checkpoint.resolve()
-    test_json = args.test_json.resolve()
-    base_output_dir = args.output_dir.resolve()
-    images_root = args.images_root.resolve() if args.images_root is not None else None
+    checkpoint_raw = args.checkpoint or _optional_path(preset.get("checkpoint", ""))
+    test_json_raw = args.test_json or _optional_path(preset.get("test_json", ""))
+    output_dir_raw = args.output_dir or _optional_path(preset.get("output_dir", "")) or _optional_path(DEFAULT_OUTPUT_DIR)
+    images_root_raw = args.images_root or _optional_path(preset.get("images_root", ""))
+
+    if checkpoint_raw is None:
+        raise ValueError(
+            f"No checkpoint configured for preset '{preset_name}'. "
+            "Edit EVAL_PRESETS or pass --checkpoint."
+        )
+    if test_json_raw is None:
+        raise ValueError(
+            f"No test JSON configured for preset '{preset_name}'. "
+            "Edit EVAL_PRESETS or pass --test-json."
+        )
+    if output_dir_raw is None:
+        raise ValueError("No output directory configured. Edit DEFAULT_OUTPUT_DIR or pass --output-dir.")
+
+    checkpoint = checkpoint_raw.resolve()
+    test_json = test_json_raw.resolve()
+    base_output_dir = output_dir_raw.resolve()
+    images_root = images_root_raw.resolve() if images_root_raw is not None else None
     model_meta_root = checkpoint.parent.parent if checkpoint.parent.name.lower() == "rfdetr_run" else checkpoint.parent
 
     model_resolution = infer_model_resolution(checkpoint)
-    model_class = infer_model_class(model_meta_root, checkpoint) if args.model_class == "auto" else args.model_class
-    target_name = resolve_target_name(args, checkpoint, test_json)
+    model_class_choice = args.model_class
+    if model_class_choice == "auto":
+        model_class_choice = str(preset.get("model_class", "auto"))
+    model_class = infer_model_class(model_meta_root, checkpoint) if model_class_choice == "auto" else model_class_choice
+    target_name = resolve_target_name(
+        args,
+        checkpoint,
+        test_json,
+        preset_target_name=str(preset.get("target_name", "")),
+    )
     output_dir, output_root_dir, run_timestamp = build_output_dir(base_output_dir, target_name)
+    overlay_selection = str(args.overlay_selection or OVERLAY_SELECTION).strip()
+    num_overlays = parse_overlay_selection(overlay_selection)
+    error_overlay_selection = str(args.error_overlay_selection or ERROR_OVERLAY_SELECTION).strip()
+    num_error_overlays = parse_overlay_selection(error_overlay_selection)
 
     if args.iou_step <= 0:
         raise ValueError("--iou-step must be > 0")
@@ -1146,6 +1443,7 @@ def build_config(args: argparse.Namespace) -> LocalEvalConfig:
         raise ValueError("--threshold-points must be >= 2")
 
     return LocalEvalConfig(
+        preset_name=preset_name,
         checkpoint=checkpoint,
         test_json=test_json,
         output_dir=output_dir,
@@ -1164,7 +1462,10 @@ def build_config(args: argparse.Namespace) -> LocalEvalConfig:
         iou_step=float(args.iou_step),
         threshold_points=int(args.threshold_points),
         max_images=args.max_images,
-        num_overlays=int(args.num_overlays),
+        overlay_selection=overlay_selection,
+        num_overlays=num_overlays,
+        error_overlay_selection=error_overlay_selection,
+        num_error_overlays=num_error_overlays,
         image_max_side=int(args.image_max_side),
         seed=int(args.seed),
         skip_missing_images=bool(args.skip_missing_images),
@@ -1174,10 +1475,17 @@ def build_config(args: argparse.Namespace) -> LocalEvalConfig:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Local-only RF-DETR evaluator")
-    p.add_argument("--checkpoint", type=Path, default=_optional_path(CHECKPOINT), help="Path to model checkpoint file.")
-    p.add_argument("--test-json", type=Path, default=_optional_path(TEST_JSON), help="Path to COCO test annotations JSON.")
-    p.add_argument("--output-dir", type=Path, default=_optional_path(OUTPUT_DIR), help="Directory to write evaluation outputs.")
-    p.add_argument("--images-root", type=Path, default=_optional_path(IMAGE_ROOT), help="Prefix root for relative image file_name entries.")
+    p.add_argument(
+        "--preset",
+        type=str,
+        default=ACTIVE_PRESET,
+        choices=sorted(EVAL_PRESETS),
+        help="Named evaluation preset from EVAL_PRESETS at the top of the file.",
+    )
+    p.add_argument("--checkpoint", type=Path, default=None, help="Path to model checkpoint file.")
+    p.add_argument("--test-json", type=Path, default=None, help="Path to COCO test annotations JSON.")
+    p.add_argument("--output-dir", type=Path, default=None, help="Directory to write evaluation outputs.")
+    p.add_argument("--images-root", type=Path, default=None, help="Prefix root for relative image file_name entries.")
     p.add_argument(
         "--target",
         type=str,
@@ -1204,7 +1512,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--threshold-points", type=int, default=51)
 
     p.add_argument("--max-images", type=int, default=None)
-    p.add_argument("--num-overlays", type=int, default=-1, help="Number of overlays; -1 means all, 0 disables overlays.")
+    p.add_argument(
+        "--overlay-selection",
+        type=str,
+        default=OVERLAY_SELECTION,
+        help="Overlay output selection: 'all', '0', or a positive integer for a random subset.",
+    )
+    p.add_argument(
+        "--error-overlay-selection",
+        type=str,
+        default=ERROR_OVERLAY_SELECTION,
+        help="Error overlay output selection: 'all', '0', or a positive integer for a random subset of images with errors.",
+    )
     p.add_argument("--image-max-side", type=int, default=1600)
     p.add_argument("--seed", type=int, default=42)
 
