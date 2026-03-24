@@ -1036,6 +1036,8 @@ def draw_overlay(
 
     gt_color = (0, 200, 0)
     pred_color = (220, 30, 30)
+    gt_box_width = 3
+    pred_box_width = 2
     img = Image.open(img_path).convert("RGB")
     scale = min(1.0, float(image_max_side) / float(max(img.size)))
     if scale < 0.999:
@@ -1056,12 +1058,12 @@ def draw_overlay(
 
     for box in gt_boxes:
         x1, y1, x2, y2 = sc(box)
-        draw.rectangle([x1, y1, x2, y2], outline=gt_color, width=3)
+        draw.rectangle([x1, y1, x2, y2], outline=gt_color, width=gt_box_width)
 
     for box, score in zip(pred_boxes, pred_scores):
         x1, y1, x2, y2 = sc(box)
-        draw.rectangle([x1, y1, x2, y2], outline=pred_color, width=3)
-        score_text = f"{float(score):.2f}"
+        draw.rectangle([x1, y1, x2, y2], outline=pred_color, width=pred_box_width)
+        score_text = f"prob:{float(score):.2f}"
         text_w, text_h = _measure_text(draw, score_text, font)
         text_x, text_y = _choose_text_position(
             (x1, y1, x2, y2),
@@ -1090,6 +1092,8 @@ def draw_error_overlay(
 
     missed_color = (245, 170, 0)
     false_pos_color = (220, 30, 30)
+    missed_box_width = 3
+    false_pos_box_width = 2
     img = Image.open(img_path).convert("RGB")
     scale = min(1.0, float(image_max_side) / float(max(img.size)))
     if scale < 0.999:
@@ -1110,12 +1114,12 @@ def draw_error_overlay(
 
     for box in missed_gt_boxes:
         x1, y1, x2, y2 = sc(box)
-        draw.rectangle([x1, y1, x2, y2], outline=missed_color, width=3)
+        draw.rectangle([x1, y1, x2, y2], outline=missed_color, width=missed_box_width)
 
     for box, score in zip(false_pos_boxes, false_pos_scores):
         x1, y1, x2, y2 = sc(box)
-        draw.rectangle([x1, y1, x2, y2], outline=false_pos_color, width=3)
-        score_text = f"{float(score):.2f}"
+        draw.rectangle([x1, y1, x2, y2], outline=false_pos_color, width=false_pos_box_width)
+        score_text = f"prob:{float(score):.2f}"
         text_w, text_h = _measure_text(draw, score_text, font)
         text_x, text_y = _choose_text_position(
             (x1, y1, x2, y2),
