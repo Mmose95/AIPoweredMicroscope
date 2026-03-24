@@ -1108,7 +1108,8 @@ def draw_overlay(
     pred_scores: np.ndarray,
     out_path: Path,
     image_max_side: int,
-    matched_count: Optional[int] = None,
+    precision_value: Optional[float] = None,
+    recall_value: Optional[float] = None,
 ) -> None:
     del gt_names, pred_names
 
@@ -1159,11 +1160,10 @@ def draw_overlay(
             (gt_color, "Ground truth"),
             (pred_color, "Prediction"),
         ],
-        extra_lines=(
-            [f"Pred/GT hits: {int(matched_count)}/{len(gt_boxes)}"]
-            if matched_count is not None
-            else None
-        ),
+        extra_lines=[
+            f"Precision: {precision_value:.2f}" if precision_value is not None else "Precision: n/a",
+            f"Recall: {recall_value:.2f}" if recall_value is not None else "Recall: n/a",
+        ],
     )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1632,6 +1632,8 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
             pred_names = [labels[int(c)] for c in pred_cls]
             gt_count = int(len(s["gt_boxes"]))
             pred_count = int(len(pred_boxes))
+            precision_value = (matched_count / pred_count) if pred_count > 0 else None
+            recall_value = (matched_count / gt_count) if gt_count > 0 else None
             img_stem = Path(s["img_path"]).stem
             safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", img_stem).strip("._")
             if not safe_stem:
@@ -1652,7 +1654,8 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
                 pred_scores=pred_scores,
                 out_path=cfg.output_dir / "overlays" / overlay_name,
                 image_max_side=cfg.image_max_side,
-                matched_count=matched_count,
+                precision_value=precision_value,
+                recall_value=recall_value,
             )
 
     if cfg.num_error_overlays != 0:
