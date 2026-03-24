@@ -965,218 +965,61 @@ def _measure_text(draw: Any, text: str, font: Any) -> Tuple[int, int]:
     return (max(1, len(text) * 7), 14)
 
 
-def _layout_callout_centers(targets: Sequence[float], min_center: float, max_center: float, min_gap: float) -> List[float]:
-    if not targets:
-        return []
-
-    order = sorted(range(len(targets)), key=lambda idx: float(targets[idx]))
-    centers = [0.0 for _ in targets]
-    last_center = min_center - min_gap
-    for idx in order:
-        center = max(float(targets[idx]), min_center)
-        center = max(center, last_center + min_gap)
-        centers[idx] = center
-        last_center = center
-
-    if centers[order[-1]] > max_center:
-        centers[order[-1]] = max_center
-        for pos in range(len(order) - 2, -1, -1):
-            idx = order[pos]
-            nxt = order[pos + 1]
-            centers[idx] = min(centers[idx], centers[nxt] - min_gap)
-
-        if centers[order[0]] < min_center:
-            shift = min_center - centers[order[0]]
-            for idx in order:
-                centers[idx] += shift
-            if centers[order[-1]] > max_center:
-                shift_back = centers[order[-1]] - max_center
-                for idx in order:
-                    centers[idx] -= shift_back
-
-    return centers
-
-
-def _draw_box_callout_overlay(
-    img_path: Path,
-    entries: Sequence[Dict[str, Any]],
-    legend_rows: Sequence[Tuple[Tuple[int, int, int], str]],
-    title: str,
-    out_path: Path,
-    image_max_side: int,
-) -> None:
-    img = Image.open(img_path).convert("RGB")
-    scale = min(1.0, float(image_max_side) / float(max(img.size)))
-    if scale < 0.999:
-        new_wh = (int(img.width * scale), int(img.height * scale))
-        img = img.resize(new_wh, Image.BILINEAR)
-
-    font = ImageFont.load_default() if ImageFont is not None else None
-    probe = Image.new("RGB", (16, 16), (255, 255, 255))
-    probe_draw = ImageDraw.Draw(probe)
-
-    scaled_entries: List[Dict[str, Any]] = []
-    for entry in entries:
-        box = entry["box"]
-        scaled_entries.append(
-            {
-                "box": [
-                    float(box[0] * scale),
-                    float(box[1] * scale),
-                    float(box[2] * scale),
-                    float(box[3] * scale),
-                ],
-                "color": entry["color"],
-                "text": str(entry["text"]),
-            }
-        )
-
-    title_wh = _measure_text(probe_draw, title, font)
-    legend_text_width = 0
-    for _, text in legend_rows:
-        legend_text_width = max(legend_text_width, _measure_text(probe_draw, text, font)[0])
-    entry_text_width = 0
-    entry_text_height = 0
-    for entry in scaled_entries:
-        w, h = _measure_text(probe_draw, entry["text"], font)
-        entry_text_width = max(entry_text_width, w)
-        entry_text_height = max(entry_text_height, h)
-
-    outer_pad = 16
-    panel_gap = 18
-    panel_pad = 14
-    row_inner_pad = 6
-    swatch_w = 10
-    swatch_gap = 8
-    row_h = max(24, entry_text_height + row_inner_pad * 2)
-    row_gap = 8
-    legend_row_h = 18
-    header_h = 18 + title_wh[1] + 8 + len(legend_rows) * legend_row_h + 12
-    panel_width = max(
-        300,
-        title_wh[0] + panel_pad * 2,
-        legend_text_width + panel_pad * 2 + swatch_w + swatch_gap + 12,
-        entry_text_width + panel_pad * 2 + swatch_w + swatch_gap + 24,
+def _rects_overlap(a: Tuple[float, float, float, float], b: Tuple[float, float, float, float], pad: float = 0.0) -> bool:
+    return not (
+        (a[2] + pad) < b[0]
+        or (b[2] + pad) < a[0]
+        or (a[3] + pad) < b[1]
+        or (b[3] + pad) < a[1]
     )
 
-    desired_panel_h = header_h + (len(scaled_entries) * (row_h + row_gap)) + outer_pad
-    canvas_h = max(img.height + outer_pad * 2, desired_panel_h)
-    canvas_w = img.width + outer_pad * 2 + panel_gap + panel_width
-    canvas = Image.new("RGB", (canvas_w, canvas_h), (248, 248, 248))
-    image_xy = (outer_pad, outer_pad)
-    canvas.paste(img, image_xy)
 
-    draw = ImageDraw.Draw(canvas)
-    image_left = image_xy[0]
-    image_top = image_xy[1]
-    image_right = image_left + img.width
-    image_bottom = image_top + img.height
-    panel_left = image_right + panel_gap
-    panel_right = panel_left + panel_width
+def _clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(value, hi))
 
-    draw.rectangle(
-        [panel_left, outer_pad, panel_right, canvas_h - outer_pad],
-        fill=(255, 255, 255),
-        outline=(205, 205, 205),
-        width=1,
-    )
-    draw.line(
-        [(image_right + (panel_gap / 2.0), outer_pad), (image_right + (panel_gap / 2.0), canvas_h - outer_pad)],
-        fill=(210, 210, 210),
-        width=1,
-    )
 
-    title_x = panel_left + panel_pad
-    title_y = outer_pad + 8
-    draw.text((title_x, title_y), title, fill=(20, 20, 20), font=font)
+def _choose_text_position(
+    box: Tuple[float, float, float, float],
+    text_size: Tuple[int, int],
+    image_size: Tuple[int, int],
+    occupied_rects: Sequence[Tuple[float, float, float, float]],
+) -> Tuple[float, float]:
+    img_w, img_h = image_size
+    x1, y1, x2, y2 = box
+    text_w, text_h = text_size
+    margin = 3.0
+    box_rect = (x1, y1, x2, y2)
 
-    legend_y = title_y + title_wh[1] + 8
-    for color, text in legend_rows:
-        mid_y = legend_y + legend_row_h / 2.0
-        draw.rectangle(
-            [panel_left + panel_pad, mid_y - 4, panel_left + panel_pad + swatch_w, mid_y + 4],
-            fill=color,
-            outline=color,
-        )
-        draw.text(
-            (panel_left + panel_pad + swatch_w + swatch_gap, legend_y),
-            text,
-            fill=(35, 35, 35),
-            font=font,
-        )
-        legend_y += legend_row_h
+    candidates = [
+        (_clamp(x1, 0.0, max(0.0, img_w - text_w)), y1 - text_h - margin),
+        (_clamp(x2 - text_w, 0.0, max(0.0, img_w - text_w)), y1 - text_h - margin),
+        (_clamp(x1, 0.0, max(0.0, img_w - text_w)), y2 + margin),
+        (_clamp(x2 - text_w, 0.0, max(0.0, img_w - text_w)), y2 + margin),
+        (x2 + margin, _clamp(y1, 0.0, max(0.0, img_h - text_h))),
+        (x1 - text_w - margin, _clamp(y1, 0.0, max(0.0, img_h - text_h))),
+    ]
 
-    callout_start_y = legend_y + 8
-    available_center_min = callout_start_y + row_h / 2.0
-    available_center_max = canvas_h - outer_pad - row_h / 2.0
-    target_centers = [image_top + (entry["box"][1] + entry["box"][3]) / 2.0 for entry in scaled_entries]
-    callout_centers = _layout_callout_centers(
-        target_centers,
-        available_center_min,
-        available_center_max,
-        row_h + row_gap,
-    )
+    for cand_x, cand_y in candidates:
+        text_rect = (cand_x, cand_y, cand_x + text_w, cand_y + text_h)
+        if cand_x < 0 or cand_y < 0 or text_rect[2] > img_w or text_rect[3] > img_h:
+            continue
+        if _rects_overlap(text_rect, box_rect, pad=1.0):
+            continue
+        if any(_rects_overlap(text_rect, other, pad=2.0) for other in occupied_rects):
+            continue
+        return cand_x, cand_y
 
-    for entry in scaled_entries:
-        x1 = image_left + entry["box"][0]
-        y1 = image_top + entry["box"][1]
-        x2 = image_left + entry["box"][2]
-        y2 = image_top + entry["box"][3]
-        draw.rectangle([x1, y1, x2, y2], outline=entry["color"], width=3)
+    fallback_x = _clamp(x1, 0.0, max(0.0, img_w - text_w))
+    fallback_y = _clamp(max(0.0, y1 - text_h - margin), 0.0, max(0.0, img_h - text_h))
+    return fallback_x, fallback_y
 
-    for entry, callout_center_y in zip(scaled_entries, callout_centers):
-        color = entry["color"]
-        x1 = image_left + entry["box"][0]
-        y1 = image_top + entry["box"][1]
-        x2 = image_left + entry["box"][2]
-        y2 = image_top + entry["box"][3]
-        anchor_x = min(image_right - 1, max(image_left, x2))
-        anchor_y = min(image_bottom - 1, max(image_top, (y1 + y2) / 2.0))
-        callout_left = panel_left + panel_pad
-        callout_top = callout_center_y - row_h / 2.0
-        callout_right = panel_right - panel_pad
-        callout_bottom = callout_center_y + row_h / 2.0
 
-        draw.line(
-            [(anchor_x, anchor_y), (callout_left - 10, callout_center_y)],
-            fill=color,
-            width=2,
-        )
-        draw.ellipse(
-            [anchor_x - 3, anchor_y - 3, anchor_x + 3, anchor_y + 3],
-            fill=color,
-            outline=color,
-        )
-
-        if hasattr(draw, "rounded_rectangle"):
-            draw.rounded_rectangle(
-                [callout_left, callout_top, callout_right, callout_bottom],
-                radius=8,
-                fill=(252, 252, 252),
-                outline=(225, 225, 225),
-                width=1,
-            )
-        else:
-            draw.rectangle(
-                [callout_left, callout_top, callout_right, callout_bottom],
-                fill=(252, 252, 252),
-                outline=(225, 225, 225),
-                width=1,
-            )
-        draw.rectangle(
-            [callout_left + 8, callout_top + 6, callout_left + 8 + swatch_w, callout_bottom - 6],
-            fill=color,
-            outline=color,
-        )
-        draw.text(
-            (callout_left + 8 + swatch_w + swatch_gap, callout_top + row_inner_pad),
-            entry["text"],
-            fill=(20, 20, 20),
-            font=font,
-        )
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    canvas.save(out_path)
+def _draw_outlined_text(draw: Any, xy: Tuple[float, float], text: str, fill: Tuple[int, int, int], font: Any) -> None:
+    x, y = xy
+    outline_fill = (255, 255, 255)
+    for dx, dy in ((-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)):
+        draw.text((x + dx, y + dy), text, fill=outline_fill, font=font)
+    draw.text((x, y), text, fill=fill, font=font)
 
 
 def draw_overlay(
@@ -1189,37 +1032,48 @@ def draw_overlay(
     out_path: Path,
     image_max_side: int,
 ) -> None:
+    del gt_names, pred_names
+
     gt_color = (0, 200, 0)
     pred_color = (220, 30, 30)
-    entries: List[Dict[str, Any]] = []
-    for box, name in zip(gt_boxes, gt_names):
-        entries.append(
-            {
-                "box": box,
-                "color": gt_color,
-                "text": f"GT | {name}",
-            }
-        )
-    for box, name, score in zip(pred_boxes, pred_names, pred_scores):
-        entries.append(
-            {
-                "box": box,
-                "color": pred_color,
-                "text": f"Pred | {name} | p={float(score):.2f}",
-            }
+    img = Image.open(img_path).convert("RGB")
+    scale = min(1.0, float(image_max_side) / float(max(img.size)))
+    if scale < 0.999:
+        new_wh = (int(img.width * scale), int(img.height * scale))
+        img = img.resize(new_wh, Image.BILINEAR)
+
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.load_default() if ImageFont is not None else None
+    occupied_text_rects: List[Tuple[float, float, float, float]] = []
+
+    def sc(box: np.ndarray) -> Tuple[float, float, float, float]:
+        return (
+            float(box[0] * scale),
+            float(box[1] * scale),
+            float(box[2] * scale),
+            float(box[3] * scale),
         )
 
-    _draw_box_callout_overlay(
-        img_path=img_path,
-        entries=entries,
-        legend_rows=[
-            (gt_color, "Ground truth box"),
-            (pred_color, "Prediction and score"),
-        ],
-        title="Ground Truth And Predictions",
-        out_path=out_path,
-        image_max_side=image_max_side,
-    )
+    for box in gt_boxes:
+        x1, y1, x2, y2 = sc(box)
+        draw.rectangle([x1, y1, x2, y2], outline=gt_color, width=3)
+
+    for box, score in zip(pred_boxes, pred_scores):
+        x1, y1, x2, y2 = sc(box)
+        draw.rectangle([x1, y1, x2, y2], outline=pred_color, width=3)
+        score_text = f"{float(score):.2f}"
+        text_w, text_h = _measure_text(draw, score_text, font)
+        text_x, text_y = _choose_text_position(
+            (x1, y1, x2, y2),
+            (text_w, text_h),
+            img.size,
+            occupied_text_rects,
+        )
+        _draw_outlined_text(draw, (text_x, text_y), score_text, pred_color, font)
+        occupied_text_rects.append((text_x, text_y, text_x + text_w, text_y + text_h))
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(out_path)
 
 
 def draw_error_overlay(
@@ -1232,37 +1086,48 @@ def draw_error_overlay(
     out_path: Path,
     image_max_side: int,
 ) -> None:
+    del missed_gt_names, false_pos_names
+
     missed_color = (245, 170, 0)
     false_pos_color = (220, 30, 30)
-    entries: List[Dict[str, Any]] = []
-    for box, name in zip(missed_gt_boxes, missed_gt_names):
-        entries.append(
-            {
-                "box": box,
-                "color": missed_color,
-                "text": f"Missed GT | {name}",
-            }
-        )
-    for box, name, score in zip(false_pos_boxes, false_pos_names, false_pos_scores):
-        entries.append(
-            {
-                "box": box,
-                "color": false_pos_color,
-                "text": f"False Pos | {name} | p={float(score):.2f}",
-            }
+    img = Image.open(img_path).convert("RGB")
+    scale = min(1.0, float(image_max_side) / float(max(img.size)))
+    if scale < 0.999:
+        new_wh = (int(img.width * scale), int(img.height * scale))
+        img = img.resize(new_wh, Image.BILINEAR)
+
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.load_default() if ImageFont is not None else None
+    occupied_text_rects: List[Tuple[float, float, float, float]] = []
+
+    def sc(box: np.ndarray) -> Tuple[float, float, float, float]:
+        return (
+            float(box[0] * scale),
+            float(box[1] * scale),
+            float(box[2] * scale),
+            float(box[3] * scale),
         )
 
-    _draw_box_callout_overlay(
-        img_path=img_path,
-        entries=entries,
-        legend_rows=[
-            (missed_color, "Missed ground truth"),
-            (false_pos_color, "False positive and score"),
-        ],
-        title="Detection Errors",
-        out_path=out_path,
-        image_max_side=image_max_side,
-    )
+    for box in missed_gt_boxes:
+        x1, y1, x2, y2 = sc(box)
+        draw.rectangle([x1, y1, x2, y2], outline=missed_color, width=3)
+
+    for box, score in zip(false_pos_boxes, false_pos_scores):
+        x1, y1, x2, y2 = sc(box)
+        draw.rectangle([x1, y1, x2, y2], outline=false_pos_color, width=3)
+        score_text = f"{float(score):.2f}"
+        text_w, text_h = _measure_text(draw, score_text, font)
+        text_x, text_y = _choose_text_position(
+            (x1, y1, x2, y2),
+            (text_w, text_h),
+            img.size,
+            occupied_text_rects,
+        )
+        _draw_outlined_text(draw, (text_x, text_y), score_text, false_pos_color, font)
+        occupied_text_rects.append((text_x, text_y, text_x + text_w, text_y + text_h))
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(out_path)
 
 
 def try_plot_curves(output_dir: Path, thr_rows: Sequence[Dict[str, Any]], pr_rows: Sequence[Dict[str, Any]], roc_rows: Sequence[Dict[str, Any]]) -> None:
