@@ -16,6 +16,7 @@ Outputs:
 - per_class_metrics.csv
 - confusion_matrix.json
 - confusion_matrix.csv
+- confusion_matrix.png
 - threshold_metrics.csv
 - pr_curve_overall.csv (if sklearn available)
 - roc_curve_overall.csv (if sklearn available and both classes present)
@@ -27,9 +28,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import importlib.metadata
+import importlib.util
 import json
 import random
 import re
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -60,6 +64,7 @@ OVERLAY_SELECTION = "all"
 #   "25"   -> generate 25 randomly selected error overlays
 #   "0"    -> disable error overlay generation
 ERROR_OVERLAY_SELECTION = "all"
+INFERENCE_PROGRESS_EVERY = 10
 
 EVAL_PRESETS = {
     "leucocyte": {
@@ -165,6 +170,7 @@ class LocalEvalConfig:
     num_error_overlays: int
     image_max_side: int
     seed: int
+    progress_every: int
     skip_missing_images: bool
     no_plots: bool
 
@@ -181,6 +187,148 @@ def ensure_deps() -> None:
         missing.append("pycocotools")
     if missing:
         raise ImportError("Missing dependencies: " + ", ".join(missing))
+
+
+def patch_transformers_torch_compat() -> None:
+    if torch is None:
+        return
+
+    dtype_aliases = {
+        "uint16": "int16",
+        "uint32": "int32",
+        "uint64": "int64",
+    }
+    patched_dtypes: List[str] = []
+    for missing_name, fallback_name in dtype_aliases.items():
+        if hasattr(torch, missing_name):
+            continue
+        fallback_dtype = getattr(torch, fallback_name, None)
+        if fallback_dtype is None:
+            continue
+        setattr(torch, missing_name, fallback_dtype)
+        patched_dtypes.append(f"{missing_name}->{fallback_name}")
+    if patched_dtypes:
+        print(
+            "[LOCAL EVAL][WARN] Added Torch dtype compatibility aliases for local eval: "
+            + ", ".join(patched_dtypes)
+        )
+
+    try:
+        import transformers.utils as tf_utils
+        import transformers.utils.import_utils as tf_import_utils
+    except Exception:
+        return
+
+    torch_version = str(torch.__version__)
+
+    def _always_true() -> bool:
+        return True
+
+    def _torch_version() -> str:
+        return torch_version
+
+    for fn_name in ("is_torch_available", "get_torch_version"):
+        fn = getattr(tf_import_utils, fn_name, None)
+        if callable(fn) and hasattr(fn, "cache_clear"):
+            try:
+                fn.cache_clear()
+            except Exception:
+                pass
+
+    tf_import_utils.is_torch_available = _always_true
+    tf_import_utils.get_torch_version = _torch_version
+    tf_utils.is_torch_available = _always_true
+    tf_utils.get_torch_version = _torch_version
+
+    if hasattr(tf_import_utils, "_torch_available"):
+        tf_import_utils._torch_available = True
+    if hasattr(tf_import_utils, "_torch_version"):
+        tf_import_utils._torch_version = torch_version
+
+    for key in list(sys.modules):
+        if key in {
+            "transformers.conversion_mapping",
+            "transformers.core_model_loading",
+            "transformers.modeling_utils",
+            "transformers.integrations.accelerate",
+        } or key.startswith("transformers.integrations.accelerate."):
+            sys.modules.pop(key, None)
+
+
+def build_env_mismatch_hint(exc: Exception) -> str:
+    exc_text = str(exc)
+    mismatch_tokens = (
+        "PyTorch >= 2.4",
+        "name 'nn' is not defined",
+        "torch' has no attribute 'uint16'",
+        "find_pruneable_heads_and_indices",
+    )
+    if not any(token in exc_text for token in mismatch_tokens):
+        return ""
+
+    try:
+        transformers_version = importlib.metadata.version("transformers")
+    except Exception:
+        transformers_version = "unknown"
+    torch_version = str(torch.__version__) if torch is not None else "missing"
+    return (
+        " Detected environment mismatch: "
+        f"torch={torch_version}, transformers={transformers_version}. "
+        "This local RF-DETR evaluator expects a Transformers 4.x API, while "
+        "Transformers 5.x requires torch>=2.4 and removes symbols used by "
+        "rfdetr_local. Recommended fix: use a compatible environment such as "
+        "'transformers==4.57.2' with the current torch 2.1 stack, or upgrade "
+        "torch and the RF-DETR/Transformers stack together."
+    )
+
+
+def ensure_rfdetr_import() -> None:
+    try:
+        import rfdetr  # noqa: F401
+        return
+    except Exception as installed_exc:
+        project_root = Path(__file__).resolve().parents[1]
+        local_pkg_dir = project_root / "rfdetr_local"
+        init_py = local_pkg_dir / "__init__.py"
+        if not init_py.exists():
+            raise ImportError(
+                f"Installed rfdetr import failed ({installed_exc}) and repo-local fallback "
+                f"was not found at {local_pkg_dir}."
+            ) from installed_exc
+
+        project_root_str = str(project_root)
+        local_pkg_dir_str = str(local_pkg_dir)
+        if project_root_str not in sys.path:
+            sys.path.insert(0, project_root_str)
+        if local_pkg_dir_str not in sys.path:
+            sys.path.insert(0, local_pkg_dir_str)
+
+        for key in list(sys.modules):
+            if key == "rfdetr" or key.startswith("rfdetr."):
+                sys.modules.pop(key, None)
+
+        try:
+            print(
+                f"[LOCAL EVAL][WARN] Installed rfdetr import failed ({installed_exc}); "
+                f"using repo-local fallback from {local_pkg_dir}."
+            )
+            patch_transformers_torch_compat()
+            spec = importlib.util.spec_from_file_location(
+                "rfdetr",
+                init_py,
+                submodule_search_locations=[str(local_pkg_dir)],
+            )
+            if spec is None or spec.loader is None:
+                raise ImportError(f"Could not create import spec for {init_py}")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules["rfdetr"] = module
+            spec.loader.exec_module(module)
+        except Exception as local_exc:
+            raise ImportError(
+                f"Installed rfdetr import failed ({installed_exc}) and repo-local fallback "
+                f"from {local_pkg_dir} also failed ({local_exc})."
+                f"{build_env_mismatch_hint(local_exc)}"
+            ) from local_exc
 
 
 def normalize_target_name(raw: str) -> str:
@@ -357,6 +505,7 @@ def infer_model_resolution(checkpoint: Path) -> Optional[int]:
 
 
 def load_model(model_class: str, checkpoint: Path, resolution: Optional[int]):
+    ensure_rfdetr_import()
     from rfdetr import RFDETRSmall, RFDETRMedium, RFDETRLarge
 
     name_to_cls = {
@@ -735,6 +884,76 @@ def save_confusion_csv(path: Path, labels: List[str], cm: np.ndarray) -> None:
             w.writerow([labels[i]] + row.tolist())
 
 
+def save_confusion_matrix_plot(
+    path: Path,
+    labels: List[str],
+    cm: np.ndarray,
+    score_threshold: float,
+    iou_threshold: float,
+) -> bool:
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        print("[WARN] matplotlib unavailable; skipping confusion matrix PNG.")
+        return False
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cm = np.asarray(cm, dtype=np.int64)
+    row_sums = cm.sum(axis=1, keepdims=True)
+    cm_norm = np.divide(
+        cm.astype(np.float64),
+        np.where(row_sums == 0, 1, row_sums),
+        out=np.zeros_like(cm, dtype=np.float64),
+    )
+
+    n_rows, n_cols = cm.shape
+    fig_w = max(6.5, 1.35 * n_cols + 2.0)
+    fig_h = max(5.5, 1.10 * n_rows + 2.2)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    im = ax.imshow(cm_norm, interpolation="nearest", cmap="Blues", vmin=0.0, vmax=1.0)
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("Row-normalized fraction", rotation=90)
+
+    ax.set(
+        xticks=np.arange(n_cols),
+        yticks=np.arange(n_rows),
+        xticklabels=labels,
+        yticklabels=labels,
+        xlabel="Predicted class",
+        ylabel="True class",
+        title=(
+            "Confusion Matrix\n"
+            f"Score >= {score_threshold:.2f}, IoU >= {iou_threshold:.2f}"
+        ),
+    )
+    plt.setp(ax.get_xticklabels(), rotation=30, ha="right", rotation_mode="anchor")
+
+    threshold = 0.5
+    for i in range(n_rows):
+        for j in range(n_cols):
+            count = int(cm[i, j])
+            frac = float(cm_norm[i, j])
+            if row_sums[i, 0] > 0:
+                text = f"{count}\n{frac * 100.0:.1f}%"
+            else:
+                text = str(count)
+            ax.text(
+                j,
+                i,
+                text,
+                ha="center",
+                va="center",
+                color="white" if frac > threshold else "black",
+                fontsize=10,
+                fontweight="bold" if count > 0 else "normal",
+            )
+
+    fig.tight_layout()
+    fig.savefig(path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
 def draw_overlay(
     img_path: Path,
     gt_boxes: np.ndarray,
@@ -973,6 +1192,7 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
     img_ids = coco.getImgIds()
     if cfg.max_images is not None:
         img_ids = img_ids[: cfg.max_images]
+    total_requested_images = len(img_ids)
     img_id_set = set(int(i) for i in img_ids)
     total_gt_objects_in_requested_testset = int(
         sum(
@@ -997,7 +1217,17 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
     inference_seconds_total = 0.0
     inference_images_timed = 0
 
-    for img_id in iterator:
+    for idx, img_id in enumerate(iterator, start=1):
+        if cfg.progress_every > 0 and (
+            idx == 1
+            or idx % cfg.progress_every == 0
+            or idx == total_requested_images
+        ):
+            pct = (idx / total_requested_images) if total_requested_images > 0 else 1.0
+            print(
+                f"[LOCAL EVAL] Inference progress: {idx}/{total_requested_images} "
+                f"({pct:.1%})"
+            )
         info = coco.loadImgs([img_id])[0]
         file_name = str(info.get("file_name", ""))
         try:
@@ -1128,6 +1358,15 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
             "iou_threshold": cfg.confmat_iou,
         },
     )
+    confusion_matrix_png_created = False
+    if not cfg.no_plots:
+        confusion_matrix_png_created = save_confusion_matrix_plot(
+            cfg.output_dir / "confusion_matrix.png",
+            cm_labels,
+            cm,
+            cfg.score_threshold,
+            cfg.confmat_iou,
+        )
 
     all_scores = np.concatenate([s["pred_scores"] for s in samples]) if samples else np.asarray([], dtype=np.float32)
     thresholds = make_threshold_grid(all_scores, cfg.threshold_points)
@@ -1354,6 +1593,7 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
         "pr_auc": pr_auc,
         "roc_auc": roc_auc,
         "roc_note": "ROC/PR are computed from IoU-matched detection samples.",
+        "confusion_matrix_png": str(cfg.output_dir / "confusion_matrix.png") if confusion_matrix_png_created else None,
         "per_image_object_counts_csv": str(cfg.output_dir / "per_image_object_counts.csv"),
         "per_image_error_counts_csv": str(cfg.output_dir / "per_image_error_counts.csv"),
         "error_summary": {
@@ -1441,6 +1681,8 @@ def build_config(args: argparse.Namespace) -> LocalEvalConfig:
         raise ValueError("Need 0 < --iou-min < --iou-max <= 1.0")
     if args.threshold_points < 2:
         raise ValueError("--threshold-points must be >= 2")
+    if args.progress_every < 0:
+        raise ValueError("--progress-every must be >= 0")
 
     return LocalEvalConfig(
         preset_name=preset_name,
@@ -1468,6 +1710,7 @@ def build_config(args: argparse.Namespace) -> LocalEvalConfig:
         num_error_overlays=num_error_overlays,
         image_max_side=int(args.image_max_side),
         seed=int(args.seed),
+        progress_every=int(args.progress_every),
         skip_missing_images=bool(args.skip_missing_images),
         no_plots=bool(args.no_plots),
     )
@@ -1526,6 +1769,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--image-max-side", type=int, default=1600)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument(
+        "--progress-every",
+        type=int,
+        default=INFERENCE_PROGRESS_EVERY,
+        help="Print inference progress every N processed images. Use 0 to disable.",
+    )
 
     p.add_argument("--skip-missing-images", action="store_true")
     p.add_argument("--no-plots", action="store_true")
