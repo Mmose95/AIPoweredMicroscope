@@ -1022,6 +1022,58 @@ def _draw_outlined_text(draw: Any, xy: Tuple[float, float], text: str, fill: Tup
     draw.text((x, y), text, fill=fill, font=font)
 
 
+def _draw_simple_legend(
+    draw: Any,
+    font: Any,
+    legend_items: Sequence[Tuple[Tuple[int, int, int], str]],
+) -> None:
+    if not legend_items:
+        return
+
+    pad = 6
+    inner_pad = 6
+    swatch_w = 12
+    swatch_h = 8
+    gap = 8
+    row_gap = 5
+    text_heights: List[int] = []
+    text_widths: List[int] = []
+    for _, label in legend_items:
+        tw, th = _measure_text(draw, label, font)
+        text_widths.append(tw)
+        text_heights.append(th)
+    row_h = max(max(text_heights, default=12), swatch_h)
+    box_w = inner_pad * 2 + swatch_w + gap + max(text_widths, default=80)
+    box_h = inner_pad * 2 + len(legend_items) * row_h + max(0, len(legend_items) - 1) * row_gap
+    left = pad
+    top = pad
+    right = left + box_w
+    bottom = top + box_h
+
+    draw.rectangle(
+        [left, top, right, bottom],
+        fill=(255, 255, 255),
+        outline=(0, 0, 0),
+        width=1,
+    )
+
+    y = top + inner_pad
+    for color, label in legend_items:
+        swatch_top = y + max(0, (row_h - swatch_h) / 2.0)
+        draw.rectangle(
+            [left + inner_pad, swatch_top, left + inner_pad + swatch_w, swatch_top + swatch_h],
+            fill=color,
+            outline=color,
+        )
+        draw.text(
+            (left + inner_pad + swatch_w + gap, y),
+            label,
+            fill=(20, 20, 20),
+            font=font,
+        )
+        y += row_h + row_gap
+
+
 def draw_overlay(
     img_path: Path,
     gt_boxes: np.ndarray,
@@ -1073,6 +1125,15 @@ def draw_overlay(
         )
         _draw_outlined_text(draw, (text_x, text_y), score_text, pred_color, font)
         occupied_text_rects.append((text_x, text_y, text_x + text_w, text_y + text_h))
+
+    _draw_simple_legend(
+        draw,
+        font,
+        legend_items=[
+            (gt_color, "Ground truth"),
+            (pred_color, "Prediction"),
+        ],
+    )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     img.save(out_path)
