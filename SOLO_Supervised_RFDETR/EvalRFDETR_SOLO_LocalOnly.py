@@ -1026,6 +1026,7 @@ def _draw_simple_legend(
     draw: Any,
     font: Any,
     legend_items: Sequence[Tuple[Tuple[int, int, int], str]],
+    extra_lines: Optional[Sequence[str]] = None,
 ) -> None:
     if not legend_items:
         return
@@ -1042,9 +1043,22 @@ def _draw_simple_legend(
         tw, th = _measure_text(draw, label, font)
         text_widths.append(tw)
         text_heights.append(th)
+    extra_lines = list(extra_lines or [])
+    extra_widths: List[int] = []
+    extra_heights: List[int] = []
+    for line in extra_lines:
+        tw, th = _measure_text(draw, line, font)
+        extra_widths.append(tw)
+        extra_heights.append(th)
     row_h = max(max(text_heights, default=12), swatch_h)
-    box_w = inner_pad * 2 + swatch_w + gap + max(text_widths, default=80)
+    extra_row_h = max(extra_heights, default=12)
+    box_w = inner_pad * 2 + max(
+        swatch_w + gap + max(text_widths, default=80),
+        max(extra_widths, default=0),
+    )
     box_h = inner_pad * 2 + len(legend_items) * row_h + max(0, len(legend_items) - 1) * row_gap
+    if extra_lines:
+        box_h += 6 + len(extra_lines) * extra_row_h + max(0, len(extra_lines) - 1) * row_gap
     left = pad
     top = pad
     right = left + box_w
@@ -1073,6 +1087,17 @@ def _draw_simple_legend(
         )
         y += row_h + row_gap
 
+    if extra_lines:
+        y += 2
+        for line in extra_lines:
+            draw.text(
+                (left + inner_pad, y),
+                line,
+                fill=(20, 20, 20),
+                font=font,
+            )
+            y += extra_row_h + row_gap
+
 
 def draw_overlay(
     img_path: Path,
@@ -1083,6 +1108,7 @@ def draw_overlay(
     pred_scores: np.ndarray,
     out_path: Path,
     image_max_side: int,
+    matched_count: Optional[int] = None,
 ) -> None:
     del gt_names, pred_names
 
@@ -1133,6 +1159,11 @@ def draw_overlay(
             (gt_color, "Ground truth"),
             (pred_color, "Prediction"),
         ],
+        extra_lines=(
+            [f"Pred/GT hits: {int(matched_count)}/{len(gt_boxes)}"]
+            if matched_count is not None
+            else None
+        ),
     )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1595,6 +1626,8 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
             pred_boxes = s["pred_boxes"][keep]
             pred_cls = s["pred_cls"][keep]
             pred_scores = s["pred_scores"][keep]
+            error_info = match_errors_for_sample(s, cfg.score_threshold, cfg.confmat_iou)
+            matched_count = int(len(error_info["matches"]))
             gt_names = [labels[int(c)] for c in s["gt_cls"]]
             pred_names = [labels[int(c)] for c in pred_cls]
             gt_count = int(len(s["gt_boxes"]))
@@ -1619,6 +1652,7 @@ def run_local_eval(cfg: LocalEvalConfig) -> None:
                 pred_scores=pred_scores,
                 out_path=cfg.output_dir / "overlays" / overlay_name,
                 image_max_side=cfg.image_max_side,
+                matched_count=matched_count,
             )
 
     if cfg.num_error_overlays != 0:
