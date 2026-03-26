@@ -1,0 +1,182 @@
+{
+  "dataset_name": "QA-2025v1_TwoClass_OVR_V2_20260326-235813",
+  "source_coco": "D:\\PHD\\PhdData\\CellScanData\\Annotation_Backups\\Quality Assessment Backups\\26-03-2026\\annotations\\instances_default.json",
+  "images_root": "D:/PHD/PhdData/CellScanData/Zoom10x - Quality Assessment_Cleaned",
+  "target_class_mode": "multi_class",
+  "target_classes": [
+    "Leucocyte",
+    "Squamous Epithelial Cell"
+  ],
+  "balance_per_class": true,
+  "seed": 42,
+  "split_ratio": {
+    "train": 0.7,
+    "valid": 0.15,
+    "test": 0.15
+  },
+  "split_strategy": "forced_test_annotation_aware",
+  "forced_test_samples_requested": [],
+  "forced_test_samples_used": [],
+  "forced_test_samples_without_target_annotations": [],
+  "target_box_planning": {
+    "balance_per_class": true,
+    "total_target_boxes": 20941,
+    "ratio_targets": {
+      "train": 14658.7,
+      "valid": 3141.15,
+      "test": 3141.15
+    },
+    "assignment_targets": {
+      "train": 14658.7,
+      "valid": 3141.15,
+      "test": 3141.15
+    },
+    "actual_sample_assignment": {
+      "train": 14995,
+      "valid": 2803,
+      "test": 3143
+    },
+    "per_class": {
+      "Leucocyte": {
+        "total_target_boxes": 17259,
+        "ratio_targets": {
+          "train": 12081.3,
+          "valid": 2588.85,
+          "test": 2588.85
+        },
+        "assignment_targets": {
+          "train": 12081.3,
+          "valid": 2588.85,
+          "test": 2588.85
+        },
+        "actual_sample_assignment": {
+          "train": 12600,
+          "valid": 2130,
+          "test": 2529
+        }
+      },
+      "Squamous Epithelial Cell": {
+        "total_target_boxes": 3682,
+        "ratio_targets": {
+          "train": 2577.4,
+          "valid": 552.3,
+          "test": 552.3
+        },
+        "assignment_targets": {
+          "train": 2577.4,
+          "valid": 552.3,
+          "test": 552.3
+        },
+        "actual_sample_assignment": {
+          "train": 2395,
+          "valid": 673,
+          "test": 614
+        }
+      }
+    },
+    "classes_exceeding_test_target_due_to_forced_samples": []
+  },
+  "target_sample_planning": {
+    "ratio_targets": {
+      "train": 33,
+      "valid": 7,
+      "test": 8
+    },
+    "assignment_targets": {
+      "train": 33,
+      "valid": 7,
+      "test": 8
+    },
+    "actual_sample_assignment": {
+      "train": 33,
+      "valid": 7,
+      "test": 8
+    }
+  },
+  "file_name_mode": "relative",
+  "samples": {
+    "train": [
+      "Sample 12",
+      "Sample 13",
+      "Sample 15",
+      "Sample 17",
+      "Sample 18",
+      "Sample 21",
+      "Sample 22",
+      "Sample 24",
+      "Sample 27",
+      "Sample 28",
+      "Sample 30",
+      "Sample 32",
+      "Sample 33",
+      "Sample 36",
+      "Sample 37",
+      "Sample 38",
+      "Sample 40",
+      "Sample 41",
+      "Sample 42",
+      "Sample 43",
+      "Sample 45",
+      "Sample 46",
+      "Sample 48",
+      "Sample 49",
+      "Sample 50",
+      "Sample 52",
+      "Sample 55",
+      "Sample 56",
+      "Sample 57",
+      "Sample 58",
+      "Sample 61",
+      "Sample 66",
+      "Sample 67"
+    ],
+    "valid": [
+      "Sample 14",
+      "Sample 16",
+      "Sample 23",
+      "Sample 31",
+      "Sample 35",
+      "Sample 54",
+      "Sample 68"
+    ],
+    "test": [
+      "Sample 19",
+      "Sample 20",
+      "Sample 25",
+      "Sample 34",
+      "Sample 51",
+      "Sample 53",
+      "Sample 62",
+      "Sample 70"
+    ]
+  },
+  "counts": {
+    "train": {
+      "n_samples": 33,
+      "n_images": 950,
+      "n_target_boxes": 14995,
+      "n_target_boxes_by_class": {
+        "Leucocyte": 12600,
+        "Squamous Epithelial Cell": 2395
+      }
+    },
+    "valid": {
+      "n_samples": 7,
+      "n_images": 211,
+      "n_target_boxes": 2803,
+      "n_target_boxes_by_class": {
+        "Leucocyte": 2130,
+        "Squamous Epithelial Cell": 673
+      }
+    },
+    "test": {
+      "n_samples": 8,
+      "n_images": 290,
+      "n_target_boxes": 3143,
+      "n_target_boxes_by_class": {
+        "Leucocyte": 2529,
+        "Squamous Epithelial Cell": 614
+      }
+    }
+  }
+}
