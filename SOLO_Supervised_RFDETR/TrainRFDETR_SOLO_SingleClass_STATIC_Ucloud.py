@@ -13,10 +13,31 @@ import numpy as np
 # TOGGLES
 # ───────────────────────────────────────────────────────────────────────────────
 # Which classes to train in this HPO run:
-#  - "leu"  -> only Leucocyte
-#  - "epi"  -> only Squamous Epithelial Cell
-#  - "all"  -> both
-HPO_TARGET = os.environ.get("RFDETR_HPO_TARGET", "all").lower()
+#  - "leu"       -> only Leucocyte
+#  - "epi"       -> only Squamous Epithelial Cell
+#  - "all"       -> sequential single-class runs for both
+#  - "two-class" -> one joint detector for both classes
+def _normalize_hpo_target(raw: str) -> str:
+    value = (raw or "all").strip().lower()
+    aliases = {
+        "both": "all",
+        "two_class": "two-class",
+        "two-class": "two-class",
+        "twoclass": "two-class",
+        "two class": "two-class",
+    }
+    value = aliases.get(value, value)
+    if value not in {"leu", "epi", "all", "two-class"}:
+        raise ValueError(
+            "RFDETR_HPO_TARGET must be one of: leu, epi, all, two-class. "
+            f"Got {raw!r}."
+        )
+    return value
+
+
+HPO_TARGET = _normalize_hpo_target(os.environ.get("RFDETR_HPO_TARGET", "all"))
+TWO_CLASS_TARGET_NAME = "TwoClass"
+TWO_CLASS_CLASS_NAMES = ["Leucocyte", "Squamous Epithelial Cell"]
 BACKBONE_BLOCK_SIZE = 56
 
 def _is_main_process() -> bool:
@@ -639,20 +660,17 @@ if RFDETR_USE_SOFT_TEACHER:
 # ───────────────────────────────────────────────────────────────────────────────
 # ====== STATIC OVR DATASETS (jsons live in repo / project tree) ======
 # ───────────────────────────────────────────────────────────────────────────────
-DATASET_LEUCO_RAW = os.getenv("DATASET_LEUCO", "").strip()
-DATASET_EPI_RAW = os.getenv("DATASET_EPI", "").strip()
-if not DATASET_LEUCO_RAW or not DATASET_EPI_RAW:
-    raise ValueError(
-        "DATASET_LEUCO and DATASET_EPI must be set by the launcher environment "
-        "(for example in RunRFDETR_Solo_SingleClass_STATIC_Ucloud.ipynb)."
-    )
+def _optional_dataset_path(*env_names: str) -> Path | None:
+    for env_name in env_names:
+        raw = os.getenv(env_name, "").strip()
+        if raw:
+            return Path(raw).expanduser().resolve()
+    return None
 
-DATASET_LEUCO = Path(DATASET_LEUCO_RAW).expanduser().resolve()
-DATASET_EPI = Path(DATASET_EPI_RAW).expanduser().resolve()
-if not DATASET_LEUCO.exists():
-    raise FileNotFoundError(f"DATASET_LEUCO does not exist: {DATASET_LEUCO}")
-if not DATASET_EPI.exists():
-    raise FileNotFoundError(f"DATASET_EPI does not exist: {DATASET_EPI}")
+
+DATASET_LEUCO = _optional_dataset_path("DATASET_LEUCO")
+DATASET_EPI = _optional_dataset_path("DATASET_EPI")
+DATASET_TWO_CLASS = _optional_dataset_path("DATASET_TWO_CLASS", "DATASET_TWOCLASS")
 
 # Where to put all outputs (HPO runs + leaderboards + final selections)
 OUTPUT_ROOT = env_path("OUTPUT_ROOT", WORK_ROOT / "RFDETR_SOLO_OUTPUT" / "HPO_BOTH_OVR")
@@ -1587,6 +1605,7 @@ def train_one_run(target_name: str,
                   dataset_dir: Path,
                   out_dir: Path,
                   model_cls,
+                  class_names: list[str] | None,
                   init_mode: str,
                   run_variant: str,
                   epochs: int,
@@ -1614,6 +1633,14 @@ def train_one_run(target_name: str,
                   num_workers: int = 8,
                   pin_memory: bool = True,
                   persistent_workers: bool = True) -> dict:
+
+    effective_class_names = [
+        str(class_name).strip()
+        for class_name in (class_names or [target_name])
+        if str(class_name).strip()
+    ]
+    if not effective_class_names:
+        raise ValueError("class_names must contain at least one non-empty class name.")
 
     # Build resolved / optional patchified dataset
     data_dir = get_or_build_aug_cache(target_name, dataset_dir, OUTPUT_ROOT, aug_copies)
@@ -1725,7 +1752,7 @@ def train_one_run(target_name: str,
     kwargs = dict(
         dataset_dir=str(data_dir),
         output_dir=str(out_dir),
-        class_names=[target_name],
+        class_names=effective_class_names,
         # Avoid RF-DETR tiny-dataset sampler/schedule mismatch in some releases.
         min_batches=RFDETR_MIN_BATCHES,
 
@@ -1809,6 +1836,7 @@ def train_one_run(target_name: str,
         "dataset_dir_original": str(dataset_dir),
         "dataset_dir_effective": str(data_dir),
         "target_name": target_name,
+        "class_names": effective_class_names,
         "soft_teacher_enabled": bool(soft_teacher_enabled),
         "unlabeled_dir_effective": (str(unlabeled_dir_effective) if unlabeled_dir_effective is not None else None),
     }, indent=2), encoding="utf-8")
@@ -2105,10 +2133,19 @@ MATRIX_QUICK_DEFAULTS_LEU = {
     "RFDETR_LEU_SSL_CKPT": "",
 }
 
+MATRIX_QUICK_DEFAULTS_TWO_CLASS = {
+    "RFDETR_TWO_CLASS_EPOCHS": "120",
+    "RFDETR_TWO_CLASS_LR": "8e-5",
+    "RFDETR_TWO_CLASS_NUM_QUERIES": "400",
+    "RFDETR_TWO_CLASS_EARLY_STOPPING_METRIC": "map5095",
+    "RFDETR_TWO_CLASS_SSL_CKPT": "",
+}
+
 MATRIX_QUICK_DEFAULTS = {
     **MATRIX_QUICK_DEFAULTS_SHARED,
     **MATRIX_QUICK_DEFAULTS_EPI,
     **MATRIX_QUICK_DEFAULTS_LEU,
+    **MATRIX_QUICK_DEFAULTS_TWO_CLASS,
 }
 
 def _matrix_dynamic_defaults() -> dict:
@@ -2116,6 +2153,7 @@ def _matrix_dynamic_defaults() -> dict:
     return {
         "RFDETR_EPI_BATCH": str(default_batch),
         "RFDETR_LEU_BATCH": str(default_batch),
+        "RFDETR_TWO_CLASS_BATCH": str(default_batch),
     }
 
 def _cfg_text(name: str) -> str:
@@ -2273,6 +2311,14 @@ def _build_matrix_runtime_config() -> dict:
             "early_stopping_metric": _cfg_early_stopping_metric("RFDETR_LEU_EARLY_STOPPING_METRIC"),
             "ssl_ckpt": _cfg_text("RFDETR_LEU_SSL_CKPT"),
         },
+        "two_class": {
+            "epochs": int(_cfg_text("RFDETR_TWO_CLASS_EPOCHS")),
+            "lr": float(_cfg_text("RFDETR_TWO_CLASS_LR")),
+            "batch": int(_cfg_text("RFDETR_TWO_CLASS_BATCH")),
+            "num_queries": int(_cfg_text("RFDETR_TWO_CLASS_NUM_QUERIES")),
+            "early_stopping_metric": _cfg_early_stopping_metric("RFDETR_TWO_CLASS_EARLY_STOPPING_METRIC"),
+            "ssl_ckpt": _cfg_text("RFDETR_TWO_CLASS_SSL_CKPT"),
+        },
     }
     if cfg["weight_decay"] < 0:
         raise ValueError(f"RFDETR_WEIGHT_DECAY must be >= 0, got {cfg['weight_decay']}")
@@ -2310,17 +2356,22 @@ def _build_matrix_runtime_config() -> dict:
 def _build_matrix_space_for_target(target_key: str, matrix_cfg: dict) -> dict:
     """
     Build one-click matrix search space for a target class.
-    target_key: 'epi' or 'leu'
+    target_key: 'epi', 'leu', or 'two_class'
     """
-    if target_key not in ("epi", "leu"):
+    if target_key not in ("epi", "leu", "two_class"):
         raise ValueError(f"Unsupported target_key={target_key!r}")
 
     tcfg = matrix_cfg[target_key]
+    env_prefix = {
+        "epi": "EPI",
+        "leu": "LEU",
+        "two_class": "TWO_CLASS",
+    }[target_key]
     if "ssl" in matrix_cfg["init_modes"]:
         if not tcfg["ssl_ckpt"]:
             raise ValueError(
                 f"INIT_MODE includes 'ssl' but no checkpoint path provided for {target_key}. "
-                f"Set RFDETR_{target_key.upper()}_SSL_CKPT."
+                f"Set RFDETR_{env_prefix}_SSL_CKPT."
             )
 
     return {
@@ -2359,13 +2410,18 @@ def _build_ssl_triage_cfgs_for_target(target_key: str, matrix_cfg: dict) -> list
     2) SSL head-only (frozen backbone),
     3) SSL fine-tune with low backbone LR + warmup.
     """
-    if target_key not in ("epi", "leu"):
+    if target_key not in ("epi", "leu", "two_class"):
         raise ValueError(f"Unsupported target_key={target_key!r}")
 
     tcfg = matrix_cfg[target_key]
+    env_prefix = {
+        "epi": "EPI",
+        "leu": "LEU",
+        "two_class": "TWO_CLASS",
+    }[target_key]
     if not tcfg["ssl_ckpt"]:
         raise ValueError(
-            f"ssl_triage requires RFDETR_{target_key.upper()}_SSL_CKPT to be set."
+            f"ssl_triage requires RFDETR_{env_prefix}_SSL_CKPT to be set."
         )
 
     triage_cfg = matrix_cfg["ssl_triage"]
@@ -2440,9 +2496,11 @@ if EXPERIMENT_MODE not in ("matrix", "ssl_triage"):
 MATRIX_CFG = _build_matrix_runtime_config()
 need_leu = HPO_TARGET in ("leu", "all")
 need_epi = HPO_TARGET in ("epi", "all")
+need_two_class = HPO_TARGET == "two-class"
 if EXPERIMENT_MODE == "matrix":
     SEARCH_LEUCO = _build_matrix_space_for_target("leu", MATRIX_CFG) if need_leu else {}
     SEARCH_EPI = _build_matrix_space_for_target("epi", MATRIX_CFG) if need_epi else {}
+    SEARCH_TWO_CLASS = _build_matrix_space_for_target("two_class", MATRIX_CFG) if need_two_class else {}
     _main_print(
         f"[EXPERIMENT] mode=matrix init_modes={','.join(MATRIX_CFG['init_modes'])} "
         f"fractions={','.join(str(x) for x in MATRIX_CFG['train_fractions'])} "
@@ -2452,6 +2510,7 @@ if EXPERIMENT_MODE == "matrix":
 else:
     SEARCH_LEUCO = _build_ssl_triage_cfgs_for_target("leu", MATRIX_CFG) if need_leu else []
     SEARCH_EPI = _build_ssl_triage_cfgs_for_target("epi", MATRIX_CFG) if need_epi else []
+    SEARCH_TWO_CLASS = _build_ssl_triage_cfgs_for_target("two_class", MATRIX_CFG) if need_two_class else []
     _main_print(
         f"[EXPERIMENT] mode=ssl_triage triage_lr_encoder={MATRIX_CFG['ssl_triage']['lr_encoder']} "
         f"triage_warmup_epochs={MATRIX_CFG['ssl_triage']['warmup_epochs']} "
@@ -2628,7 +2687,7 @@ def _oom_backoff(cfg: dict) -> tuple[dict, dict]:
     return new, change
 
 def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
-                  dataset_dir: str, out_root: str, result_q: mp.Queue):
+                  class_names: list[str], dataset_dir: str, out_root: str, result_q: mp.Queue):
     run_dir = None
     try:
         # Mask to a single physical GPU for this process BEFORE importing torch/rfdetr
@@ -2688,6 +2747,7 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
                     dataset_dir=Path(dataset_dir),
                     out_dir=run_dir,
                     model_cls=model_cls,
+                    class_names=class_names,
                     init_mode=init_mode,
                     run_variant=run_variant,
                     epochs=try_cfg["EPOCHS"],
@@ -2776,6 +2836,7 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
         row = {
             "run_idx": run_idx,
             "target": target_name,
+            "class_names": "|".join(class_names),
             **{k: (v if not hasattr(v, "__name__") else v.__name__) for k, v in logged_cfg.items()},
             "seed": run_seed,
             "fraction_seed": fraction_seed,
@@ -2819,20 +2880,25 @@ def run_hpo_all_classes(session_root: Path) -> dict:
     Multi-class HPO launcher.
     - Uses ALL visible GPUs as a shared pool.
     - Each run occupies ONE GPU until it finishes.
-    - Classes are selected by HPO_TARGET ('leu', 'epi', 'all').
+    - Targets are selected by HPO_TARGET ('leu', 'epi', 'all', 'two-class').
     """
     selected = []
 
     if HPO_TARGET in ("leu", "all"):
-        selected.append(("Leucocyte", DATASET_LEUCO, SEARCH_LEUCO))
+        selected.append(("Leucocyte", ["Leucocyte"], DATASET_LEUCO, SEARCH_LEUCO))
     if HPO_TARGET in ("epi", "all"):
-        selected.append(("Squamous Epithelial Cell", DATASET_EPI, SEARCH_EPI))
+        selected.append(("Squamous Epithelial Cell", ["Squamous Epithelial Cell"], DATASET_EPI, SEARCH_EPI))
+    if HPO_TARGET == "two-class":
+        selected.append((TWO_CLASS_TARGET_NAME, TWO_CLASS_CLASS_NAMES, DATASET_TWO_CLASS, SEARCH_TWO_CLASS))
 
     if not selected:
-        raise RuntimeError(f"HPO_TARGET={HPO_TARGET!r} did not match any classes (expected 'leu', 'epi', or 'all').")
+        raise RuntimeError(
+            f"HPO_TARGET={HPO_TARGET!r} did not match any targets "
+            "(expected 'leu', 'epi', 'all', or 'two-class')."
+        )
 
     class_out_roots = {}
-    for target_name, _, _ in selected:
+    for target_name, _, _, _ in selected:
         class_token = target_name.replace(" ", "")
         out_root = session_root / class_token
         out_root.mkdir(parents=True, exist_ok=True)
@@ -2846,10 +2912,11 @@ def run_hpo_all_classes(session_root: Path) -> dict:
     print(f"[HPO] Input mode: {INPUT_MODE} (patch={USE_PATCH_224}, full_resolution={FULL_RESOLUTION})")
 
     jobs = []
-    for target_name, dataset_dir, search_space in selected:
+    for target_name, class_names, dataset_dir, search_space in selected:
         for cfg in _iter_cfgs(search_space):
             jobs.append({
                 "target_name": target_name,
+                "class_names": list(class_names),
                 "dataset_dir": str(dataset_dir),
                 "out_root": str(class_out_roots[target_name]),
                 "cfg": cfg,
@@ -2879,6 +2946,7 @@ def run_hpo_all_classes(session_root: Path) -> dict:
                 gpu_id,
                 run_idx,
                 job["target_name"],
+                job["class_names"],
                 job["dataset_dir"],
                 job["out_root"],
                 result_q,
@@ -2975,17 +3043,34 @@ def run_hpo_all_classes(session_root: Path) -> dict:
 def main():
     global HPO_SESSION_ID, SESSION_ROOT
 
+    required_datasets: list[tuple[str, str, Path | None]] = []
+    if HPO_TARGET in ("leu", "all"):
+        required_datasets.append(("Leucocyte", "DATASET_LEUCO", DATASET_LEUCO))
+    if HPO_TARGET in ("epi", "all"):
+        required_datasets.append(("Epithelial", "DATASET_EPI", DATASET_EPI))
+    if HPO_TARGET == "two-class":
+        required_datasets.append(("TwoClass", "DATASET_TWO_CLASS", DATASET_TWO_CLASS))
+
+    for label, env_name, dataset_path in required_datasets:
+        if dataset_path is None:
+            raise ValueError(
+                f"{env_name} must be set when RFDETR_HPO_TARGET={HPO_TARGET!r} "
+                f"(missing dataset for {label})."
+            )
+        if not dataset_path.exists():
+            raise FileNotFoundError(f"{env_name} does not exist: {dataset_path}")
+        for part in ("train", "valid"):
+            if not (dataset_path / part / "_annotations.coco.json").exists():
+                raise FileNotFoundError(f"Missing {part} split in {dataset_path}")
+
     print("[WORK_ROOT]", WORK_ROOT)
     print("[EXPERIMENT MODE]", EXPERIMENT_MODE)
     print("[DATASETS]")
-    print("  Leucocyte:", DATASET_LEUCO)
-    print("  Epithelial:", DATASET_EPI)
+    print("  Leucocyte:", DATASET_LEUCO if DATASET_LEUCO is not None else "<unset>")
+    print("  Epithelial:", DATASET_EPI if DATASET_EPI is not None else "<unset>")
+    print("  TwoClass:", DATASET_TWO_CLASS if DATASET_TWO_CLASS is not None else "<unset>")
     print("[MATRIX CONFIG]")
     print(json.dumps(MATRIX_CFG, indent=2))
-    for p in (DATASET_LEUCO, DATASET_EPI):
-        for part in ("train", "valid"):
-            if not (p / part / "_annotations.coco.json").exists():
-                raise FileNotFoundError(f"Missing {part} split in {p}")
 
     # Create a single timestamped session directory for THIS script run
     HPO_SESSION_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -3020,6 +3105,14 @@ def main():
             "dataset": str(DATASET_EPI),
             "best": res_all["Squamous Epithelial Cell"]["best"],
             "leaderboard_top5": res_all["Squamous Epithelial Cell"]["leaderboard"][:5],
+        }
+
+    if TWO_CLASS_TARGET_NAME in res_all:
+        final["two_class"] = {
+            "dataset": str(DATASET_TWO_CLASS),
+            "class_names": TWO_CLASS_CLASS_NAMES,
+            "best": res_all[TWO_CLASS_TARGET_NAME]["best"],
+            "leaderboard_top5": res_all[TWO_CLASS_TARGET_NAME]["leaderboard"][:5],
         }
 
     summary_path = SESSION_ROOT / "FINAL_HPO_SUMMARY.json"

@@ -10,7 +10,7 @@ import json, re, random, sys
 ALL_COCO_JSON = Path(r"D:/PHD/PhdData/CellScanData/Annotation_Backups/Quality Assessment Backups/23-03-2026/annotations/instances_default.json")
 IMAGES_DIR = Path(r"D:/PHD/PhdData/CellScanData/Zoom10x - Quality Assessment_Cleaned")
 OUT_ROOT = Path(r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\SOLO_Supervised_RFDETR/Stat_Dataset")
-TARGET_CLASS = "Squamous Epithelial Cell"            # "Squamous Epithelial Cell" or "Leucocyte"
+TARGET_CLASSES = ["Squamous Epithelial Cell"]        # e.g. ["Leucocyte"] or ["Leucocyte", "Squamous Epithelial Cell"]
 SPLIT = (0.70, 0.15, 0.15)
 SEED = 42
 VALID_EXTS = {".tif", ".tiff", ".jpg", ".jpeg", ".png"}
@@ -120,6 +120,25 @@ def normalize_sample_key(sample) -> str:
 
 def normalize_sample_keys(samples):
     return unique_preserve_order([normalize_sample_key(sample) for sample in samples])
+
+
+def normalize_target_class_names(target_classes) -> list[str]:
+    if isinstance(target_classes, str):
+        raw_names = [target_classes]
+    else:
+        raw_names = list(target_classes)
+    names = unique_preserve_order(
+        [str(name).strip() for name in raw_names if str(name).strip()]
+    )
+    if not names:
+        raise ValueError("TARGET_CLASSES must contain at least one class name.")
+    return names
+
+
+def dataset_token_for_target_classes(target_class_names: list[str]) -> str:
+    if len(target_class_names) == 1:
+        return target_class_names[0].replace(" ", "")
+    return "TwoClass"
 
 
 def split_samples_by_count(target_samples: list[str], split=SPLIT, seed=42):
@@ -302,14 +321,35 @@ def main():
 
     coco = load_json(ALL_COCO_JSON)
     images_by_id, anns_by_image, cats_by_name = build_index(coco)
-    if TARGET_CLASS not in cats_by_name:
-        print(f"[ERR] TARGET_CLASS '{TARGET_CLASS}' not in categories.")
+    try:
+        target_class_names = normalize_target_class_names(TARGET_CLASSES)
+    except ValueError as exc:
+        print(f"[ERR] {exc}")
         sys.exit(1)
-    target_id_src = cats_by_name[TARGET_CLASS]["id"]
+
+    missing_target_classes = [
+        class_name for class_name in target_class_names
+        if class_name not in cats_by_name
+    ]
+    if missing_target_classes:
+        print(
+            "[ERR] Target classes not found in categories: "
+            + ", ".join(missing_target_classes)
+        )
+        sys.exit(1)
+
+    target_source_categories = [cats_by_name[name] for name in target_class_names]
+    target_source_id_to_name = {
+        cat["id"]: cat["name"] for cat in target_source_categories
+    }
+    target_source_ids = set(target_source_id_to_name)
+    target_source_id_to_new_id = {
+        cat["id"]: idx for idx, cat in enumerate(target_source_categories)
+    }
 
     by_rel, by_name = index_image_paths(IMAGES_DIR)
 
-    # Map images to samples and keep only images with at least one target annotation.
+    # Map images to samples and keep only images with at least one selected-class annotation.
     sample_to_imgids = defaultdict(list)
     sample_target_box_counts = defaultdict(int)
     known_samples = set()
@@ -325,7 +365,7 @@ def main():
 
         target_anns = [
             a for a in anns_by_image.get(iid, [])
-            if a["category_id"] == target_id_src
+            if a["category_id"] in target_source_ids
         ]
         if not target_anns:
             continue
@@ -335,7 +375,10 @@ def main():
 
     target_samples = sorted(sample_to_imgids)
     if not target_samples:
-        print("[ERR] No samples contain the target class.")
+        print(
+            "[ERR] No samples contain the selected target classes: "
+            + ", ".join(target_class_names)
+        )
         sys.exit(1)
 
     try:
@@ -360,23 +403,32 @@ def main():
             img_ids_per_split[split_name].extend(sample_to_imgids[sample])
 
     timestamp = nowstamp()
-    ds_name = f"QA-2025v1_{TARGET_CLASS.replace(' ', '')}_OVR_V2_{timestamp}"
+    ds_name = (
+        f"QA-2025v1_{dataset_token_for_target_classes(target_class_names)}_OVR_V2_{timestamp}"
+    )
 
     out_dir = OUT_ROOT / ds_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    new_categories = [{"id": 0, "name": TARGET_CLASS, "supercategory": "none"}]
+    new_categories = [
+        {
+            "id": target_source_id_to_new_id[cat["id"]],
+            "name": cat["name"],
+            "supercategory": cat.get("supercategory", "none") or "none",
+        }
+        for cat in target_source_categories
+    ]
 
     def write_split(split_name):
         images, annotations = [], []
-        keep_ids = set(img_ids_per_split[split_name])
+        keep_ids = sorted(set(img_ids_per_split[split_name]))
         for iid in keep_ids:
             im_src = images_by_id[iid]
             p_abs = resolve_image_path(im_src["file_name"], IMAGES_DIR, by_rel, by_name)
 
             target_anns = [
                 a for a in anns_by_image.get(iid, [])
-                if a["category_id"] == target_id_src
+                if a["category_id"] in target_source_ids
             ]
             if not target_anns:
                 continue
@@ -394,7 +446,7 @@ def main():
                 annotations.append({
                     "id": a["id"],
                     "image_id": iid,
-                    "category_id": 0,
+                    "category_id": target_source_id_to_new_id[a["category_id"]],
                     "bbox": [float(x), float(y), w, h],
                     "area": float(max(1.0, w * h)),
                     "iscrowd": int(a.get("iscrowd", 0)),
@@ -413,20 +465,24 @@ def main():
     for split_name in SPLIT_NAMES:
         kept_ids_per_split[split_name] = write_split(split_name)
 
-    def count_target(keep_ids):
-        count = 0
+    def count_target_by_class(keep_ids):
+        counts = {class_name: 0 for class_name in target_class_names}
+        total = 0
         for iid in keep_ids:
-            count += sum(
-                1 for a in anns_by_image.get(iid, [])
-                if a["category_id"] == target_id_src
-            )
-        return count
+            for ann in anns_by_image.get(iid, []):
+                class_name = target_source_id_to_name.get(ann["category_id"])
+                if class_name is None:
+                    continue
+                counts[class_name] += 1
+                total += 1
+        return total, counts
 
     summary = {
         "dataset_name": ds_name,
         "source_coco": str(ALL_COCO_JSON),
         "images_root": str(IMAGES_DIR.resolve().as_posix()),
-        "target_class": TARGET_CLASS,
+        "target_class_mode": ("single_class" if len(target_class_names) == 1 else "multi_class"),
+        "target_classes": target_class_names,
         "seed": SEED,
         "split_ratio": {"train": SPLIT[0], "valid": SPLIT[1], "test": SPLIT[2]},
         "split_strategy": split_plan["strategy"],
@@ -452,15 +508,19 @@ def main():
         },
         "file_name_mode": FILE_NAME_MODE,
         "samples": {name: sorted(values) for name, values in split.items()},
-        "counts": {
-            name: {
-                "n_samples": len(split[name]),
-                "n_images": len(kept_ids_per_split[name]),
-                "n_target_boxes": count_target(kept_ids_per_split[name]),
-            }
-            for name in SPLIT_NAMES
-        },
+        "counts": {},
     }
+    if len(target_class_names) == 1:
+        summary["target_class"] = target_class_names[0]
+
+    for split_name in SPLIT_NAMES:
+        total_boxes, per_class_boxes = count_target_by_class(kept_ids_per_split[split_name])
+        summary["counts"][split_name] = {
+            "n_samples": len(split[split_name]),
+            "n_images": len(kept_ids_per_split[split_name]),
+            "n_target_boxes": total_boxes,
+            "n_target_boxes_by_class": per_class_boxes,
+        }
 
     dump_json(out_dir / "split_summary.json", summary)
     if (
