@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Create a single Excel workbook with 4 sheets:
-  - Master          (merged, review-preserving; EXACT columns)
+  - Master          (latest CVAT snapshot + carried-over review fields; EXACT columns)
   - All_Frames      (latest backup)
   - Class_Totals    (latest backup)
   - Summary         (latest backup)
@@ -11,13 +11,13 @@ Rules for Master (exact columns):
   Total Objects, Reviewed, Annotator, Comments
 
 - Scans BASE_DIR recursively for:
-    * 'Annotated_Frames_Only.csv'  (source of counts + possible review fields)
+    * 'Annotated_Frames_Only.csv'  (latest file defines the current frame universe)
     * 'All_Frames.csv', 'Class_Totals.csv', 'Summary.csv'  (latest-only for info sheets)
-    * existing 'Master_Review*.xlsx/.csv' (review fields preferred over backups)
+    * existing 'Master_Review*.xlsx/.csv' (review fields only; never add deleted frames back)
 - Auto-detects CSV delimiter (comma/semicolon)
-- Numeric counts come ONLY from backup CSVs (newest per frame)
-- Review fields (Reviewed/Annotator/Comments) come from newest non-empty across
-  prior Masters (priority) then backups.
+- Numeric counts and row membership come ONLY from the newest backup overview CSV.
+- Review fields (Reviewed/Annotator/Comments) are carried over for matching frames only,
+  using newest non-empty values across prior Masters (priority) then the latest backup CSV.
 
 Output:
   BASE_DIR / Master_Review_YYYY-MM-DD_HHMM.xlsx    (with sheets above)
@@ -104,6 +104,14 @@ def read_overview_csv(path: Path) -> pd.DataFrame:
     return df
 
 
+def read_latest_overview(base: Path) -> tuple[pd.DataFrame, Path]:
+    files = find_files(base, CSV_BACKUP_OVERVIEW)
+    if not files:
+        raise FileNotFoundError(f"No {CSV_BACKUP_OVERVIEW} found under {base}")
+    latest_path = files[-1]
+    return read_overview_csv(latest_path), latest_path
+
+
 def read_master_file(path: Path) -> pd.DataFrame:
     if path.suffix.lower() in (".xlsx", ".xlsm", ".xltx", ".xltm"):
         try:
@@ -128,13 +136,6 @@ def read_master_file(path: Path) -> pd.DataFrame:
     df["__SourceMTime"] = datetime.fromtimestamp(path.stat().st_mtime)
     df["__SourceType"] = "prior_master"
     return df
-
-
-def pick_latest_counts(all_df: pd.DataFrame) -> pd.DataFrame:
-    csv_only = all_df[all_df["__SourceType"] == "backup_csv"].copy()
-    csv_only = csv_only.sort_values("__SourceMTime")  # oldest -> newest
-    latest = csv_only.drop_duplicates(subset=["Frame"], keep="last").reset_index(drop=True)
-    return latest
 
 
 def pick_latest_nonempty(all_df: pd.DataFrame, col: str) -> pd.DataFrame:
@@ -166,6 +167,7 @@ def main():
     # ---------- discover inputs ----------
     backup_overviews = find_files(BASE_DIR, CSV_BACKUP_OVERVIEW)
     prior_masters = find_files(BASE_DIR, "Master_Review*.xlsx") + find_files(BASE_DIR, "Master_Review*.csv")
+    latest_overview, latest_overview_path = read_latest_overview(BASE_DIR)
 
     print("== Backup overview CSVs (oldest → newest) ==")
     if backup_overviews:
@@ -182,8 +184,10 @@ def main():
     else:
         print("\n== No prior Master files found ==")
 
-    # ---------- read everything for MASTER ----------
-    parts = [read_overview_csv(p) for p in backup_overviews]
+    print(f"\n== Current Master base snapshot ==\n- {latest_overview_path}")
+
+    # ---------- read current snapshot + prior masters for review carry-over ----------
+    parts = [latest_overview]
     for p in prior_masters:
         try:
             parts.append(read_master_file(p))
@@ -204,10 +208,10 @@ def main():
                 print(f"{r['__SourceMTime']} | {r['__SourceType']:<12} | {r['__SourceCSV']}"
                       f" | Reviewed='{r['Reviewed']}' Annotator='{r['Annotator']}' Comments='{r['Comments']}'")
 
-    # newest counts from backups
-    latest = pick_latest_counts(all_df)
+    # Base rows come only from the newest backup overview CSV.
+    latest = latest_overview.copy()
 
-    # newest non-empty review fields (masters win)
+    # Carry review fields over for frames that still exist in the current snapshot.
     for col in REVIEW_COLS:
         best = pick_latest_nonempty(all_df, col)
         if not best.empty:
