@@ -210,6 +210,80 @@ def build_assignment_targets(
     return desired_target_boxes, assignment_target_boxes
 
 
+def build_desired_sample_counts(total_samples: int, split) -> dict[str, int]:
+    n_train = int(total_samples * split[0])
+    n_valid = int(total_samples * split[1])
+    n_test = total_samples - n_train - n_valid
+    return {"train": n_train, "valid": n_valid, "test": n_test}
+
+
+def allocate_integer_counts(total_count: int, weights: dict[str, float]) -> dict[str, int]:
+    allocations = {name: 0 for name in SPLIT_NAMES}
+    if total_count <= 0:
+        return allocations
+
+    positive_weights = {
+        name: max(float(weights.get(name, 0.0)), 0.0)
+        for name in SPLIT_NAMES
+    }
+    weight_sum = sum(positive_weights.values())
+    if weight_sum <= 0:
+        positive_weights = {name: 1.0 for name in SPLIT_NAMES}
+        weight_sum = float(len(SPLIT_NAMES))
+
+    raw_allocations = {
+        name: total_count * positive_weights[name] / weight_sum
+        for name in SPLIT_NAMES
+    }
+    allocations = {
+        name: int(raw_allocations[name])
+        for name in SPLIT_NAMES
+    }
+    remainder = total_count - sum(allocations.values())
+    if remainder > 0:
+        ranked_names = sorted(
+            SPLIT_NAMES,
+            key=lambda name: (raw_allocations[name] - allocations[name], -SPLIT_ORDER[name]),
+            reverse=True,
+        )
+        for idx in range(remainder):
+            allocations[ranked_names[idx % len(ranked_names)]] += 1
+    return allocations
+
+
+def build_assignment_sample_counts(
+    total_samples: int,
+    split,
+    fixed_sample_counts: dict[str, int],
+) -> tuple[dict[str, int], dict[str, int]]:
+    desired_sample_counts = build_desired_sample_counts(total_samples, split)
+    remaining_samples = total_samples - sum(fixed_sample_counts.values())
+    if remaining_samples < 0:
+        raise ValueError(
+            "Forced test samples exceed the number of available target samples."
+        )
+
+    residual_capacities = {
+        name: max(desired_sample_counts[name] - fixed_sample_counts.get(name, 0), 0)
+        for name in SPLIT_NAMES
+    }
+    if remaining_samples == 0:
+        additional_counts = {name: 0 for name in SPLIT_NAMES}
+    elif sum(residual_capacities.values()) > 0:
+        additional_counts = allocate_integer_counts(remaining_samples, residual_capacities)
+    else:
+        additional_counts = allocate_integer_counts(
+            remaining_samples,
+            {name: split[idx] for idx, name in enumerate(SPLIT_NAMES)},
+        )
+
+    assignment_target_sample_counts = {
+        name: int(fixed_sample_counts.get(name, 0) + additional_counts[name])
+        for name in SPLIT_NAMES
+    }
+    return desired_sample_counts, assignment_target_sample_counts
+
+
 def score_box_assignment(current_boxes: dict[str, int], target_boxes: dict[str, float]) -> float:
     return sum((current_boxes[name] - target_boxes[name]) ** 2 for name in SPLIT_NAMES)
 
@@ -222,6 +296,17 @@ def score_relative_box_assignment(
     for name in SPLIT_NAMES:
         denom = max(float(target_boxes[name]), 1.0)
         score += ((current_boxes[name] - target_boxes[name]) / denom) ** 2
+    return score
+
+
+def score_relative_sample_assignment(
+    current_samples: dict[str, list[str]],
+    target_sample_counts: dict[str, float],
+) -> float:
+    score = 0.0
+    for name in SPLIT_NAMES:
+        denom = max(float(target_sample_counts[name]), 1.0)
+        score += ((len(current_samples[name]) - target_sample_counts[name]) / denom) ** 2
     return score
 
 
@@ -292,10 +377,20 @@ def build_split_plan(
         "valid": 0,
         "test": sum_target_boxes(forced_test, sample_target_box_counts),
     }
+    fixed_sample_counts = {
+        "train": 0,
+        "valid": 0,
+        "test": len(forced_test),
+    }
     desired_target_boxes, assignment_target_boxes = build_assignment_targets(
         total_target_boxes=total_target_boxes,
         split=split,
         fixed_target_boxes=fixed_target_boxes,
+    )
+    desired_sample_counts, assignment_target_sample_counts = build_assignment_sample_counts(
+        total_samples=len(target_samples),
+        split=split,
+        fixed_sample_counts=fixed_sample_counts,
     )
 
     total_target_boxes_by_class = {}
@@ -334,89 +429,44 @@ def build_split_plan(
     best_samples = None
     best_actual_boxes = None
     best_actual_boxes_by_class = None
+    remaining_sample_capacities = {
+        name: max(assignment_target_sample_counts[name] - fixed_sample_counts[name], 0)
+        for name in SPLIT_NAMES
+    }
 
     for _ in range(max(1, trials)):
         order = remaining_samples[:]
         rnd.shuffle(order)
-        order.sort(key=lambda sample: sample_target_box_counts[sample], reverse=True)
-
         current_samples = {"train": [], "valid": [], "test": forced_test[:]}
-        current_target_boxes = dict(fixed_target_boxes)
+        cursor = 0
+        for split_name in SPLIT_NAMES:
+            take_count = remaining_sample_capacities[split_name]
+            current_samples[split_name].extend(order[cursor:cursor + take_count])
+            cursor += take_count
+
+        current_target_boxes = {
+            name: sum_target_boxes(current_samples[name], sample_target_box_counts)
+            for name in SPLIT_NAMES
+        }
         if use_class_aware_balance:
             current_target_boxes_by_class = {
-                class_name: dict(fixed_target_boxes_by_class[class_name])
+                class_name: {
+                    split_name: sum(
+                        int(sample_target_box_counts_by_class.get(sample, {}).get(class_name, 0))
+                        for sample in current_samples[split_name]
+                    )
+                    for split_name in SPLIT_NAMES
+                }
                 for class_name in class_names
             }
-
-        for sample in order:
-            sample_boxes = sample_target_box_counts[sample]
-            sample_boxes_by_class = (
-                sample_target_box_counts_by_class.get(sample, {})
-                if use_class_aware_balance else {}
-            )
-            best_choice = None
-            best_choice_key = None
-
-            for split_name in SPLIT_NAMES:
-                trial_boxes = dict(current_target_boxes)
-                trial_boxes[split_name] += sample_boxes
-
-                trial_score = score_box_assignment(trial_boxes, assignment_target_boxes)
-                overshoot = max(0.0, trial_boxes[split_name] - assignment_target_boxes[split_name])
-                deficit = assignment_target_boxes[split_name] - current_target_boxes[split_name]
-                if use_class_aware_balance:
-                    class_trial_score = 0.0
-                    class_overshoot = 0.0
-                    class_deficit = 0.0
-                    for class_name in class_names:
-                        trial_class_boxes = dict(current_target_boxes_by_class[class_name])
-                        trial_class_boxes[split_name] += int(sample_boxes_by_class.get(class_name, 0))
-                        class_trial_score += score_relative_box_assignment(
-                            trial_class_boxes,
-                            assignment_target_boxes_by_class[class_name],
-                        )
-                        class_overshoot += max(
-                            0.0,
-                            trial_class_boxes[split_name]
-                            - assignment_target_boxes_by_class[class_name][split_name],
-                        ) / max(
-                            assignment_target_boxes_by_class[class_name][split_name],
-                            1.0,
-                        )
-                        class_deficit += (
-                            assignment_target_boxes_by_class[class_name][split_name]
-                            - current_target_boxes_by_class[class_name][split_name]
-                        ) / max(
-                            assignment_target_boxes_by_class[class_name][split_name],
-                            1.0,
-                        )
-                    choice_key = (
-                        class_trial_score,
-                        score_relative_box_assignment(trial_boxes, assignment_target_boxes),
-                        class_overshoot,
-                        overshoot,
-                        -class_deficit,
-                        -deficit,
-                        SPLIT_ORDER[split_name],
-                    )
-                else:
-                    choice_key = (trial_score, overshoot, -deficit, SPLIT_ORDER[split_name])
-
-                if best_choice_key is None or choice_key < best_choice_key:
-                    best_choice_key = choice_key
-                    best_choice = split_name
-
-            current_samples[best_choice].append(sample)
-            current_target_boxes[best_choice] += sample_boxes
-            if use_class_aware_balance:
-                for class_name in class_names:
-                    current_target_boxes_by_class[class_name][best_choice] += int(
-                        sample_boxes_by_class.get(class_name, 0)
-                    )
 
         sample_count_penalty = sum(
             (len(current_samples[name]) - len(target_samples) * split[idx]) ** 2
             for idx, name in enumerate(SPLIT_NAMES)
+        )
+        sample_count_score = score_relative_sample_assignment(
+            current_samples,
+            assignment_target_sample_counts,
         )
         if use_class_aware_balance:
             class_score = sum(
@@ -427,12 +477,14 @@ def build_split_plan(
                 for class_name in class_names
             )
             trial_key = (
+                sample_count_score,
                 class_score,
                 score_relative_box_assignment(current_target_boxes, assignment_target_boxes),
                 sample_count_penalty,
             )
         else:
             trial_key = (
+                sample_count_score,
                 score_box_assignment(current_target_boxes, assignment_target_boxes),
                 sample_count_penalty,
             )
@@ -458,6 +510,8 @@ def build_split_plan(
         "assignment_target_boxes": assignment_target_boxes,
         "actual_target_boxes": best_actual_boxes,
         "balance_per_class": use_class_aware_balance,
+        "desired_sample_counts": desired_sample_counts,
+        "assignment_target_sample_counts": assignment_target_sample_counts,
     }
     if use_class_aware_balance:
         plan["total_target_boxes_by_class"] = total_target_boxes_by_class
@@ -677,6 +731,20 @@ def main():
             },
             "actual_sample_assignment": {
                 name: int(split_plan["actual_target_boxes"][name])
+                for name in SPLIT_NAMES
+            },
+        },
+        "target_sample_planning": {
+            "ratio_targets": {
+                name: int(split_plan["desired_sample_counts"][name])
+                for name in SPLIT_NAMES
+            },
+            "assignment_targets": {
+                name: int(split_plan["assignment_target_sample_counts"][name])
+                for name in SPLIT_NAMES
+            },
+            "actual_sample_assignment": {
+                name: len(split[name])
                 for name in SPLIT_NAMES
             },
         },
