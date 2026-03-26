@@ -17,7 +17,7 @@ VALID_EXTS = {".tif", ".tiff", ".jpg", ".jpeg", ".png"}
 
 # Samples reserved for the test split.
 # Accepts integers (25) or strings ("Sample 25").
-FORCED_TEST_SAMPLES = [25, 14, 13, 12, 15, 17, 18, 16]
+FORCED_TEST_SAMPLES = [25, 14, 13, 12, 15, 17, 18, 16] #Currently annotated 25, 14, 13, 12, 15, 17, 18, 16
 SPLIT_SEARCH_TRIALS = 250
 BALANCE_PER_CLASS = True
 
