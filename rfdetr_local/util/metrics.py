@@ -16,10 +16,29 @@ except ModuleNotFoundError:
 plt.ioff()
 
 PLOT_FILE_NAME = "metrics_plot.png"
+PER_CLASS_PLOT_FILE_NAME = "metrics_plot_per_class.png"
 
 
 def safe_index(arr, idx):
     return arr[idx] if 0 <= idx < len(arr) else None
+
+
+def extract_class_metric_history(history: list[dict], results_key: str, metric_key: str) -> dict[str, list[tuple[int, float]]]:
+    series = {}
+    for values in history:
+        if results_key not in values or "epoch" not in values:
+            continue
+        rows = values.get(results_key, {}).get("class_map", [])
+        epoch = int(values["epoch"])
+        for row in rows:
+            class_name = str(row.get("class", "")).strip()
+            if not class_name or class_name.lower() == "all":
+                continue
+            metric_value = row.get(metric_key)
+            if metric_value is None:
+                continue
+            series.setdefault(class_name, []).append((epoch, float(metric_value)))
+    return series
 
 
 class MetricsPlotSink:
@@ -112,6 +131,59 @@ class MetricsPlotSink:
         plt.savefig(f"{self.output_dir}/{PLOT_FILE_NAME}")
         plt.close(fig)
         print(f"Results saved to {self.output_dir}/{PLOT_FILE_NAME}")
+
+        base_class_ap50 = extract_class_metric_history(self.history, "test_results_json", "map@50")
+        ema_class_ap50 = extract_class_metric_history(self.history, "ema_test_results_json", "map@50")
+        base_class_map5095 = extract_class_metric_history(self.history, "test_results_json", "map@50:95")
+        ema_class_map5095 = extract_class_metric_history(self.history, "ema_test_results_json", "map@50:95")
+
+        class_names = sorted(
+            set(base_class_ap50)
+            | set(ema_class_ap50)
+            | set(base_class_map5095)
+            | set(ema_class_map5095)
+        )
+        if not class_names:
+            return
+
+        per_class_fig, per_class_axes = plt.subplots(
+            len(class_names), 2, figsize=(18, max(6, 5 * len(class_names))), squeeze=False
+        )
+        for row_idx, class_name in enumerate(class_names):
+            ax_ap50 = per_class_axes[row_idx][0]
+            base_ap50_points = base_class_ap50.get(class_name, [])
+            ema_ap50_points = ema_class_ap50.get(class_name, [])
+            if base_ap50_points:
+                x, y = zip(*base_ap50_points)
+                ax_ap50.plot(x, y, marker='o', linestyle='-', label='Base Model')
+            if ema_ap50_points:
+                x, y = zip(*ema_ap50_points)
+                ax_ap50.plot(x, y, marker='o', linestyle='--', label='EMA Model')
+            ax_ap50.set_title(f'{class_name} AP@0.50')
+            ax_ap50.set_xlabel('Epoch Number')
+            ax_ap50.set_ylabel('AP50')
+            ax_ap50.legend()
+            ax_ap50.grid(True)
+
+            ax_map = per_class_axes[row_idx][1]
+            base_map_points = base_class_map5095.get(class_name, [])
+            ema_map_points = ema_class_map5095.get(class_name, [])
+            if base_map_points:
+                x, y = zip(*base_map_points)
+                ax_map.plot(x, y, marker='o', linestyle='-', label='Base Model')
+            if ema_map_points:
+                x, y = zip(*ema_map_points)
+                ax_map.plot(x, y, marker='o', linestyle='--', label='EMA Model')
+            ax_map.set_title(f'{class_name} AP@0.50:0.95')
+            ax_map.set_xlabel('Epoch Number')
+            ax_map.set_ylabel('AP')
+            ax_map.legend()
+            ax_map.grid(True)
+
+        plt.tight_layout()
+        plt.savefig(f"{self.output_dir}/{PER_CLASS_PLOT_FILE_NAME}")
+        plt.close(per_class_fig)
+        print(f"Results saved to {self.output_dir}/{PER_CLASS_PLOT_FILE_NAME}")
 
 
 class MetricsTensorBoardSink:
