@@ -83,6 +83,7 @@ class BestMetricHolder():
     def __init__(self, init_res=0.0, better='large', use_ema=False) -> None:
         self.best_all = BestMetricSingle(init_res, better)
         self.use_ema = use_ema
+        self.best_is_ema = False
         if use_ema:
             self.best_ema = BestMetricSingle(init_res, better)
             self.best_regular = BestMetricSingle(init_res, better)
@@ -92,14 +93,23 @@ class BestMetricHolder():
         return if the results is the best.
         """
         if not self.use_ema:
-            return self.best_all.update(new_res, epoch)
+            updated = self.best_all.update(new_res, epoch)
+            if updated:
+                self.best_is_ema = False
+            return updated
         else:
             if is_ema:
                 self.best_ema.update(new_res, epoch)
-                return self.best_all.update(new_res, epoch)
+                updated = self.best_all.update(new_res, epoch)
+                if updated:
+                    self.best_is_ema = True
+                return updated
             else:
                 self.best_regular.update(new_res, epoch)
-                return self.best_all.update(new_res, epoch)
+                updated = self.best_all.update(new_res, epoch)
+                if updated:
+                    self.best_is_ema = False
+                return updated
 
     def summary(self):
         if not self.use_ema:
