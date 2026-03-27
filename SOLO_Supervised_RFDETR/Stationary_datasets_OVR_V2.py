@@ -11,7 +11,7 @@ ALL_COCO_JSON = Path(r"D:/PHD/PhdData/CellScanData/Annotation_Backups/Quality As
 IMAGES_DIR = Path(r"D:/PHD/PhdData/CellScanData/Zoom10x - Quality Assessment_Cleaned")
 OUT_ROOT = Path(r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\SOLO_Supervised_RFDETR/Stat_Dataset")
 TARGET_CLASSES = ["Leucocyte", "Squamous Epithelial Cell"]       # e.g. ["Leucocyte"] or ["Leucocyte", "Squamous Epithelial Cell"] Type both classes to do two-class
-SPLIT = (0.70, 0.15, 0.15)
+SPLIT = (0.60, 0.20, 0.20)
 SEED = 42
 VALID_EXTS = {".tif", ".tiff", ".jpg", ".jpeg", ".png"}
 
