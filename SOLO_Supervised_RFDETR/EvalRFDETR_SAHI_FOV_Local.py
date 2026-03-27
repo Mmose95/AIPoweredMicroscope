@@ -53,8 +53,12 @@ ACTIVE_PRESET = "two_class"
 DEFAULT_IMAGES_ROOT = r"D:\PHD\PhdData\CellScanData\Zoom10x - Quality Assessment_Cleaned"
 DEFAULT_OUTPUT_DIR = r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\FOV_SAHI_Output"
 DEFAULT_SAMPLE_MIN = 71
-SAMPLE_SELECTION = "71" # "All" = all, "71-80" inclusive range, "75+" from 75 and up, "88" = only 88
+SAMPLE_SELECTION = "73" # "All" = all, "71-80" inclusive range, "75+" from 75 and up, "88" = only 88
 OVERLAY_SELECTION = "25"
+CLASS_SCORE_THRESHOLDS: Dict[str, float] = {
+    "Leucocyte": 0.30,
+    "Squamous Epithelial Cell": 0.70,
+}
 
 DEFAULT_CLASS_NAMES = [
     "Leucocyte",
@@ -93,6 +97,7 @@ class FOVSahiConfig:
     sample_selection: str
     score_floor: float
     score_threshold: float
+    class_score_thresholds: Dict[str, float]
     confmat_iou: float
     seed: int
     progress_every: int
@@ -275,6 +280,75 @@ def parse_sample_selection(raw: str, default_min: int) -> Tuple[int, Optional[in
 
     value = int(txt)
     return value, value, txt
+
+
+def normalize_class_key(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (text or "").strip().lower())
+
+
+def parse_class_score_thresholds(
+    raw: str,
+    class_names: Sequence[str],
+    default_threshold: float,
+) -> Dict[str, float]:
+    resolved = {str(name): float(default_threshold) for name in class_names}
+    txt = (raw or "").strip()
+    if not txt:
+        return resolved
+
+    known_by_key = {normalize_class_key(name): str(name) for name in class_names}
+    parts = [part.strip() for part in txt.split(";") if part.strip()]
+    for part in parts:
+        if "=" not in part:
+            raise ValueError(
+                "Class score thresholds must use 'Class=0.50;OtherClass=0.70' format."
+            )
+        raw_key, raw_value = part.split("=", 1)
+        key = normalize_class_key(raw_key)
+        if key not in known_by_key:
+            raise ValueError(
+                f"Unknown class in class-score-thresholds: {raw_key!r}. "
+                f"Known classes: {', '.join(class_names)}"
+            )
+        resolved[known_by_key[key]] = float(raw_value.strip())
+    return resolved
+
+
+def default_class_score_threshold_string() -> str:
+    if not CLASS_SCORE_THRESHOLDS:
+        return ""
+    parts = [f"{name}={value}" for name, value in CLASS_SCORE_THRESHOLDS.items()]
+    return ";".join(parts)
+
+
+def threshold_for_class_idx(
+    class_idx: int,
+    class_names: Sequence[str],
+    class_score_thresholds: Dict[str, float],
+    default_threshold: float,
+) -> float:
+    if 0 <= int(class_idx) < len(class_names):
+        return float(class_score_thresholds.get(class_names[int(class_idx)], default_threshold))
+    return float(default_threshold)
+
+
+def per_class_keep_mask(
+    pred_scores: np.ndarray,
+    pred_cls: np.ndarray,
+    class_names: Sequence[str],
+    class_score_thresholds: Dict[str, float],
+    default_threshold: float,
+) -> np.ndarray:
+    if pred_scores.size == 0:
+        return np.zeros((0,), dtype=bool)
+    thresholds = np.array(
+        [
+            threshold_for_class_idx(int(cls_idx), class_names, class_score_thresholds, default_threshold)
+            for cls_idx in pred_cls.tolist()
+        ],
+        dtype=np.float32,
+    )
+    return pred_scores >= thresholds
 
 
 def discover_sample_dirs(images_root: Path, sample_min: int, sample_max: Optional[int] = None) -> List[Path]:
@@ -571,12 +645,13 @@ def gt_cat_id_for_name(class_name: str, gt_name_to_id: Dict[str, int]) -> int:
 
 def detection_counts_by_class(
     samples: Sequence[Dict[str, Any]],
-    n_classes: int,
+    class_names: Sequence[str],
     score_threshold: float,
+    class_score_thresholds: Dict[str, float],
     iou_thr: float,
 ) -> List[Dict[str, int]]:
     rows: List[Dict[str, int]] = []
-    for class_idx in range(n_classes):
+    for class_idx in range(len(class_names)):
         tp = fp = fn = 0
         for sample in samples:
             gt_mask = sample["gt_cls"] == class_idx
@@ -584,7 +659,13 @@ def detection_counts_by_class(
             gt_boxes = sample["gt_boxes"][gt_mask]
             pred_boxes = sample["pred_boxes"][pr_mask]
             pred_scores = sample["pred_scores"][pr_mask]
-            keep = pred_scores >= score_threshold
+            class_threshold = threshold_for_class_idx(
+                class_idx,
+                class_names,
+                class_score_thresholds,
+                score_threshold,
+            )
+            keep = pred_scores >= class_threshold
             pred_boxes = pred_boxes[keep]
 
             ious = local_eval.iou_matrix(gt_boxes, pred_boxes)
@@ -594,6 +675,46 @@ def detection_counts_by_class(
             fn += max(0, len(gt_boxes) - len(matches))
         rows.append({"tp": tp, "fp": fp, "fn": fn})
     return rows
+
+
+def confusion_matrix_with_background_per_class(
+    samples: Sequence[Dict[str, Any]],
+    class_names: Sequence[str],
+    score_threshold: float,
+    class_score_thresholds: Dict[str, float],
+    iou_thr: float,
+) -> np.ndarray:
+    n_classes = len(class_names)
+    bg = n_classes
+    cm = np.zeros((n_classes + 1, n_classes + 1), dtype=np.int64)
+    for sample in samples:
+        gt_boxes = sample["gt_boxes"]
+        gt_cls = sample["gt_cls"]
+
+        keep = per_class_keep_mask(
+            sample["pred_scores"],
+            sample["pred_cls"],
+            class_names,
+            class_score_thresholds,
+            score_threshold,
+        )
+        pred_boxes = sample["pred_boxes"][keep]
+        pred_cls = sample["pred_cls"][keep]
+
+        ious = local_eval.iou_matrix(gt_boxes, pred_boxes)
+        matches = local_eval.greedy_match(ious, iou_thr=iou_thr)
+        matched_gt = {gi for gi, _ in matches}
+        matched_pr = {pj for _, pj in matches}
+
+        for gi, pj in matches:
+            cm[int(gt_cls[gi]), int(pred_cls[pj])] += 1
+        for gi in range(len(gt_cls)):
+            if gi not in matched_gt:
+                cm[int(gt_cls[gi]), bg] += 1
+        for pj in range(len(pred_cls)):
+            if pj not in matched_pr:
+                cm[bg, int(pred_cls[pj])] += 1
+    return cm
 
 
 def precision_recall_from_counts(tp: int, fp: int, fn: int) -> Tuple[float, float, float]:
@@ -610,6 +731,7 @@ def summarize_coco_metrics(
     samples: Sequence[Dict[str, Any]],
     class_names: Sequence[str],
     score_threshold: float,
+    class_score_thresholds: Dict[str, float],
     confmat_iou: float,
     output_dir: Path,
     no_plots: bool,
@@ -628,12 +750,24 @@ def summarize_coco_metrics(
     idx75 = local_eval.find_iou_index(iou_sweep, 0.75)
 
     per_class_rows: List[Dict[str, Any]] = []
-    prf_counts = detection_counts_by_class(samples, len(class_names), score_threshold, confmat_iou)
+    prf_counts = detection_counts_by_class(
+        samples,
+        class_names,
+        score_threshold,
+        class_score_thresholds,
+        confmat_iou,
+    )
     internal_idx_by_name = {name.strip().lower(): idx for idx, name in enumerate(class_names)}
     for k, cid in enumerate(cat_ids_eval):
         class_name = cat_id_to_name[int(cid)]
         count_idx = internal_idx_by_name.get(class_name.strip().lower(), k)
         counts = prf_counts[count_idx] if count_idx < len(prf_counts) else {"tp": 0, "fp": 0, "fn": 0}
+        class_threshold = threshold_for_class_idx(
+            count_idx,
+            class_names,
+            class_score_thresholds,
+            score_threshold,
+        )
         prec_thr, rec_thr, f1_thr = precision_recall_from_counts(
             counts["tp"],
             counts["fp"],
@@ -651,6 +785,7 @@ def summarize_coco_metrics(
                 "precision": prec_thr,
                 "recall": rec_thr,
                 "f1": f1_thr,
+                "score_threshold": class_threshold,
                 "tp": counts["tp"],
                 "fp": counts["fp"],
                 "fn": counts["fn"],
@@ -668,13 +803,20 @@ def summarize_coco_metrics(
         "precision",
         "recall",
         "f1",
+        "score_threshold",
         "tp",
         "fp",
         "fn",
     ]
     write_csv(output_dir / "per_class_metrics.csv", fieldnames, per_class_rows)
 
-    cm = local_eval.confusion_matrix_with_background(samples, len(class_names), score_threshold, confmat_iou)
+    cm = confusion_matrix_with_background_per_class(
+        samples,
+        class_names,
+        score_threshold,
+        class_score_thresholds,
+        confmat_iou,
+    )
     cm_labels = list(class_names) + ["background"]
     local_eval.save_confusion_csv(output_dir / "confusion_matrix.csv", cm_labels, cm)
     json_dump(
@@ -683,6 +825,7 @@ def summarize_coco_metrics(
             "labels": cm_labels,
             "matrix": cm.tolist(),
             "score_threshold": score_threshold,
+            "class_score_thresholds": class_score_thresholds,
             "iou_threshold": confmat_iou,
         },
     )
@@ -712,6 +855,8 @@ def summarize_coco_metrics(
         "precision": overall_precision,
         "recall": overall_recall,
         "f1": overall_f1,
+        "score_threshold": score_threshold,
+        "class_score_thresholds": class_score_thresholds,
         "per_class": per_class_rows,
         "confusion_matrix_png_created": bool(confusion_png_created),
     }
@@ -731,6 +876,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sample-selection", default=SAMPLE_SELECTION)
     parser.add_argument("--score-floor", type=float, default=0.001)
     parser.add_argument("--score-threshold", type=float, default=0.30)
+    parser.add_argument("--class-score-thresholds", default=default_class_score_threshold_string())
     parser.add_argument("--confmat-iou", type=float, default=0.50)
     parser.add_argument("--slice-height", type=int, default=672)
     parser.add_argument("--slice-width", type=int, default=672)
@@ -763,6 +909,11 @@ def resolve_config(args: argparse.Namespace) -> FOVSahiConfig:
         str(args.sample_selection),
         int(args.sample_min),
     )
+    class_score_thresholds = parse_class_score_thresholds(
+        str(args.class_score_thresholds),
+        class_names,
+        float(args.score_threshold),
+    )
 
     model_class = args.model_class
     if model_class == "auto":
@@ -788,6 +939,7 @@ def resolve_config(args: argparse.Namespace) -> FOVSahiConfig:
         sample_selection=sample_selection,
         score_floor=float(args.score_floor),
         score_threshold=float(args.score_threshold),
+        class_score_thresholds=class_score_thresholds,
         confmat_iou=float(args.confmat_iou),
         seed=int(args.seed),
         progress_every=max(1, int(args.progress_every)),
@@ -848,6 +1000,7 @@ def run_fov_sahi_eval(cfg: FOVSahiConfig) -> None:
 
     print(f"[SAHI FOV] Checkpoint num_classes={effective_num_classes}")
     print(f"[SAHI FOV] Checkpoint class_names={effective_class_names}")
+    print(f"[SAHI FOV] Score threshold={cfg.score_threshold}")
 
     model = load_model_for_fov(
         cfg.model_class,
@@ -857,6 +1010,12 @@ def run_fov_sahi_eval(cfg: FOVSahiConfig) -> None:
         effective_class_names,
     )
     sahi_model = build_sahi_model(model, effective_class_names, cfg.score_floor)
+    effective_class_score_thresholds = parse_class_score_thresholds(
+        ";".join(f"{name}={cfg.class_score_thresholds.get(name, cfg.score_threshold)}" for name in effective_class_names),
+        effective_class_names,
+        cfg.score_threshold,
+    )
+    print(f"[SAHI FOV] Class score thresholds={effective_class_score_thresholds}")
 
     gt_coco = None
     gt_image_lookup: Dict[str, Dict[str, Any]] = {}
@@ -917,8 +1076,14 @@ def run_fov_sahi_eval(cfg: FOVSahiConfig) -> None:
         pred_boxes = np.asarray(pred_boxes_list, dtype=np.float32).reshape((-1, 4)) if pred_boxes_list else np.zeros((0, 4), dtype=np.float32)
         pred_scores = np.asarray(pred_scores_list, dtype=np.float32) if pred_scores_list else np.zeros((0,), dtype=np.float32)
         pred_cls = np.asarray(pred_cls_list, dtype=np.int64) if pred_cls_list else np.zeros((0,), dtype=np.int64)
-        pred_cls = normalize_model_class_ids(pred_cls, cfg.class_names)
-        keep = pred_scores >= cfg.score_threshold
+        pred_cls = normalize_model_class_ids(pred_cls, effective_class_names)
+        keep = per_class_keep_mask(
+            pred_scores,
+            pred_cls,
+            effective_class_names,
+            effective_class_score_thresholds,
+            cfg.score_threshold,
+        )
         kept_boxes = pred_boxes[keep]
         kept_scores = pred_scores[keep]
         kept_cls = pred_cls[keep]
@@ -1041,6 +1206,7 @@ def run_fov_sahi_eval(cfg: FOVSahiConfig) -> None:
             samples=metric_samples,
             class_names=effective_class_names,
             score_threshold=cfg.score_threshold,
+            class_score_thresholds=effective_class_score_thresholds,
             confmat_iou=cfg.confmat_iou,
             output_dir=cfg.output_dir,
             no_plots=cfg.no_plots,
@@ -1060,6 +1226,7 @@ def run_fov_sahi_eval(cfg: FOVSahiConfig) -> None:
         "class_names": list(effective_class_names),
         "score_floor": cfg.score_floor,
         "score_threshold": cfg.score_threshold,
+        "class_score_thresholds": effective_class_score_thresholds,
         "confmat_iou": cfg.confmat_iou,
         "slice_height": cfg.slice_height,
         "slice_width": cfg.slice_width,
