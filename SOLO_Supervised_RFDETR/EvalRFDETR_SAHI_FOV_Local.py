@@ -53,7 +53,7 @@ ACTIVE_PRESET = "two_class"
 DEFAULT_IMAGES_ROOT = r"D:\PHD\PhdData\CellScanData\Zoom10x - Quality Assessment_Cleaned"
 DEFAULT_OUTPUT_DIR = r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\FOV_SAHI_Output"
 DEFAULT_SAMPLE_MIN = 71
-SAMPLE_SELECTION = "all"
+SAMPLE_SELECTION = "71" # "All" = all, "71-80" inclusive range, "75+" from 75 and up, "88" = only 88
 OVERLAY_SELECTION = "25"
 
 DEFAULT_CLASS_NAMES = [
@@ -149,6 +149,75 @@ def build_output_dir(base_output_dir: Path, target_name: str) -> Tuple[Path, Pat
         out_dir = root_dir / f"{run_stamp}_{counter:02d}"
         counter += 1
     return out_dir, root_dir, out_dir.name
+
+
+def infer_checkpoint_runtime_metadata(checkpoint: Path) -> Tuple[Optional[int], Optional[List[str]]]:
+    if local_eval.torch is None:
+        return None, None
+    try:
+        ckpt = local_eval.torch.load(  # type: ignore[union-attr]
+            str(checkpoint),
+            map_location="cpu",
+            weights_only=False,
+        )
+    except Exception:
+        return None, None
+
+    args = ckpt.get("args")
+    if args is None:
+        return None, None
+
+    num_classes = None
+    class_names = None
+    try:
+        num_classes = int(getattr(args, "num_classes", None))
+    except Exception:
+        num_classes = None
+    try:
+        raw_names = getattr(args, "class_names", None)
+        if raw_names:
+            class_names = [str(name).strip() for name in raw_names if str(name).strip()]
+    except Exception:
+        class_names = None
+    return num_classes, class_names
+
+
+def load_model_for_fov(
+    model_class: str,
+    checkpoint: Path,
+    resolution: Optional[int],
+    num_classes: Optional[int],
+    class_names: Optional[Sequence[str]],
+) -> Any:
+    local_eval.ensure_rfdetr_import()
+    from rfdetr import RFDETRSmall, RFDETRMedium, RFDETRLarge
+
+    name_to_cls = {
+        "RFDETRSmall": RFDETRSmall,
+        "RFDETRMedium": RFDETRMedium,
+        "RFDETRLarge": RFDETRLarge,
+    }
+    if model_class not in name_to_cls:
+        raise ValueError(f"Unsupported model_class={model_class}")
+
+    kwargs: Dict[str, Any] = {"pretrain_weights": str(checkpoint)}
+    if resolution is not None:
+        kwargs["resolution"] = int(resolution)
+    if num_classes is not None:
+        kwargs["num_classes"] = int(num_classes)
+
+    model = name_to_cls[model_class](**kwargs)
+    if class_names:
+        try:
+            model.model.class_names = list(class_names)
+        except Exception:
+            pass
+    if hasattr(model, "optimize_for_inference"):
+        try:
+            model.optimize_for_inference()
+        except Exception:
+            pass
+    return model
 
 
 def parse_overlay_selection(raw: Any) -> int:
@@ -276,6 +345,37 @@ def normalize_model_class_ids(pred_labels: np.ndarray, class_names: Sequence[str
     return clipped.astype(np.int64)
 
 
+def sanitize_boxes_xyxy(
+    boxes: np.ndarray,
+    image_w: int,
+    image_h: int,
+    min_size: float = 1e-3,
+) -> np.ndarray:
+    if boxes.size == 0:
+        return boxes.astype(np.float32).reshape((0, 4))
+
+    boxes = boxes.astype(np.float32).copy()
+    boxes[:, 0] = np.clip(boxes[:, 0], 0.0, float(image_w))
+    boxes[:, 1] = np.clip(boxes[:, 1], 0.0, float(image_h))
+    boxes[:, 2] = np.clip(boxes[:, 2], 0.0, float(image_w))
+    boxes[:, 3] = np.clip(boxes[:, 3], 0.0, float(image_h))
+
+    x1 = np.minimum(boxes[:, 0], boxes[:, 2])
+    y1 = np.minimum(boxes[:, 1], boxes[:, 3])
+    x2 = np.maximum(boxes[:, 0], boxes[:, 2])
+    y2 = np.maximum(boxes[:, 1], boxes[:, 3])
+
+    x2 = np.maximum(x2, x1 + float(min_size))
+    y2 = np.maximum(y2, y1 + float(min_size))
+
+    x2 = np.clip(x2, 0.0, float(image_w))
+    y2 = np.clip(y2, 0.0, float(image_h))
+
+    sanitized = np.stack([x1, y1, x2, y2], axis=1).astype(np.float32)
+    keep = (sanitized[:, 2] > sanitized[:, 0]) & (sanitized[:, 3] > sanitized[:, 1])
+    return sanitized[keep]
+
+
 def score_to_text(score: float) -> str:
     return f"prob:{float(score):.2f}"
 
@@ -383,6 +483,17 @@ def build_sahi_model(model: Any, class_names: Sequence[str], confidence_threshol
                 float(self.confidence_threshold),
             )
             labels = normalize_model_class_ids(labels, class_names)
+            raw_boxes = boxes.astype(np.float32).reshape((-1, 4)) if boxes.size else np.zeros((0, 4), dtype=np.float32)
+            sanitized_boxes = sanitize_boxes_xyxy(raw_boxes, img_pil.width, img_pil.height)
+            if len(sanitized_boxes) != len(raw_boxes):
+                keep = []
+                for box in raw_boxes:
+                    clipped = sanitize_boxes_xyxy(box.reshape(1, 4), img_pil.width, img_pil.height)
+                    keep.append(len(clipped) == 1)
+                keep_mask = np.asarray(keep, dtype=bool)
+                scores = scores[keep_mask]
+                labels = labels[keep_mask]
+            boxes = sanitized_boxes
             self._original_predictions = [(boxes, scores, labels)]
 
         def _create_object_prediction_list_from_original_predictions(
@@ -729,8 +840,23 @@ def run_fov_sahi_eval(cfg: FOVSahiConfig) -> None:
     if cfg.gt_json is not None:
         print(f"[SAHI FOV] GT JSON={cfg.gt_json}")
 
-    model = local_eval.load_model(cfg.model_class, cfg.checkpoint, cfg.model_resolution)
-    sahi_model = build_sahi_model(model, cfg.class_names, cfg.score_floor)
+    ckpt_num_classes, ckpt_class_names = infer_checkpoint_runtime_metadata(cfg.checkpoint)
+    effective_class_names = list(cfg.class_names)
+    if ckpt_class_names:
+        effective_class_names = list(ckpt_class_names)
+    effective_num_classes = ckpt_num_classes if ckpt_num_classes is not None else len(effective_class_names)
+
+    print(f"[SAHI FOV] Checkpoint num_classes={effective_num_classes}")
+    print(f"[SAHI FOV] Checkpoint class_names={effective_class_names}")
+
+    model = load_model_for_fov(
+        cfg.model_class,
+        cfg.checkpoint,
+        cfg.model_resolution,
+        effective_num_classes,
+        effective_class_names,
+    )
+    sahi_model = build_sahi_model(model, effective_class_names, cfg.score_floor)
 
     gt_coco = None
     gt_image_lookup: Dict[str, Dict[str, Any]] = {}
@@ -740,7 +866,7 @@ def run_fov_sahi_eval(cfg: FOVSahiConfig) -> None:
         gt_coco = local_eval.COCO(str(cfg.gt_json))
         gt_image_lookup = discover_gt_image_mapping(gt_coco)
         _, gt_name_to_id = gt_category_maps(gt_coco)
-        for idx, class_name in enumerate(cfg.class_names):
+        for idx, class_name in enumerate(effective_class_names):
             gt_cat_id_to_internal[gt_cat_id_for_name(class_name, gt_name_to_id)] = idx
 
     overlay_candidates = list(range(len(image_paths)))
@@ -777,7 +903,6 @@ def run_fov_sahi_eval(cfg: FOVSahiConfig) -> None:
             postprocess_match_threshold=cfg.postprocess_match_threshold,
             postprocess_class_agnostic=cfg.postprocess_class_agnostic,
             verbose=0,
-            progress_bar=False,
         )
 
         pred_boxes_list: List[List[float]] = []
@@ -800,9 +925,9 @@ def run_fov_sahi_eval(cfg: FOVSahiConfig) -> None:
 
         sample_name = extract_sample_name(image_path)
         rel_name = safe_relpath(image_path, cfg.images_root)
-        counts_by_class = {f"n_pred_{re.sub(r'[^A-Za-z0-9]+', '_', name).strip('_').lower()}": 0 for name in cfg.class_names}
+        counts_by_class = {f"n_pred_{re.sub(r'[^A-Za-z0-9]+', '_', name).strip('_').lower()}": 0 for name in effective_class_names}
         for cls_idx in kept_cls.tolist():
-            key = f"n_pred_{re.sub(r'[^A-Za-z0-9]+', '_', cfg.class_names[int(cls_idx)]).strip('_').lower()}"
+            key = f"n_pred_{re.sub(r'[^A-Za-z0-9]+', '_', effective_class_names[int(cls_idx)]).strip('_').lower()}"
             counts_by_class[key] += 1
 
         image_row = {
@@ -833,7 +958,7 @@ def run_fov_sahi_eval(cfg: FOVSahiConfig) -> None:
 
         for box, score, cls_idx in zip(pred_boxes, pred_scores, pred_cls):
             cls_idx = int(cls_idx)
-            cls_name = cfg.class_names[cls_idx] if 0 <= cls_idx < len(cfg.class_names) else f"class_{cls_idx}"
+            cls_name = effective_class_names[cls_idx] if 0 <= cls_idx < len(effective_class_names) else f"class_{cls_idx}"
             all_prediction_rows.append(
                 {
                     "sample": sample_name,
@@ -878,7 +1003,7 @@ def run_fov_sahi_eval(cfg: FOVSahiConfig) -> None:
                     }
                 )
                 for box, score, cls_idx in zip(pred_boxes, pred_scores, pred_cls):
-                    class_name = cfg.class_names[int(cls_idx)]
+                    class_name = effective_class_names[int(cls_idx)]
                     coco_predictions.append(
                         {
                             "image_id": gt_image_id,
@@ -894,7 +1019,7 @@ def run_fov_sahi_eval(cfg: FOVSahiConfig) -> None:
                 pred_boxes=kept_boxes,
                 pred_scores=kept_scores,
                 pred_cls=kept_cls,
-                class_names=cfg.class_names,
+                class_names=effective_class_names,
                 output_path=overlays_dir / f"{sample_name}__{image_path.stem}.png",
             )
 
@@ -914,7 +1039,7 @@ def run_fov_sahi_eval(cfg: FOVSahiConfig) -> None:
             preds_path=preds_path,
             processed_img_ids=processed_img_ids,
             samples=metric_samples,
-            class_names=cfg.class_names,
+            class_names=effective_class_names,
             score_threshold=cfg.score_threshold,
             confmat_iou=cfg.confmat_iou,
             output_dir=cfg.output_dir,
@@ -932,7 +1057,7 @@ def run_fov_sahi_eval(cfg: FOVSahiConfig) -> None:
         "sample_max": cfg.sample_max,
         "n_samples": len(sample_dirs),
         "n_images": len(image_paths),
-        "class_names": list(cfg.class_names),
+        "class_names": list(effective_class_names),
         "score_floor": cfg.score_floor,
         "score_threshold": cfg.score_threshold,
         "confmat_iou": cfg.confmat_iou,
