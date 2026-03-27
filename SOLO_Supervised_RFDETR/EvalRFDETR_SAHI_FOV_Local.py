@@ -53,6 +53,7 @@ ACTIVE_PRESET = "two_class"
 DEFAULT_IMAGES_ROOT = r"D:\PHD\PhdData\CellScanData\Zoom10x - Quality Assessment_Cleaned"
 DEFAULT_OUTPUT_DIR = r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\FOV_SAHI_Output"
 DEFAULT_SAMPLE_MIN = 71
+SAMPLE_SELECTION = "all"
 OVERLAY_SELECTION = "25"
 
 DEFAULT_CLASS_NAMES = [
@@ -88,6 +89,8 @@ class FOVSahiConfig:
     model_class: str
     model_resolution: Optional[int]
     sample_min: int
+    sample_max: Optional[int]
+    sample_selection: str
     score_floor: float
     score_threshold: float
     confmat_iou: float
@@ -184,7 +187,28 @@ def import_sahi() -> Tuple[Any, Any, Any]:
     return DetectionModel, get_sliced_prediction, ObjectPrediction
 
 
-def discover_sample_dirs(images_root: Path, sample_min: int) -> List[Path]:
+def parse_sample_selection(raw: str, default_min: int) -> Tuple[int, Optional[int], str]:
+    txt = (raw or "").strip().lower()
+    if not txt or txt == "all":
+        return int(default_min), None, "all"
+
+    if txt.endswith("+"):
+        start = int(txt[:-1].strip())
+        return start, None, txt
+
+    if "-" in txt:
+        left, right = txt.split("-", 1)
+        start = int(left.strip())
+        end = int(right.strip())
+        if end < start:
+            raise ValueError("Sample selection end must be >= start.")
+        return start, end, txt
+
+    value = int(txt)
+    return value, value, txt
+
+
+def discover_sample_dirs(images_root: Path, sample_min: int, sample_max: Optional[int] = None) -> List[Path]:
     dirs: List[Tuple[int, Path]] = []
     pattern = re.compile(r"^Sample\s+(\d+)$", re.IGNORECASE)
     for child in images_root.iterdir():
@@ -195,6 +219,8 @@ def discover_sample_dirs(images_root: Path, sample_min: int) -> List[Path]:
             continue
         sample_idx = int(match.group(1))
         if sample_idx < int(sample_min):
+            continue
+        if sample_max is not None and sample_idx > int(sample_max):
             continue
         dirs.append((sample_idx, child))
     dirs.sort(key=lambda item: item[0])
@@ -591,6 +617,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-class", default="auto", choices=["auto", "RFDETRSmall", "RFDETRMedium", "RFDETRLarge"])
     parser.add_argument("--model-resolution", type=int, default=None)
     parser.add_argument("--sample-min", type=int, default=DEFAULT_SAMPLE_MIN)
+    parser.add_argument("--sample-selection", default=SAMPLE_SELECTION)
     parser.add_argument("--score-floor", type=float, default=0.001)
     parser.add_argument("--score-threshold", type=float, default=0.30)
     parser.add_argument("--confmat-iou", type=float, default=0.50)
@@ -621,6 +648,10 @@ def resolve_config(args: argparse.Namespace) -> FOVSahiConfig:
     num_overlays = parse_overlay_selection(args.overlay_selection)
     class_names = list(preset.get("class_names", DEFAULT_CLASS_NAMES))
     gt_json = _optional_path(args.gt_json)
+    sample_min, sample_max, sample_selection = parse_sample_selection(
+        str(args.sample_selection),
+        int(args.sample_min),
+    )
 
     model_class = args.model_class
     if model_class == "auto":
@@ -641,7 +672,9 @@ def resolve_config(args: argparse.Namespace) -> FOVSahiConfig:
         gt_json=gt_json,
         model_class=model_class,
         model_resolution=model_resolution,
-        sample_min=args.sample_min,
+        sample_min=sample_min,
+        sample_max=sample_max,
+        sample_selection=sample_selection,
         score_floor=float(args.score_floor),
         score_threshold=float(args.score_threshold),
         confmat_iou=float(args.confmat_iou),
@@ -672,11 +705,11 @@ def run_fov_sahi_eval(cfg: FOVSahiConfig) -> None:
     if cfg.gt_json is not None and not cfg.gt_json.exists():
         raise FileNotFoundError(f"GT JSON not found: {cfg.gt_json}")
 
-    sample_dirs = discover_sample_dirs(cfg.images_root, cfg.sample_min)
+    sample_dirs = discover_sample_dirs(cfg.images_root, cfg.sample_min, cfg.sample_max)
     image_paths = discover_images(sample_dirs)
     if not image_paths:
         raise RuntimeError(
-            f"No images found under {cfg.images_root} for Sample >= {cfg.sample_min}."
+            f"No images found under {cfg.images_root} for sample selection {cfg.sample_selection!r}."
         )
 
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
@@ -687,7 +720,9 @@ def run_fov_sahi_eval(cfg: FOVSahiConfig) -> None:
     print(f"[SAHI FOV] Target={cfg.target_name}")
     print(f"[SAHI FOV] Checkpoint={cfg.checkpoint}")
     print(f"[SAHI FOV] Images root={cfg.images_root}")
+    print(f"[SAHI FOV] Sample selection={cfg.sample_selection}")
     print(f"[SAHI FOV] Sample min={cfg.sample_min}")
+    print(f"[SAHI FOV] Sample max={cfg.sample_max}")
     print(f"[SAHI FOV] Discovered sample dirs={len(sample_dirs)}")
     print(f"[SAHI FOV] Discovered images={len(image_paths)}")
     print(f"[SAHI FOV] Output directory={cfg.output_dir}")
@@ -892,7 +927,9 @@ def run_fov_sahi_eval(cfg: FOVSahiConfig) -> None:
         "checkpoint": str(cfg.checkpoint),
         "images_root": str(cfg.images_root),
         "gt_json": str(cfg.gt_json) if cfg.gt_json is not None else None,
+        "sample_selection": cfg.sample_selection,
         "sample_min": cfg.sample_min,
+        "sample_max": cfg.sample_max,
         "n_samples": len(sample_dirs),
         "n_images": len(image_paths),
         "class_names": list(cfg.class_names),
