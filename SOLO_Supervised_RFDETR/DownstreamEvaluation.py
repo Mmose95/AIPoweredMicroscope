@@ -18,10 +18,12 @@ import json
 import random
 import re
 import sys
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+import xml.etree.ElementTree as ET
 
 try:
     import numpy as np
@@ -56,14 +58,15 @@ import EvalRFDETR_SAHI_FOV_Local as fov_eval
 ACTIVE_PRESET = "two_class"
 DEFAULT_OUTPUT_DIR = r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\DownstreamOutput"
 DEFAULT_IMAGES_ROOT = fov_eval.DEFAULT_IMAGES_ROOT
-DEFAULT_MANUAL_LABELS = r""
+DEFAULT_MANUAL_LABELS = (
+    r"D:\PHD\Results\Quality Assessment\Epi+Leu for ESCMID Conference\FullFOVEval\FullFOVClassification.xlsx"
+)
 DEFAULT_SHEET_NAME = ""
 OVERLAY_SELECTION = "all"
-
-QUALIFIED_MAX_EPI = 10
-PARTIAL_MAX_EPI = 25
-NOT_QUALIFIED_MAX_LEU = 10
-REQUIRE_LEU_FOR_QUALIFIED = True
+CROSS_CLASS_DUPLICATE_SUPPRESSION = True
+CROSS_CLASS_DUPLICATE_IOS_THRESHOLD = 0.75
+CROSS_CLASS_DUPLICATE_IOU_THRESHOLD = 0.35
+CROSS_CLASS_DUPLICATE_AREA_RATIO_THRESHOLD = 0.55
 
 DOWNSTREAM_LABELS = {
     1: "Qualified",
@@ -75,8 +78,8 @@ DOWNSTREAM_PRESETS = {
     "two_class": {
         "target_name": "Downstream",
         "checkpoint": (
-            r"D:\PHD\Results\Quality Assessment\Epi+Leu for ESCMID Conference\second full two class - new data"
-            r"\session_20260327_000629\TwoClass\HPO_Config_001\checkpoint_best_total.pth"
+            r"D:\PHD\Results\Quality Assessment\Epi+Leu for ESCMID Conference\third full"
+            r"\session_20260327_095556\TwoClass\HPO_Config_001\checkpoint_best_total.pth"
         ),
         "images_root": DEFAULT_IMAGES_ROOT,
         "model_class": "auto",
@@ -116,10 +119,10 @@ class DownstreamConfig:
     postprocess_match_metric: str
     postprocess_match_threshold: float
     postprocess_class_agnostic: bool
-    qualified_max_epi: int
-    partial_max_epi: int
-    not_qualified_max_leu: int
-    require_leu_for_qualified: bool
+    cross_class_duplicate_suppression: bool
+    cross_class_duplicate_ios_threshold: float
+    cross_class_duplicate_iou_threshold: float
+    cross_class_duplicate_area_ratio_threshold: float
 
 
 def _optional_path(raw: str) -> Optional[Path]:
@@ -200,6 +203,113 @@ def parse_manual_label(value: Any) -> int:
     raise ValueError(f"Unsupported manual label value: {value!r}")
 
 
+def is_manual_label_header(first_value: Any, second_value: Any) -> bool:
+    first_txt = str(first_value or "").strip().lower()
+    second_txt = str(second_value or "").strip().lower()
+    first_headers = {"filename", "file_name", "image", "image_name", "path", "image_path"}
+    second_headers = {"manual_class", "label", "manual_label", "classification", "class"}
+    return first_txt in first_headers or second_txt in second_headers
+
+
+def _xlsx_col_index(cell_ref: str) -> int:
+    letters = "".join(ch for ch in str(cell_ref) if ch.isalpha()).upper()
+    value = 0
+    for ch in letters:
+        value = value * 26 + (ord(ch) - ord("A") + 1)
+    return max(0, value - 1)
+
+
+def _xlsx_shared_strings(zf: zipfile.ZipFile) -> List[str]:
+    path = "xl/sharedStrings.xml"
+    if path not in zf.namelist():
+        return []
+    root = ET.fromstring(zf.read(path))
+    ns = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    values: List[str] = []
+    for si in root.findall("a:si", ns):
+        texts = [t.text or "" for t in si.findall(".//a:t", ns)]
+        values.append("".join(texts))
+    return values
+
+
+def _xlsx_sheet_target(zf: zipfile.ZipFile, sheet_name: Optional[str]) -> str:
+    workbook = ET.fromstring(zf.read("xl/workbook.xml"))
+    rels = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
+    ns_wb = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    ns_rel = {"r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships"}
+    rel_map: Dict[str, str] = {}
+    for rel in rels:
+        rel_id = rel.attrib.get("Id")
+        target = rel.attrib.get("Target")
+        if rel_id and target:
+            rel_map[rel_id] = target
+
+    selected_rel_id: Optional[str] = None
+    for sheet in workbook.findall("a:sheets/a:sheet", ns_wb):
+        name = sheet.attrib.get("name", "")
+        rel_id = sheet.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
+        if selected_rel_id is None:
+            selected_rel_id = rel_id
+        if sheet_name and name == sheet_name:
+            selected_rel_id = rel_id
+            break
+
+    if not selected_rel_id or selected_rel_id not in rel_map:
+        raise ValueError(f"Could not resolve worksheet {sheet_name!r} in {zf.filename}")
+    target = rel_map[selected_rel_id].replace("\\", "/")
+    if not target.startswith("xl/"):
+        target = f"xl/{target}"
+    return target
+
+
+def _xlsx_cell_value(cell: ET.Element, shared_strings: Sequence[str]) -> str:
+    value_node = cell.find("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}v")
+    inline_is = cell.find("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}is")
+    cell_type = cell.attrib.get("t", "")
+
+    if inline_is is not None:
+        texts = [t.text or "" for t in inline_is.findall(".//{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t")]
+        return "".join(texts)
+
+    if value_node is None:
+        return ""
+    raw = value_node.text or ""
+    if cell_type == "s":
+        idx = int(raw) if raw.strip() else -1
+        return shared_strings[idx] if 0 <= idx < len(shared_strings) else ""
+    return raw
+
+
+def load_manual_rows_from_xlsx_fallback(path: Path, sheet_name: Optional[str]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    with zipfile.ZipFile(path, "r") as zf:
+        shared_strings = _xlsx_shared_strings(zf)
+        sheet_target = _xlsx_sheet_target(zf, sheet_name)
+        root = ET.fromstring(zf.read(sheet_target))
+
+    ns = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    for row_idx, row in enumerate(root.findall(".//a:sheetData/a:row", ns), start=1):
+        values: Dict[int, str] = {}
+        for cell in row.findall("a:c", ns):
+            col_idx = _xlsx_col_index(cell.attrib.get("r", ""))
+            values[col_idx] = _xlsx_cell_value(cell, shared_strings)
+
+        first = values.get(0, "")
+        second = values.get(1, "")
+        if row_idx == 1:
+            if is_manual_label_header(first, second):
+                continue
+        if str(first or "").strip() == "":
+            continue
+        rows.append(
+            {
+                "source_value": str(first).strip(),
+                "manual_label_id": parse_manual_label(second),
+            }
+        )
+    return rows
+
+
 def load_manual_rows(path: Path, sheet_name: Optional[str]) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     suffix = path.suffix.lower()
@@ -209,7 +319,7 @@ def load_manual_rows(path: Path, sheet_name: Optional[str]) -> List[Dict[str, An
             for row_idx, row in enumerate(reader, start=1):
                 if not row:
                     continue
-                if row_idx == 1 and row and any(str(cell).strip().lower() in {"filename", "file_name", "image", "manual_class", "label"} for cell in row[:2]):
+                if row_idx == 1 and row and is_manual_label_header(row[0] if len(row) > 0 else None, row[1] if len(row) > 1 else None):
                     continue
                 if len(row) < 2 or not str(row[0]).strip():
                     continue
@@ -226,10 +336,8 @@ def load_manual_rows(path: Path, sheet_name: Optional[str]) -> List[Dict[str, An
 
     try:
         from openpyxl import load_workbook
-    except Exception as exc:
-        raise ImportError(
-            "openpyxl is required for .xlsx input. Install it in the active environment or save the sheet as .csv."
-        ) from exc
+    except Exception:
+        return load_manual_rows_from_xlsx_fallback(path, sheet_name)
 
     wb = load_workbook(path, read_only=True, data_only=True)
     ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb[wb.sheetnames[0]]
@@ -237,9 +345,7 @@ def load_manual_rows(path: Path, sheet_name: Optional[str]) -> List[Dict[str, An
         first = row[0] if len(row) >= 1 else None
         second = row[1] if len(row) >= 2 else None
         if row_idx == 1:
-            first_txt = str(first or "").strip().lower()
-            second_txt = str(second or "").strip().lower()
-            if first_txt in {"filename", "file_name", "image", "image_name"} or second_txt in {"manual_class", "label", "manual_label"}:
+            if is_manual_label_header(first, second):
                 continue
         if first is None or str(first).strip() == "":
             continue
@@ -297,12 +403,111 @@ def count_class_predictions(pred_cls: np.ndarray, class_names: Sequence[str]) ->
     return counts
 
 
-def classify_quality_from_counts(leu_count: int, epi_count: int, cfg: DownstreamConfig) -> int:
-    if epi_count > cfg.partial_max_epi and leu_count <= cfg.not_qualified_max_leu:
-        return 3
-    if epi_count <= cfg.qualified_max_epi and (not cfg.require_leu_for_qualified or leu_count > 0):
+def box_area_xyxy(box: np.ndarray) -> float:
+    x1, y1, x2, y2 = [float(v) for v in box.tolist()]
+    return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+
+
+def box_ios_xyxy(box1: np.ndarray, box2: np.ndarray) -> float:
+    x11, y11, x12, y12 = [float(v) for v in box1.tolist()]
+    x21, y21, x22, y22 = [float(v) for v in box2.tolist()]
+    inter_x1 = max(x11, x21)
+    inter_y1 = max(y11, y21)
+    inter_x2 = min(x12, x22)
+    inter_y2 = min(y12, y22)
+    inter_w = max(0.0, inter_x2 - inter_x1)
+    inter_h = max(0.0, inter_y2 - inter_y1)
+    inter = inter_w * inter_h
+    smaller = min(box_area_xyxy(box1), box_area_xyxy(box2))
+    return inter / smaller if smaller > 0 else 0.0
+
+
+def box_iou_xyxy(box1: np.ndarray, box2: np.ndarray) -> float:
+    iou = local_eval.iou_matrix(box1.reshape(1, 4), box2.reshape(1, 4))
+    return float(iou[0, 0]) if iou.size else 0.0
+
+
+def box_area_ratio(box1: np.ndarray, box2: np.ndarray) -> float:
+    area1 = box_area_xyxy(box1)
+    area2 = box_area_xyxy(box2)
+    larger = max(area1, area2)
+    smaller = min(area1, area2)
+    return smaller / larger if larger > 0 else 0.0
+
+
+def suppress_cross_class_duplicates(
+    pred_boxes: np.ndarray,
+    pred_scores: np.ndarray,
+    pred_cls: np.ndarray,
+    class_names: Sequence[str],
+    ios_threshold: float,
+    iou_threshold: float,
+    area_ratio_threshold: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    if len(pred_boxes) <= 1:
+        return pred_boxes, pred_scores, pred_cls, 0
+
+    keep = np.ones((len(pred_boxes),), dtype=bool)
+    order = np.argsort(-pred_scores)
+    suppressed = 0
+
+    for pos_i, i in enumerate(order):
+        if not keep[i]:
+            continue
+        for j in order[pos_i + 1:]:
+            if not keep[j]:
+                continue
+            if int(pred_cls[i]) == int(pred_cls[j]):
+                continue
+
+            area_ratio = box_area_ratio(pred_boxes[i], pred_boxes[j])
+            if area_ratio < area_ratio_threshold:
+                continue
+
+            ios = box_ios_xyxy(pred_boxes[i], pred_boxes[j])
+            if ios < ios_threshold:
+                continue
+
+            iou = box_iou_xyxy(pred_boxes[i], pred_boxes[j])
+            if iou < iou_threshold:
+                continue
+
+            keep[j] = False
+            suppressed += 1
+
+    return pred_boxes[keep], pred_scores[keep], pred_cls[keep], suppressed
+
+
+def leucocyte_score(leu_count: int) -> int:
+    if leu_count < 10:
+        return -1
+    if leu_count <= 25:
+        return 0
+    if leu_count <= 50:
         return 1
     return 2
+
+
+def squamous_epithelial_score(epi_count: int) -> int:
+    if epi_count < 10:
+        return 0
+    if epi_count <= 25:
+        return -1
+    return -2
+
+
+def classify_quality_from_counts(leu_count: int, epi_count: int) -> Tuple[int, int, int, int]:
+    leu_score = leucocyte_score(leu_count)
+    epi_score = squamous_epithelial_score(epi_count)
+    total_score = leu_score + epi_score
+
+    if total_score >= 1 and epi_count < 10:
+        label_id = 1
+    elif total_score <= -1:
+        label_id = 3
+    else:
+        label_id = 2
+    return label_id, leu_score, epi_score, total_score
 
 
 def draw_downstream_overlay(
@@ -410,18 +615,16 @@ def save_downstream_confusion_matrix_plot(path: Path, labels: Sequence[str], cm:
     )
 
     fig, ax = plt.subplots(figsize=(7.5, 6.0))
-    im = ax.imshow(cm_norm, interpolation="nearest", cmap="Blues", vmin=0.0, vmax=1.0)
-    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label("Row-normalized fraction", rotation=90)
+    ax.imshow(cm_norm, interpolation="nearest", cmap="Blues", vmin=0.0, vmax=1.0)
 
     ax.set(
         xticks=np.arange(len(labels)),
         yticks=np.arange(len(labels)),
         xticklabels=list(labels),
         yticklabels=list(labels),
-        xlabel="Predicted class",
-        ylabel="Manual class",
-        title="Downstream Quality Confusion Matrix",
+        xlabel="Predicted quality Assessment",
+        ylabel="Manual quality assessment",
+        title="Downstream Quality Assessment confusion matrix",
     )
     plt.setp(ax.get_xticklabels(), rotation=25, ha="right", rotation_mode="anchor")
 
@@ -473,11 +676,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--postprocess-match-metric", default="IOU", choices=["IOU", "IOS"])
     parser.add_argument("--postprocess-match-threshold", type=float, default=0.50)
     parser.add_argument("--postprocess-class-agnostic", action="store_true")
-    parser.add_argument("--qualified-max-epi", type=int, default=QUALIFIED_MAX_EPI)
-    parser.add_argument("--partial-max-epi", type=int, default=PARTIAL_MAX_EPI)
-    parser.add_argument("--not-qualified-max-leu", type=int, default=NOT_QUALIFIED_MAX_LEU)
-    parser.add_argument("--require-leu-for-qualified", action="store_true", default=REQUIRE_LEU_FOR_QUALIFIED)
-    parser.add_argument("--allow-zero-leu-qualified", dest="require_leu_for_qualified", action="store_false")
+    parser.add_argument("--cross-class-duplicate-suppression", action="store_true", default=CROSS_CLASS_DUPLICATE_SUPPRESSION)
+    parser.add_argument("--disable-cross-class-duplicate-suppression", dest="cross_class_duplicate_suppression", action="store_false")
+    parser.add_argument("--cross-class-duplicate-ios-threshold", type=float, default=CROSS_CLASS_DUPLICATE_IOS_THRESHOLD)
+    parser.add_argument("--cross-class-duplicate-iou-threshold", type=float, default=CROSS_CLASS_DUPLICATE_IOU_THRESHOLD)
+    parser.add_argument("--cross-class-duplicate-area-ratio-threshold", type=float, default=CROSS_CLASS_DUPLICATE_AREA_RATIO_THRESHOLD)
     return parser
 
 
@@ -532,10 +735,10 @@ def resolve_config(args: argparse.Namespace) -> DownstreamConfig:
         postprocess_match_metric=str(args.postprocess_match_metric),
         postprocess_match_threshold=float(args.postprocess_match_threshold),
         postprocess_class_agnostic=bool(args.postprocess_class_agnostic),
-        qualified_max_epi=int(args.qualified_max_epi),
-        partial_max_epi=int(args.partial_max_epi),
-        not_qualified_max_leu=int(args.not_qualified_max_leu),
-        require_leu_for_qualified=bool(args.require_leu_for_qualified),
+        cross_class_duplicate_suppression=bool(args.cross_class_duplicate_suppression),
+        cross_class_duplicate_ios_threshold=float(args.cross_class_duplicate_ios_threshold),
+        cross_class_duplicate_iou_threshold=float(args.cross_class_duplicate_iou_threshold),
+        cross_class_duplicate_area_ratio_threshold=float(args.cross_class_duplicate_area_ratio_threshold),
     )
 
 
@@ -558,6 +761,7 @@ def run_downstream_eval(cfg: DownstreamConfig) -> None:
     print(f"[DOWNSTREAM] Manual labels={cfg.manual_labels_path}")
     print(f"[DOWNSTREAM] Rows to process={len(rows)}")
     print(f"[DOWNSTREAM] Output directory={cfg.output_dir}")
+    print(f"[DOWNSTREAM] Cross-class duplicate suppression={cfg.cross_class_duplicate_suppression}")
 
     ckpt_num_classes, ckpt_class_names = fov_eval.infer_checkpoint_runtime_metadata(cfg.checkpoint)
     effective_class_names = list(ckpt_class_names or cfg.class_names)
@@ -588,6 +792,7 @@ def run_downstream_eval(cfg: DownstreamConfig) -> None:
     result_rows: List[Dict[str, Any]] = []
     manual_ids: List[int] = []
     pred_ids: List[int] = []
+    total_cross_class_duplicates_suppressed = 0
 
     for idx, row in enumerate(rows, start=1):
         if idx == 1 or (idx % cfg.progress_every) == 0 or idx == len(rows):
@@ -634,11 +839,24 @@ def run_downstream_eval(cfg: DownstreamConfig) -> None:
         kept_boxes = pred_boxes[keep]
         kept_scores = pred_scores[keep]
         kept_cls = pred_cls[keep]
+        n_kept_before_duplicate_suppression = int(len(kept_boxes))
+        n_cross_class_duplicates_suppressed = 0
+        if cfg.cross_class_duplicate_suppression:
+            kept_boxes, kept_scores, kept_cls, n_cross_class_duplicates_suppressed = suppress_cross_class_duplicates(
+                kept_boxes,
+                kept_scores,
+                kept_cls,
+                effective_class_names,
+                cfg.cross_class_duplicate_ios_threshold,
+                cfg.cross_class_duplicate_iou_threshold,
+                cfg.cross_class_duplicate_area_ratio_threshold,
+            )
+            total_cross_class_duplicates_suppressed += int(n_cross_class_duplicates_suppressed)
 
         count_map = count_class_predictions(kept_cls, effective_class_names)
         leu_count = int(count_map.get("Leucocyte", 0))
         epi_count = int(count_map.get("Squamous Epithelial Cell", 0))
-        predicted_label_id = classify_quality_from_counts(leu_count, epi_count, cfg)
+        predicted_label_id, leu_score, epi_score, total_score = classify_quality_from_counts(leu_count, epi_count)
         manual_label_id = int(row["manual_label_id"])
 
         rel_path = fov_eval.safe_relpath(image_path, cfg.images_root)
@@ -652,7 +870,12 @@ def run_downstream_eval(cfg: DownstreamConfig) -> None:
                 "predicted_label": DOWNSTREAM_LABELS[predicted_label_id],
                 "n_leucocyte": leu_count,
                 "n_squamous_epithelial_cell": epi_count,
+                "leucocyte_score": leu_score,
+                "squamous_epithelial_score": epi_score,
+                "total_quality_score": total_score,
                 "n_predictions_raw": int(len(pred_boxes)),
+                "n_predictions_kept_before_duplicate_suppression": n_kept_before_duplicate_suppression,
+                "n_cross_class_duplicates_suppressed": int(n_cross_class_duplicates_suppressed),
                 "n_predictions_kept": int(len(kept_boxes)),
             }
         )
@@ -696,16 +919,35 @@ def run_downstream_eval(cfg: DownstreamConfig) -> None:
             "class_names": effective_class_names,
             "class_score_thresholds": effective_class_score_thresholds,
             "quality_rule": {
-                "qualified_max_epi": cfg.qualified_max_epi,
-                "partial_max_epi": cfg.partial_max_epi,
-                "not_qualified_max_leu": cfg.not_qualified_max_leu,
-                "require_leu_for_qualified": cfg.require_leu_for_qualified,
+                "leucocyte_score": {
+                    "<10": -1,
+                    "10-25": 0,
+                    "26-50": 1,
+                    ">50": 2,
+                },
+                "squamous_epithelial_score": {
+                    "<10": 0,
+                    "10-25": -1,
+                    ">25": -2,
+                },
+                "classification": {
+                    "Qualified": "total_score >= 1 and squamous_epithelial_count < 10",
+                    "Partially qualified": "all other intermediate combinations",
+                    "Not qualified": "total_score <= -1",
+                },
             },
             "postprocess": {
                 "type": cfg.postprocess_type,
                 "match_metric": cfg.postprocess_match_metric,
                 "match_threshold": cfg.postprocess_match_threshold,
                 "class_agnostic": cfg.postprocess_class_agnostic,
+            },
+            "cross_class_duplicate_suppression": {
+                "enabled": cfg.cross_class_duplicate_suppression,
+                "ios_threshold": cfg.cross_class_duplicate_ios_threshold,
+                "iou_threshold": cfg.cross_class_duplicate_iou_threshold,
+                "area_ratio_threshold": cfg.cross_class_duplicate_area_ratio_threshold,
+                "total_suppressed": total_cross_class_duplicates_suppressed,
             },
             "n_images": len(result_rows),
             "metrics": summary,
