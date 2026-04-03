@@ -622,11 +622,12 @@ def save_downstream_confusion_matrix_plot(path: Path, labels: Sequence[str], cm:
         yticks=np.arange(len(labels)),
         xticklabels=list(labels),
         yticklabels=list(labels),
-        xlabel="Predicted quality Assessment",
-        ylabel="Manual quality assessment",
         title="Downstream Quality Assessment confusion matrix",
     )
     plt.setp(ax.get_xticklabels(), rotation=25, ha="right", rotation_mode="anchor")
+    plt.setp(ax.get_yticklabels(), rotation=25, ha="right", va="center", rotation_mode="anchor")
+    ax.set_xlabel("Predicted quality assessment")
+    ax.set_ylabel("Manual quality assessment", labelpad=8)
 
     for i in range(cm.shape[0]):
         for j in range(cm.shape[1]):
