@@ -619,7 +619,7 @@ def main():
         print("[WARN] No target classes found in base split; nothing to train.")
         return
 
-    model_cls_name = os.getenv("RFDETR_MODEL_CLS", "RFDETRLarge").strip() or "RFDETRLarge"
+    model_cls_name = os.getenv("RFDETR_MODEL_CLS", "RFDETR2XLarge").strip() or "RFDETR2XLarge"
     model_resolution_default = int(
         os.getenv(
             "RFDETR_MODEL_RESOLUTION",
@@ -632,8 +632,8 @@ def main():
         MODEL_CLS=model_cls_name,
         RESOLUTION=model_resolution_default,
         EPOCHS=220,
-        LR=1e-4,
-        LR_ENCODER_MULT=0.15,
+        LR=7e-5,
+        LR_ENCODER_MULT=0.10,
         BATCH=8,
         NUM_QUERIES=300,
         WARMUP_STEPS=1500,
@@ -648,7 +648,7 @@ def main():
         MODEL_CLS=model_cls_name,
         RESOLUTION=model_resolution_default,
         EPOCHS=320,  # train longer; small objs converge slower
-        LR=8e-5,  # a tad lower when upscaling & training longer
+        LR=6e-5,  # slightly lower for 2XL full-resolution runs
         LR_ENCODER_MULT=0.10,  # keep encoder a bit more stable
         BATCH=6,  # larger images ⇒ smaller batch to avoid OOM
         NUM_QUERIES=600,  # more slots helps recall on many tiny objs

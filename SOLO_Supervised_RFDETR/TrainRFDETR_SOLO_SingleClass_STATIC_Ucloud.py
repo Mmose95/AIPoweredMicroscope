@@ -13,7 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from rfdetr_model_registry import canonical_rfdetr_model_name, instantiate_rfdetr_model, resolve_rfdetr_model_class
+from rfdetr_model_registry import canonical_rfdetr_model_name, default_rfdetr_resolution, instantiate_rfdetr_model, resolve_rfdetr_model_class
 
 # ───────────────────────────────────────────────────────────────────────────────
 # TOGGLES
@@ -45,6 +45,10 @@ HPO_TARGET = _normalize_hpo_target(os.environ.get("RFDETR_HPO_TARGET", "all"))
 TWO_CLASS_TARGET_NAME = "TwoClass"
 TWO_CLASS_CLASS_NAMES = ["Leucocyte", "Squamous Epithelial Cell"]
 BACKBONE_BLOCK_SIZE = 56
+DEFAULT_UCLOUD_MODEL_CLS = "RFDETR2XLarge"
+DEFAULT_UCLOUD_FULL_RESOLUTION = int(
+    default_rfdetr_resolution(DEFAULT_UCLOUD_MODEL_CLS, 880) or 880
+)
 
 def _is_main_process() -> bool:
     try:
@@ -88,9 +92,19 @@ def _resolve_input_mode() -> tuple[bool, str, int, int]:
         return use_patch, str(mode_size), patch_size, full_resolution
 
     # Backward-compatible path: keep old env behavior if RFDETR_INPUT_MODE is unset.
-    use_patch = bool(int(os.getenv("RFDETR_USE_PATCH_224", "1")))
+    # For the B200/2XL default path we prefer full-image mode at the model's native resolution.
+    default_model_cls = canonical_rfdetr_model_name(
+        os.getenv("RFDETR_MODEL_CLS", DEFAULT_UCLOUD_MODEL_CLS).strip() or DEFAULT_UCLOUD_MODEL_CLS,
+        default=DEFAULT_UCLOUD_MODEL_CLS,
+    )
+    default_full_resolution = int(
+        default_rfdetr_resolution(default_model_cls, DEFAULT_UCLOUD_FULL_RESOLUTION)
+        or DEFAULT_UCLOUD_FULL_RESOLUTION
+    )
+    default_use_patch = "0" if default_model_cls == "RFDETR2XLarge" else "1"
+    use_patch = bool(int(os.getenv("RFDETR_USE_PATCH_224", default_use_patch)))
     patch_size = int(os.getenv("RFDETR_PATCH_SIZE", "224"))
-    full_resolution = int(os.getenv("RFDETR_FULL_RESOLUTION", "640"))
+    full_resolution = int(os.getenv("RFDETR_FULL_RESOLUTION", str(default_full_resolution)))
     return use_patch, (str(patch_size) if use_patch else "640"), patch_size, full_resolution
 
 # If RFDETR_INPUT_MODE != 640 we run patch mode with patch size = int(RFDETR_INPUT_MODE).
@@ -2091,7 +2105,7 @@ SEARCH_RESOLUTION = PATCH_SIZE if USE_PATCH_224 else FULL_RESOLUTION
 
 MATRIX_QUICK_DEFAULTS_SHARED = {
     # Shared matrix controls
-    "RFDETR_MODEL_CLS": "RFDETRLarge",
+    "RFDETR_MODEL_CLS": DEFAULT_UCLOUD_MODEL_CLS,
     # Init regimes:
     # - default: RF-DETR default pretrained weights
     # - scratch: no pretraining
@@ -2114,8 +2128,8 @@ MATRIX_QUICK_DEFAULTS_SHARED = {
     "RFDETR_EARLY_STOPPING_MIN_DELTA": "0.001",
     "RFDETR_EARLY_STOPPING_USE_EMA": "0",
     # Optional optimizer/backbone overrides for all matrix runs.
-    "RFDETR_LR_ENCODER": "",
-    "RFDETR_WARMUP_EPOCHS": "",
+    "RFDETR_LR_ENCODER": "6e-6",
+    "RFDETR_WARMUP_EPOCHS": "1.0",
     "RFDETR_FREEZE_ENCODER": "",
     # SSL triage defaults (used when RFDETR_EXPERIMENT_MODE=ssl_triage).
     "RFDETR_SSL_TRIAGE_LR_ENCODER": "1e-5",
@@ -2126,23 +2140,23 @@ MATRIX_QUICK_DEFAULTS_SHARED = {
 MATRIX_QUICK_DEFAULTS_EPI = {
     "RFDETR_EPI_EPOCHS": "50",
     "RFDETR_EPI_LR": "5e-5",
-    "RFDETR_EPI_NUM_QUERIES": "120",
+    "RFDETR_EPI_NUM_QUERIES": "300",
     "RFDETR_EPI_EARLY_STOPPING_METRIC": "map5095",
     "RFDETR_EPI_SSL_CKPT": "",
 }
 
 MATRIX_QUICK_DEFAULTS_LEU = {
     "RFDETR_LEU_EPOCHS": "120",
-    "RFDETR_LEU_LR": "8e-5",
-    "RFDETR_LEU_NUM_QUERIES": "400",
+    "RFDETR_LEU_LR": "6e-5",
+    "RFDETR_LEU_NUM_QUERIES": "600",
     "RFDETR_LEU_EARLY_STOPPING_METRIC": "map50",
     "RFDETR_LEU_SSL_CKPT": "",
 }
 
 MATRIX_QUICK_DEFAULTS_TWO_CLASS = {
     "RFDETR_TWO_CLASS_EPOCHS": "120",
-    "RFDETR_TWO_CLASS_LR": "8e-5",
-    "RFDETR_TWO_CLASS_NUM_QUERIES": "400",
+    "RFDETR_TWO_CLASS_LR": "6e-5",
+    "RFDETR_TWO_CLASS_NUM_QUERIES": "600",
     "RFDETR_TWO_CLASS_EARLY_STOPPING_METRIC": "map5095",
     "RFDETR_TWO_CLASS_SSL_CKPT": "",
 }
@@ -2155,6 +2169,16 @@ MATRIX_QUICK_DEFAULTS = {
 }
 
 def _matrix_dynamic_defaults() -> dict:
+    model_cls_name = canonical_rfdetr_model_name(
+        os.getenv("RFDETR_MODEL_CLS", DEFAULT_UCLOUD_MODEL_CLS).strip() or DEFAULT_UCLOUD_MODEL_CLS,
+        default=DEFAULT_UCLOUD_MODEL_CLS,
+    )
+    if not USE_PATCH_224 and model_cls_name == "RFDETR2XLarge":
+        return {
+            "RFDETR_EPI_BATCH": "8",
+            "RFDETR_LEU_BATCH": "6",
+            "RFDETR_TWO_CLASS_BATCH": "6",
+        }
     default_batch = 16 if USE_PATCH_224 else 4
     return {
         "RFDETR_EPI_BATCH": str(default_batch),
