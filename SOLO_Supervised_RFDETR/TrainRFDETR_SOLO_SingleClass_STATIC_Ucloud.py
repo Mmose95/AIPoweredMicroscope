@@ -23,8 +23,26 @@ from rfdetr_model_registry import canonical_rfdetr_model_name, default_rfdetr_re
 #  - "epi"       -> only Squamous Epithelial Cell
 #  - "all"       -> sequential single-class runs for both
 #  - "two-class" -> one joint detector for both classes
+DEFAULT_HPO_TARGET = "two-class"
+DEFAULT_UCLOUD_MODEL_CLS = "RFDETR2XLarge"
+DEFAULT_UCLOUD_FULL_RESOLUTION = int(
+    default_rfdetr_resolution(DEFAULT_UCLOUD_MODEL_CLS, 880) or 880
+)
+
+def _env_is_set(name: str) -> bool:
+    return os.getenv(name, "").strip() != ""
+
+
+def _env_truthy(name: str, default: str = "0") -> bool:
+    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+PREFER_BEST_2XL_DEFAULTS = _env_truthy("RFDETR_PREFER_BEST_DEFAULTS", "1")
+ALLOW_SUBDEFAULT_RESOLUTION = _env_truthy("RFDETR_ALLOW_SUBDEFAULT_RESOLUTION", "0")
+ALLOW_LEGACY_PATCH_DEFAULTS = _env_truthy("RFDETR_ALLOW_LEGACY_PATCH_DEFAULTS", "0")
+
 def _normalize_hpo_target(raw: str) -> str:
-    value = (raw or "two-class").strip().lower()
+    value = (raw or DEFAULT_HPO_TARGET).strip().lower()
     aliases = {
         "both": "all",
         "two_class": "two-class",
@@ -40,15 +58,10 @@ def _normalize_hpo_target(raw: str) -> str:
         )
     return value
 
-
-HPO_TARGET = _normalize_hpo_target(os.environ.get("RFDETR_HPO_TARGET", "two-class"))
+HPO_TARGET = _normalize_hpo_target(os.environ.get("RFDETR_HPO_TARGET", DEFAULT_HPO_TARGET))
 TWO_CLASS_TARGET_NAME = "TwoClass"
 TWO_CLASS_CLASS_NAMES = ["Leucocyte", "Squamous Epithelial Cell"]
 BACKBONE_BLOCK_SIZE = 56
-DEFAULT_UCLOUD_MODEL_CLS = "RFDETR2XLarge"
-DEFAULT_UCLOUD_FULL_RESOLUTION = int(
-    default_rfdetr_resolution(DEFAULT_UCLOUD_MODEL_CLS, 880) or 880
-)
 
 def _is_main_process() -> bool:
     try:
@@ -101,10 +114,34 @@ def _resolve_input_mode() -> tuple[bool, str, int, int]:
         default_rfdetr_resolution(default_model_cls, DEFAULT_UCLOUD_FULL_RESOLUTION)
         or DEFAULT_UCLOUD_FULL_RESOLUTION
     )
-    default_use_patch = "0" if default_model_cls == "RFDETR2XLarge" else "1"
-    use_patch = bool(int(os.getenv("RFDETR_USE_PATCH_224", default_use_patch)))
+    prefer_best_full_mode = PREFER_BEST_2XL_DEFAULTS and default_model_cls == DEFAULT_UCLOUD_MODEL_CLS
+
+    legacy_patch_env_set = _env_is_set("RFDETR_USE_PATCH_224") or _env_is_set("RFDETR_PATCH_SIZE")
+    if prefer_best_full_mode and legacy_patch_env_set and not ALLOW_LEGACY_PATCH_DEFAULTS:
+        _main_print(
+            "[INPUT MODE][WARN] Ignoring legacy RFDETR_USE_PATCH_224/RFDETR_PATCH_SIZE "
+            "to favor full-image 2XL defaults. Set RFDETR_INPUT_MODE explicitly to override."
+        )
+        use_patch = False
+    else:
+        default_use_patch = "0" if default_model_cls == DEFAULT_UCLOUD_MODEL_CLS else "1"
+        use_patch = bool(int(os.getenv("RFDETR_USE_PATCH_224", default_use_patch)))
+
     patch_size = int(os.getenv("RFDETR_PATCH_SIZE", "224"))
-    full_resolution = int(os.getenv("RFDETR_FULL_RESOLUTION", str(default_full_resolution)))
+    requested_full_resolution = int(os.getenv("RFDETR_FULL_RESOLUTION", str(default_full_resolution)))
+    if (
+        prefer_best_full_mode
+        and requested_full_resolution < default_full_resolution
+        and not ALLOW_SUBDEFAULT_RESOLUTION
+    ):
+        _main_print(
+            f"[INPUT MODE][WARN] RFDETR_FULL_RESOLUTION={requested_full_resolution} is below the "
+            f"2XL default {default_full_resolution}; using {default_full_resolution}. "
+            "Set RFDETR_ALLOW_SUBDEFAULT_RESOLUTION=1 to keep lower values."
+        )
+        full_resolution = default_full_resolution
+    else:
+        full_resolution = requested_full_resolution
     return use_patch, (str(patch_size) if use_patch else "640"), patch_size, full_resolution
 
 # If RFDETR_INPUT_MODE != 640 we run patch mode with patch size = int(RFDETR_INPUT_MODE).
@@ -1755,6 +1792,20 @@ def train_one_run(target_name: str,
     else:
         model = instantiate_rfdetr_model(model_cls)
 
+    if not USE_PATCH_224:
+        cfg = getattr(model, "model_config", None)
+        cfg_patch = int(getattr(cfg, "patch_size", 0) or 0)
+        cfg_windows = int(getattr(cfg, "num_windows", 0) or 0)
+        required_multiple = cfg_patch * cfg_windows if (cfg_patch > 0 and cfg_windows > 0) else BACKBONE_BLOCK_SIZE
+        if required_multiple > 0 and resolution % required_multiple != 0:
+            old = resolution
+            resolution = _round_up_to_multiple(resolution, required_multiple)
+            print(
+                f"[INPUT MODE][WARN] Full-mode resolution {old} is not divisible by "
+                f"model patch_size*num_windows={cfg_patch}*{cfg_windows}={required_multiple}; "
+                f"using {resolution}."
+            )
+
     ssl_load_report = None
     if backbone_ckpt is not None:
         ssl_load_report = load_ssl_backbone_into_rfdetr_model(
@@ -1850,7 +1901,7 @@ def train_one_run(target_name: str,
             "num_windows",
             int(getattr(getattr(model, "model_config", None), "num_windows", 4) or 4),
         )
-    kwargs["full_resolution"] = None if USE_PATCH_224 else FULL_RESOLUTION
+    kwargs["full_resolution"] = None if USE_PATCH_224 else resolution
     (meta / "train_kwargs.json").write_text(json.dumps(kwargs, indent=2), encoding="utf-8")
     (meta / "dataset_info.json").write_text(json.dumps({
         "dataset_dir_original": str(dataset_dir),
@@ -2120,11 +2171,11 @@ MATRIX_QUICK_DEFAULTS_SHARED = {
     "RFDETR_GRAD_ACCUM_STEPS": "1",
     "RFDETR_WEIGHT_DECAY": "7e-4",
     "RFDETR_DROPOUT": "0.15",
-    "RFDETR_MULTI_SCALE": "0",
+    "RFDETR_MULTI_SCALE": "1",
     "RFDETR_EXPANDED_SCALES": "0",
     "RFDETR_AUG_COPIES": "0",
     "RFDETR_EARLY_STOPPING": "1",
-    "RFDETR_EARLY_STOPPING_PATIENCE": "10",
+    "RFDETR_EARLY_STOPPING_PATIENCE": "15",
     "RFDETR_EARLY_STOPPING_MIN_DELTA": "0.001",
     "RFDETR_EARLY_STOPPING_USE_EMA": "0",
     # Optional optimizer/backbone overrides for all matrix runs.
