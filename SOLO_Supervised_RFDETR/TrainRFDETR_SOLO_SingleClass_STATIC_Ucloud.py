@@ -2433,8 +2433,8 @@ MATRIX_QUICK_DEFAULTS_LEU = {
 
 MATRIX_QUICK_DEFAULTS_TWO_CLASS = {
     "RFDETR_TWO_CLASS_EPOCHS": "120",
-    "RFDETR_TWO_CLASS_LR": "6e-5",
-    "RFDETR_TWO_CLASS_NUM_QUERIES": "600",
+    "RFDETR_TWO_CLASS_LR": "5e-5",
+    "RFDETR_TWO_CLASS_NUM_QUERIES": "400",
     "RFDETR_TWO_CLASS_EARLY_STOPPING_METRIC": "map5095",
     "RFDETR_TWO_CLASS_SSL_CKPT": "",
 }
@@ -2477,8 +2477,7 @@ def _cfg_text(name: str) -> str:
         legacy_upgrade_map = {
             "RFDETR_EPI_NUM_QUERIES": ("120", "300"),
             "RFDETR_LEU_NUM_QUERIES": ("400", "600"),
-            "RFDETR_TWO_CLASS_LR": ("8e-5", "6e-5"),
-            "RFDETR_TWO_CLASS_NUM_QUERIES": ("400", "600"),
+            "RFDETR_TWO_CLASS_LR": ("8e-5", "5e-5"),
         }
         old_new = legacy_upgrade_map.get(name)
         if old_new is not None and value == old_new[0]:
