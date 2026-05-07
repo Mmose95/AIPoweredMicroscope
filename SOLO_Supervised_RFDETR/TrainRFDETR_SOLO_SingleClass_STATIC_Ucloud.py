@@ -24,7 +24,7 @@ from rfdetr_model_registry import canonical_rfdetr_model_name, default_rfdetr_re
 #  - "all"       -> sequential single-class runs for both
 #  - "two-class" -> one joint detector for both classes
 def _normalize_hpo_target(raw: str) -> str:
-    value = (raw or "all").strip().lower()
+    value = (raw or "two-class").strip().lower()
     aliases = {
         "both": "all",
         "two_class": "two-class",
@@ -41,7 +41,7 @@ def _normalize_hpo_target(raw: str) -> str:
     return value
 
 
-HPO_TARGET = _normalize_hpo_target(os.environ.get("RFDETR_HPO_TARGET", "all"))
+HPO_TARGET = _normalize_hpo_target(os.environ.get("RFDETR_HPO_TARGET", "two-class"))
 TWO_CLASS_TARGET_NAME = "TwoClass"
 TWO_CLASS_CLASS_NAMES = ["Leucocyte", "Squamous Epithelial Cell"]
 BACKBONE_BLOCK_SIZE = 56
