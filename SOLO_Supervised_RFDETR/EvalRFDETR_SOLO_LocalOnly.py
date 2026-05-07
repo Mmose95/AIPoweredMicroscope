@@ -143,6 +143,17 @@ except Exception:
     precision_recall_curve = None  # type: ignore[assignment]
     roc_curve = None  # type: ignore[assignment]
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from rfdetr_model_registry import (
+    infer_rfdetr_model_name_from_checkpoint_name,
+    instantiate_rfdetr_model,
+    supported_rfdetr_model_names,
+    SUPPORTED_RFDETR_MODEL_NAME_SET,
+)
+
 
 @dataclass
 class LocalEvalConfig:
@@ -459,17 +470,13 @@ def infer_model_class(model_meta_root: Path, checkpoint: Path) -> str:
         try:
             js = json.loads(meta_model.read_text(encoding="utf-8"))
             name = str(js.get("model_name", "")).strip()
-            if name in {"RFDETRSmall", "RFDETRMedium", "RFDETRLarge"}:
+            if name in SUPPORTED_RFDETR_MODEL_NAME_SET:
                 return name
         except Exception:
             pass
 
     ckpt_name = checkpoint.name.lower()
-    if "small" in ckpt_name:
-        return "RFDETRSmall"
-    if "medium" in ckpt_name:
-        return "RFDETRMedium"
-    return "RFDETRLarge"
+    return infer_rfdetr_model_name_from_checkpoint_name(ckpt_name)
 
 
 def infer_model_resolution(checkpoint: Path) -> Optional[int]:
@@ -507,20 +514,10 @@ def infer_model_resolution(checkpoint: Path) -> Optional[int]:
 
 def load_model(model_class: str, checkpoint: Path, resolution: Optional[int]):
     ensure_rfdetr_import()
-    from rfdetr import RFDETRSmall, RFDETRMedium, RFDETRLarge
-
-    name_to_cls = {
-        "RFDETRSmall": RFDETRSmall,
-        "RFDETRMedium": RFDETRMedium,
-        "RFDETRLarge": RFDETRLarge,
-    }
-    if model_class not in name_to_cls:
-        raise ValueError(f"Unsupported model_class={model_class}")
-
     kwargs: Dict[str, Any] = {"pretrain_weights": str(checkpoint)}
     if resolution is not None:
         kwargs["resolution"] = int(resolution)
-    model = name_to_cls[model_class](**kwargs)
+    model = instantiate_rfdetr_model(model_class, **kwargs)
     if hasattr(model, "optimize_for_inference"):
         try:
             model.optimize_for_inference()
@@ -1884,7 +1881,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Optional custom target display name; overrides --target when provided.",
     )
-    p.add_argument("--model-class", type=str, default="auto", choices=["auto", "RFDETRSmall", "RFDETRMedium", "RFDETRLarge"])
+    p.add_argument("--model-class", type=str, default="auto", choices=supported_rfdetr_model_names(include_auto=True))
 
     p.add_argument("--score-floor", type=float, default=0.001, help="Prediction floor retained for curves/AP.")
     p.add_argument("--score-threshold", type=float, default=0.30, help="Threshold used for confusion matrix/overlays.")

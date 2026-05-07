@@ -25,13 +25,14 @@ from tqdm import tqdm
 # --- pip install: pycocotools matplotlib numpy pillow torch tqdm ---
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
-from rfdetr import RFDETRSmall, RFDETRMedium, RFDETRLarge
+from rfdetr_model_registry import instantiate_rfdetr_model
 
 # ====== USER INPUTS ======
 RunName = "dataset_coco_splits_20251030-103504_Base_AllClasses_Leucocyte"
 CHECKPOINT = "./RFDETR_SOLO_OUTPUT/" + RunName + "/rfdetr_run/checkpoint_best_total.pth"
 TEST_JSON  = Path(r"./RFDETR_SOLO_OUTPUT/" + RunName + "/test/_annotations.coco.json")
 OUT_DIR    = Path("SOLO_Supervised_RFDETR/rfdeval_out") / RunName
+MODEL_CLASS = os.getenv("RFDETR_MODEL_CLS", "RFDETRLarge").strip() or "RFDETRLarge"
 SCORE_THRESH = 0.30     # confidence threshold for predictions & confusion/overlays
 IOU_FOR_CONFMAT = 0.50  # IoU threshold used to match GT<->Pred for confusion matrix
 MAX_IMAGES = None       # set e.g. 200 to evaluate on subset for speed
@@ -324,7 +325,7 @@ def main():
 
     # Load model
 
-    model = RFDETRLarge(pretrain_weights=CHECKPOINT)
+    model = instantiate_rfdetr_model(MODEL_CLASS, pretrain_weights=CHECKPOINT)
     #if hasattr(model, "optimize_for_inference"):
         #model.optimize_for_inference()
 

@@ -9,6 +9,12 @@ import os, sys, json, glob, os.path as op, time, csv, re, random, subprocess
 from collections import defaultdict as ddict
 from PIL import Image
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from rfdetr_model_registry import instantiate_rfdetr_model
+
 
 # ───────────────────────────────────────────────────────────────────────────────
 # TOGGLES
@@ -986,11 +992,7 @@ def _build_probe_row(
 
 
 def train_one_run(target_name: str, dataset_dir_effective: Path, out_dir: Path, backbone_ckpt: str) -> dict:
-    from rfdetr import RFDETRSmall, RFDETRMedium, RFDETRLarge
-    name2cls = {"RFDETRSmall": RFDETRSmall, "RFDETRMedium": RFDETRMedium, "RFDETRLarge": RFDETRLarge}
-    model_cls = name2cls[STATIC_CFG["MODEL_CLS"]]
-
-    model = model_cls(pretrain_weights=None)
+    model = instantiate_rfdetr_model(STATIC_CFG["MODEL_CLS"], pretrain_weights=None)
     ssl_load_report = load_ssl_backbone_into_rfdetr_model(
         model=model,
         ssl_ckpt=backbone_ckpt,

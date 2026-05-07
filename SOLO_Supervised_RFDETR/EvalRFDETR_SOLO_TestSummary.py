@@ -38,6 +38,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from rfdetr_model_registry import (
+    SUPPORTED_RFDETR_MODEL_NAME_SET,
+    infer_rfdetr_model_name_from_checkpoint_name,
+    instantiate_rfdetr_model,
+    supported_rfdetr_model_names,
+)
+
 # -----------------------------------------------------------------------------
 # Optional top-level config for running directly from PyCharm
 # -----------------------------------------------------------------------------
@@ -485,7 +496,7 @@ def infer_model_class(run_dir: Path, checkpoint: Path) -> str:
         try:
             js = json.loads(meta_model.read_text(encoding="utf-8"))
             name = str(js.get("model_name", "")).strip()
-            if name in {"RFDETRSmall", "RFDETRMedium", "RFDETRLarge"}:
+            if name in SUPPORTED_RFDETR_MODEL_NAME_SET:
                 return name
         except Exception:
             pass
@@ -495,34 +506,16 @@ def infer_model_class(run_dir: Path, checkpoint: Path) -> str:
         try:
             js = json.loads(meta_train.read_text(encoding="utf-8"))
             name = str(js.get("RFDETR_MODEL_CLS", "")).strip()
-            if name in {"RFDETRSmall", "RFDETRMedium", "RFDETRLarge"}:
+            if name in SUPPORTED_RFDETR_MODEL_NAME_SET:
                 return name
         except Exception:
             pass
 
-    ckpt_name = checkpoint.name.lower()
-    if "small" in ckpt_name:
-        return "RFDETRSmall"
-    if "medium" in ckpt_name:
-        return "RFDETRMedium"
-    return "RFDETRLarge"
+    return infer_rfdetr_model_name_from_checkpoint_name(checkpoint.name.lower())
 
 
 def load_model(model_class: str, checkpoint: Path):
-    from rfdetr import RFDETRLarge, RFDETRMedium, RFDETRSmall
-
-    name_to_cls = {
-        "RFDETRSmall": RFDETRSmall,
-        "RFDETRMedium": RFDETRMedium,
-        "RFDETRLarge": RFDETRLarge,
-    }
-    if model_class not in name_to_cls:
-        raise ValueError(
-            f"Unsupported model class '{model_class}'. "
-            f"Expected one of {sorted(name_to_cls)}."
-        )
-
-    model = name_to_cls[model_class](pretrain_weights=str(checkpoint))
+    model = instantiate_rfdetr_model(model_class, pretrain_weights=str(checkpoint))
     if hasattr(model, "optimize_for_inference"):
         try:
             model.optimize_for_inference()
@@ -1464,7 +1457,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--model-class",
         type=str,
         default=os.getenv("EVAL_MODEL_CLASS", "auto"),
-        choices=["auto", "RFDETRSmall", "RFDETRMedium", "RFDETRLarge"],
+        choices=supported_rfdetr_model_names(include_auto=True),
     )
     p_eval.add_argument("--score-floor", type=float, default=float(os.getenv("EVAL_SCORE_FLOOR", "0.001")))
     p_eval.add_argument("--score-threshold", type=float, default=float(os.getenv("EVAL_SCORE_THRESHOLD", "0.30")))

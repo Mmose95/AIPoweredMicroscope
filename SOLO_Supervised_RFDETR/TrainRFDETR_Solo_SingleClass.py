@@ -6,7 +6,11 @@ import json, random, sys, re, csv
 from inspect import signature
 import os
 
-from rfdetr import RFDETRSmall, RFDETRLarge, RFDETRMedium
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from rfdetr_model_registry import default_rfdetr_resolution, instantiate_rfdetr_model
 
 # ====== YOUR PATHS ======
 ALL_COCO_JSON = Path(r"D:\PHD\PhdData\CellScanData\Annotation_Backups\Quality Assessment Backups\27-10-2025\annotations\instances_default.json")
@@ -448,9 +452,14 @@ def main():
         return
 
     # Choose model class & resolution (Large needs 56-divisible → 672)
-    MODEL_CLS = RFDETRMedium
+    MODEL_CLS = os.getenv("RFDETR_MODEL_CLS", "RFDETRMedium").strip() or "RFDETRMedium"
 
-    RESOLUTION = 640  # keep 672 for RFDETRLarge (divisible by 56). Use 640 for Medium/Small.
+    RESOLUTION = int(
+        os.getenv(
+            "RFDETR_RESOLUTION",
+            str(default_rfdetr_resolution(MODEL_CLS, 640) or 640),
+        )
+    )
 
     for spec in active_targets:
         target_name = spec["name"]
@@ -467,7 +476,7 @@ def main():
         class_names = [target_name]
 
         # Build kwargs safely (only pass what this rfdetr build supports)
-        model = MODEL_CLS()
+        model = instantiate_rfdetr_model(MODEL_CLS)
         sig = signature(model.train)
         can = set(sig.parameters.keys())
         ws = world_size()

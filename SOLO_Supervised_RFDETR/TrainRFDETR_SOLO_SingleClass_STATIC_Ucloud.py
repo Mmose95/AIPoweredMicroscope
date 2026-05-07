@@ -2,12 +2,18 @@ from __future__ import annotations
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
-import os, json, glob, os.path as op, itertools, time, csv, multiprocessing as mp, shutil
+import os, sys, json, glob, os.path as op, itertools, time, csv, multiprocessing as mp, shutil
 import re
 import random
 from collections import defaultdict as ddict
 from PIL import Image
 import numpy as np
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from rfdetr_model_registry import canonical_rfdetr_model_name, instantiate_rfdetr_model, resolve_rfdetr_model_class
 
 # ───────────────────────────────────────────────────────────────────────────────
 # TOGGLES
@@ -1729,11 +1735,11 @@ def train_one_run(target_name: str,
     # - ssl: no detector pretrain + explicit SSL backbone load below.
     if init_mode in ("scratch", "ssl"):
         try:
-            model = model_cls(pretrain_weights=None)
+            model = instantiate_rfdetr_model(model_cls, pretrain_weights=None)
         except TypeError:
-            model = model_cls()
+            model = instantiate_rfdetr_model(model_cls)
     else:
-        model = model_cls()
+        model = instantiate_rfdetr_model(model_cls)
 
     ssl_load_report = None
     if backbone_ckpt is not None:
@@ -2699,17 +2705,9 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
         torch.cuda.set_device(0)  # within this worker, the masked GPU is cuda:0
 
         # Import model classes AFTER masking
-        from rfdetr import RFDETRSmall, RFDETRMedium, RFDETRLarge
-        name2cls = {
-            "RFDETRSmall": RFDETRSmall,
-            "RFDETRMedium": RFDETRMedium,
-            "RFDETRLarge": RFDETRLarge,
-        }
         mc = cfg["MODEL_CLS"]
-        if isinstance(mc, str):
-            model_cls = name2cls[mc]
-        else:
-            model_cls = name2cls.get(getattr(mc, "__name__", "RFDETRLarge"), RFDETRLarge)
+        model_name = canonical_rfdetr_model_name(mc)
+        model_cls = resolve_rfdetr_model_class(model_name)
 
         vis = os.environ.get("CUDA_VISIBLE_DEVICES", "")
         cur = torch.cuda.current_device()

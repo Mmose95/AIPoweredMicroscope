@@ -9,8 +9,11 @@ import numpy as np
 import albumentations as A
 
 
-# Models
-from rfdetr import RFDETRSmall, RFDETRMedium, RFDETRLarge
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from rfdetr_model_registry import default_rfdetr_resolution, instantiate_rfdetr_model
 
 # ====== YOUR PATHS / UCloud detection ======
 def _detect_user_base() -> str | None:
@@ -616,10 +619,18 @@ def main():
         print("[WARN] No target classes found in base split; nothing to train.")
         return
 
+    model_cls_name = os.getenv("RFDETR_MODEL_CLS", "RFDETRLarge").strip() or "RFDETRLarge"
+    model_resolution_default = int(
+        os.getenv(
+            "RFDETR_MODEL_RESOLUTION",
+            str(default_rfdetr_resolution(model_cls_name, 672) or 672),
+        )
+    )
+
     #Deviding hyperparameter into a set for each object
     Epithelial_Hyperparameters = dict(
-        MODEL_CLS=RFDETRLarge,
-        RESOLUTION=672,  # epithelial scale
+        MODEL_CLS=model_cls_name,
+        RESOLUTION=model_resolution_default,
         EPOCHS=220,
         LR=1e-4,
         LR_ENCODER_MULT=0.15,
@@ -634,8 +645,8 @@ def main():
     )
 
     Leucocyte_Hyperparameters = dict(
-        MODEL_CLS=RFDETRLarge,
-        RESOLUTION=672,  # make leucocytes bigger in pixels
+        MODEL_CLS=model_cls_name,
+        RESOLUTION=model_resolution_default,
         EPOCHS=320,  # train longer; small objs converge slower
         LR=8e-5,  # a tad lower when upscaling & training longer
         LR_ENCODER_MULT=0.10,  # keep encoder a bit more stable
@@ -685,7 +696,7 @@ def main():
         ######################################################
 
         # Build model + safe kwargs (single GPU)
-        model = MODEL_CLS()
+        model = instantiate_rfdetr_model(MODEL_CLS)
         sig = signature(model.train)
         can = set(sig.parameters.keys())
 

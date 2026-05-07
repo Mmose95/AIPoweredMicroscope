@@ -2,16 +2,22 @@
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict, Counter
-import json, random, sys, re, csv
-from rfdetr import RFDETRSmall, RFDETRLarge, RFDETRMedium
+import json, random, sys, re, csv, os
 
 from inspect import signature
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from rfdetr_model_registry import default_rfdetr_resolution, instantiate_rfdetr_model
 
 # ====== YOUR PATHS ======
 ALL_COCO_JSON = Path(r"D:\PHD\PhdData\CellScanData\Annotation_Backups\Quality Assessment Backups\27-10-2025\annotations/instances_default.json")
 IMAGES_DIR    = Path(r"D:\PHD\PhdData\CellScanData\Zoom10x - Quality Assessment_Cleaned")
 OUT_ROOT      = Path(r"RFDETR_SOLO_OUTPUT")
 # ========================
+MODEL_CLASS = os.getenv("RFDETR_MODEL_CLS", "RFDETRLarge").strip() or "RFDETRLarge"
 
 # Split targets
 SPLIT = (0.70, 0.15, 0.15)     # train / val / test
@@ -398,7 +404,7 @@ def main():
 
     class_names = [c["name"] for c in new_categories]
 
-    model = RFDETRLarge()
+    model = instantiate_rfdetr_model(MODEL_CLASS)
 
     # ---- build kwargs safely (only pass what the installed rfdetr supports) ----
     sig = signature(model.train)
@@ -408,7 +414,7 @@ def main():
         output_dir=str(out_train),
 
         # core
-        resolution=672, #672 needed for "Large" model
+        resolution=int(os.getenv("RFDETR_RESOLUTION", str(default_rfdetr_resolution(MODEL_CLASS, 672) or 672))),
         batch_size=8,
         grad_accum_steps=8,
         epochs=140,

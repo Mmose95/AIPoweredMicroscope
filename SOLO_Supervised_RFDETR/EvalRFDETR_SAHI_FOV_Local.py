@@ -44,8 +44,12 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import EvalRFDETR_SOLO_LocalOnly as local_eval
+
+from rfdetr_model_registry import instantiate_rfdetr_model, supported_rfdetr_model_names
 
 
 ACTIVE_PRESET = "two_class"
@@ -195,15 +199,6 @@ def load_model_for_fov(
     class_names: Optional[Sequence[str]],
 ) -> Any:
     local_eval.ensure_rfdetr_import()
-    from rfdetr import RFDETRSmall, RFDETRMedium, RFDETRLarge
-
-    name_to_cls = {
-        "RFDETRSmall": RFDETRSmall,
-        "RFDETRMedium": RFDETRMedium,
-        "RFDETRLarge": RFDETRLarge,
-    }
-    if model_class not in name_to_cls:
-        raise ValueError(f"Unsupported model_class={model_class}")
 
     kwargs: Dict[str, Any] = {"pretrain_weights": str(checkpoint)}
     if resolution is not None:
@@ -211,7 +206,7 @@ def load_model_for_fov(
     if num_classes is not None:
         kwargs["num_classes"] = int(num_classes)
 
-    model = name_to_cls[model_class](**kwargs)
+    model = instantiate_rfdetr_model(model_class, **kwargs)
     if class_names:
         try:
             model.model.class_names = list(class_names)
@@ -870,7 +865,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--gt-json", default="")
     parser.add_argument("--target-name", default="")
-    parser.add_argument("--model-class", default="auto", choices=["auto", "RFDETRSmall", "RFDETRMedium", "RFDETRLarge"])
+    parser.add_argument("--model-class", default="auto", choices=supported_rfdetr_model_names(include_auto=True))
     parser.add_argument("--model-resolution", type=int, default=None)
     parser.add_argument("--sample-min", type=int, default=DEFAULT_SAMPLE_MIN)
     parser.add_argument("--sample-selection", default=SAMPLE_SELECTION)

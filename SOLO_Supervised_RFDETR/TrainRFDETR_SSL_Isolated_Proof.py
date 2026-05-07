@@ -4,11 +4,17 @@ import argparse
 import json
 import os
 import re
+import sys
 from collections import defaultdict
 from pathlib import Path
 
 import torch
-from rfdetr import RFDETRLarge, RFDETRMedium, RFDETRSmall
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from rfdetr_model_registry import canonical_rfdetr_model_name, instantiate_rfdetr_model, supported_rfdetr_model_names
 
 
 TARGET_EMBED_PREFIX = "backbone.0.encoder.encoder.embeddings."
@@ -484,7 +490,7 @@ def main() -> None:
     parser.add_argument("--images-fallback-root", type=Path, default=_default_images_fallback_root())
     parser.add_argument("--skip-resolve-dataset", action="store_true")
     parser.add_argument("--class-name", type=str, default="Squamous Epithelial Cell")
-    parser.add_argument("--model", type=str, default="large", choices=("small", "medium", "large"))
+    parser.add_argument("--model", type=str, default="large", choices=("small", "medium", "large", "xlarge", "2xlarge", "2xl"))
     parser.add_argument("--resolution", type=int, default=224)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=4)
@@ -527,12 +533,10 @@ def main() -> None:
             encoding="utf-8",
         )
 
-    model_cls = {
-        "small": RFDETRSmall,
-        "medium": RFDETRMedium,
-        "large": RFDETRLarge,
-    }[args.model]
-    rf_model = model_cls(pretrain_weights=None, resolution=int(args.resolution))
+    model_name = canonical_rfdetr_model_name(args.model)
+    if model_name not in supported_rfdetr_model_names():
+        raise ValueError(f"Unsupported RF-DETR model: {args.model}")
+    rf_model = instantiate_rfdetr_model(model_name, pretrain_weights=None, resolution=int(args.resolution))
 
     report, mapped_sd = load_ssl_backbone_into_rfdetr(
         rf_model=rf_model,

@@ -659,7 +659,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sheet-name", default=DEFAULT_SHEET_NAME)
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--target-name", default="")
-    parser.add_argument("--model-class", default="auto", choices=["auto", "RFDETRSmall", "RFDETRMedium", "RFDETRLarge"])
+    parser.add_argument(
+        "--model-class",
+        default="auto",
+        choices=["auto", "RFDETRSmall", "RFDETRMedium", "RFDETRLarge", "RFDETRXLarge", "RFDETR2XLarge"],
+    )
     parser.add_argument("--model-resolution", type=int, default=None)
     parser.add_argument("--score-floor", type=float, default=0.001)
     parser.add_argument("--score-threshold", type=float, default=0.30)
