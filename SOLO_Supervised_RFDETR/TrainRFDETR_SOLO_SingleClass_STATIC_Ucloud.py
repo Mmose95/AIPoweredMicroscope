@@ -37,7 +37,10 @@ def _env_truthy(name: str, default: str = "0") -> bool:
     return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "y", "on")
 
 
-PREFER_BEST_2XL_DEFAULTS = _env_truthy("RFDETR_PREFER_BEST_DEFAULTS", "1")
+PREFER_MODEL_NATIVE_DEFAULTS = _env_truthy(
+    "RFDETR_PREFER_MODEL_NATIVE_DEFAULTS",
+    os.getenv("RFDETR_PREFER_BEST_DEFAULTS", "1"),
+)
 ALLOW_SUBDEFAULT_RESOLUTION = _env_truthy("RFDETR_ALLOW_SUBDEFAULT_RESOLUTION", "0")
 ALLOW_LEGACY_PATCH_DEFAULTS = _env_truthy("RFDETR_ALLOW_LEGACY_PATCH_DEFAULTS", "0")
 ALLOW_NON_NATIVE_PRETRAIN_RESOLUTION = _env_truthy("RFDETR_ALLOW_NON_NATIVE_PRETRAIN_RESOLUTION", "0")
@@ -78,16 +81,17 @@ def _main_print(*args, **kwargs):
 def _round_up_to_multiple(v: int, m: int) -> int:
     return ((v + m - 1) // m) * m
 
+def _model_native_full_resolution(model_name_or_cls) -> int:
+    model_name = canonical_rfdetr_model_name(model_name_or_cls, default=DEFAULT_UCLOUD_MODEL_CLS)
+    return int(default_rfdetr_resolution(model_name, DEFAULT_UCLOUD_FULL_RESOLUTION) or DEFAULT_UCLOUD_FULL_RESOLUTION)
+
 def _resolve_input_mode() -> tuple[bool, str, int, int]:
     default_model_cls = canonical_rfdetr_model_name(
         os.getenv("RFDETR_MODEL_CLS", DEFAULT_UCLOUD_MODEL_CLS).strip() or DEFAULT_UCLOUD_MODEL_CLS,
         default=DEFAULT_UCLOUD_MODEL_CLS,
     )
-    default_full_resolution = int(
-        default_rfdetr_resolution(default_model_cls, DEFAULT_UCLOUD_FULL_RESOLUTION)
-        or DEFAULT_UCLOUD_FULL_RESOLUTION
-    )
-    prefer_best_full_mode = PREFER_BEST_2XL_DEFAULTS and default_model_cls == DEFAULT_UCLOUD_MODEL_CLS
+    default_full_resolution = _model_native_full_resolution(default_model_cls)
+    prefer_model_native_full_mode = PREFER_MODEL_NATIVE_DEFAULTS
 
     mode_raw = os.getenv("RFDETR_INPUT_MODE", "").strip().lower()
     if mode_raw:
@@ -112,7 +116,7 @@ def _resolve_input_mode() -> tuple[bool, str, int, int]:
 
         use_patch = mode_size != 640
         patch_size = mode_size if use_patch else 224
-        if not use_patch and prefer_best_full_mode:
+        if not use_patch and prefer_model_native_full_mode:
             requested_full_resolution = int(os.getenv("RFDETR_FULL_RESOLUTION", str(default_full_resolution)))
             if (
                 requested_full_resolution < default_full_resolution
@@ -120,7 +124,7 @@ def _resolve_input_mode() -> tuple[bool, str, int, int]:
             ):
                 _main_print(
                     f"[INPUT MODE][WARN] RFDETR_FULL_RESOLUTION={requested_full_resolution} is below the "
-                    f"2XL default {default_full_resolution}; using {default_full_resolution}. "
+                    f"model-native default {default_full_resolution} for {default_model_cls}; using {default_full_resolution}. "
                     "Set RFDETR_ALLOW_SUBDEFAULT_RESOLUTION=1 to keep lower values."
                 )
                 full_resolution = default_full_resolution
@@ -131,28 +135,28 @@ def _resolve_input_mode() -> tuple[bool, str, int, int]:
         return use_patch, str(mode_size), patch_size, full_resolution
 
     # Backward-compatible path: keep old env behavior if RFDETR_INPUT_MODE is unset.
-    # For the B200/2XL default path we prefer full-image mode at the model's native resolution.
+    # For the preferred path we use full-image mode at the selected model's native resolution.
     legacy_patch_env_set = _env_is_set("RFDETR_USE_PATCH_224") or _env_is_set("RFDETR_PATCH_SIZE")
-    if prefer_best_full_mode and legacy_patch_env_set and not ALLOW_LEGACY_PATCH_DEFAULTS:
+    if prefer_model_native_full_mode and legacy_patch_env_set and not ALLOW_LEGACY_PATCH_DEFAULTS:
         _main_print(
             "[INPUT MODE][WARN] Ignoring legacy RFDETR_USE_PATCH_224/RFDETR_PATCH_SIZE "
-            "to favor full-image 2XL defaults. Set RFDETR_INPUT_MODE explicitly to override."
+            f"to favor full-image native defaults for {default_model_cls}. Set RFDETR_INPUT_MODE explicitly to override."
         )
         use_patch = False
     else:
-        default_use_patch = "0" if default_model_cls == DEFAULT_UCLOUD_MODEL_CLS else "1"
+        default_use_patch = "0" if PREFER_MODEL_NATIVE_DEFAULTS else "1"
         use_patch = bool(int(os.getenv("RFDETR_USE_PATCH_224", default_use_patch)))
 
     patch_size = int(os.getenv("RFDETR_PATCH_SIZE", "224"))
     requested_full_resolution = int(os.getenv("RFDETR_FULL_RESOLUTION", str(default_full_resolution)))
     if (
-        prefer_best_full_mode
+        prefer_model_native_full_mode
         and requested_full_resolution < default_full_resolution
         and not ALLOW_SUBDEFAULT_RESOLUTION
     ):
         _main_print(
             f"[INPUT MODE][WARN] RFDETR_FULL_RESOLUTION={requested_full_resolution} is below the "
-            f"2XL default {default_full_resolution}; using {default_full_resolution}. "
+            f"model-native default {default_full_resolution} for {default_model_cls}; using {default_full_resolution}. "
             "Set RFDETR_ALLOW_SUBDEFAULT_RESOLUTION=1 to keep lower values."
         )
         full_resolution = default_full_resolution
@@ -168,13 +172,9 @@ if not USE_PATCH_224:
         os.getenv("RFDETR_MODEL_CLS", DEFAULT_UCLOUD_MODEL_CLS).strip() or DEFAULT_UCLOUD_MODEL_CLS,
         default=DEFAULT_UCLOUD_MODEL_CLS,
     )
-    current_default_full_resolution = int(
-        default_rfdetr_resolution(current_model_cls, DEFAULT_UCLOUD_FULL_RESOLUTION)
-        or DEFAULT_UCLOUD_FULL_RESOLUTION
-    )
+    current_default_full_resolution = _model_native_full_resolution(current_model_cls)
     prefer_native_full_resolution = (
-        PREFER_BEST_2XL_DEFAULTS
-        and current_model_cls == DEFAULT_UCLOUD_MODEL_CLS
+        PREFER_MODEL_NATIVE_DEFAULTS
         and not ALLOW_NON_NATIVE_PRETRAIN_RESOLUTION
     )
     if not (prefer_native_full_resolution and FULL_RESOLUTION == current_default_full_resolution):
@@ -1824,13 +1824,9 @@ def train_one_run(target_name: str,
         model = instantiate_rfdetr_model(model_cls)
 
     model_name = canonical_rfdetr_model_name(model_cls, default=DEFAULT_UCLOUD_MODEL_CLS)
-    native_full_resolution = int(
-        default_rfdetr_resolution(model_name, DEFAULT_UCLOUD_FULL_RESOLUTION)
-        or DEFAULT_UCLOUD_FULL_RESOLUTION
-    )
+    native_full_resolution = _model_native_full_resolution(model_name)
     prefer_native_full_resolution = (
-        PREFER_BEST_2XL_DEFAULTS
-        and model_name == DEFAULT_UCLOUD_MODEL_CLS
+        PREFER_MODEL_NATIVE_DEFAULTS
         and init_mode == "default"
         and not USE_PATCH_224
         and not ALLOW_NON_NATIVE_PRETRAIN_RESOLUTION
@@ -2140,6 +2136,7 @@ def train_one_run(target_name: str,
             },
         )
     best = find_best_val(out_dir)
+    write_metrics_plots(out_dir)
     (out_dir / "val_best_summary.json").write_text(json.dumps(best, indent=2), encoding="utf-8")
     if soft_teacher_enabled and unlabeled_dir_effective is not None:
         _write_soft_teacher_status(
@@ -2153,8 +2150,186 @@ def train_one_run(target_name: str,
     return best
 
 # ───────────────────────────────────────────────────────────────────────────────
+def _to_float(value):
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _read_metrics_csv(output_dir: Path) -> list[dict]:
+    path = output_dir / "metrics.csv"
+    if not path.exists():
+        return []
+
+    rows: list[dict] = []
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for raw in reader:
+            row = {}
+            for key, value in raw.items():
+                row[key] = _to_float(value)
+            rows.append(row)
+    return rows
+
+
+def _metric_series_by_epoch(rows: list[dict], metric_names: list[str]) -> tuple[list[int], dict[str, list[float | None]]]:
+    per_epoch: dict[int, dict[str, float]] = {}
+    for row in rows:
+        epoch_value = row.get("epoch")
+        if epoch_value is None:
+            continue
+        epoch = int(epoch_value)
+        slot = per_epoch.setdefault(epoch, {})
+        for name in metric_names:
+            value = row.get(name)
+            if value is not None:
+                slot[name] = float(value)
+
+    epochs = sorted(per_epoch)
+    series = {name: [per_epoch[e].get(name) for e in epochs] for name in metric_names}
+    return epochs, series
+
+
+def _best_metrics_csv_row(rows: list[dict]) -> dict | None:
+    if not rows:
+        return None
+
+    preferred_cols = [
+        "val/ema_mAP_50_95",
+        "val/mAP_50_95",
+        "val/ema_mAP_50",
+        "val/mAP_50",
+    ]
+    for metric_name in preferred_cols:
+        usable = [row for row in rows if row.get(metric_name) is not None]
+        if not usable:
+            continue
+        best_row = max(usable, key=lambda row: row[metric_name])
+        epoch_value = best_row.get("epoch")
+        return {
+            "best_epoch": int(epoch_value) if epoch_value is not None else None,
+            "map50": best_row.get("val/mAP_50") or best_row.get("val/ema_mAP_50"),
+            "map5095": best_row.get("val/ema_mAP_50_95") or best_row.get("val/mAP_50_95"),
+            "source": f"metrics.csv:{metric_name}",
+        }
+    return None
+
+
+def write_metrics_plots(output_dir: Path) -> None:
+    rows = _read_metrics_csv(output_dir)
+    if not rows:
+        return
+
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as exc:
+        _main_print(f"[PLOT][WARN] Could not import matplotlib for {output_dir}: {exc}")
+        return
+
+    metric_names = [
+        "train/loss",
+        "val/loss",
+        "val/mAP_50",
+        "val/mAP_50_95",
+        "val/ema_mAP_50_95",
+        "val/precision",
+        "val/recall",
+        "val/mAR",
+        "train/lr",
+        "train/lr_max",
+        "val/AP/Leucocyte",
+        "val/AP/Squamous Epithelial Cell",
+        "test/AP/Leucocyte",
+        "test/AP/Squamous Epithelial Cell",
+        "test/mAP_50_95",
+    ]
+    epochs, series = _metric_series_by_epoch(rows, metric_names)
+    if not epochs:
+        return
+
+    def _plot_line(ax, name: str, label: str):
+        values = series.get(name, [])
+        if any(value is not None for value in values):
+            ax.plot(epochs, values, marker="o", linewidth=1.5, markersize=3, label=label)
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 9))
+    ax = axes[0, 0]
+    _plot_line(ax, "train/loss", "Train loss")
+    _plot_line(ax, "val/loss", "Val loss")
+    ax.set_title("Loss")
+    ax.set_xlabel("Epoch")
+    ax.grid(True, alpha=0.3)
+    if ax.lines:
+        ax.legend()
+
+    ax = axes[0, 1]
+    _plot_line(ax, "val/mAP_50", "Val AP50")
+    _plot_line(ax, "val/mAP_50_95", "Val AP50:95")
+    _plot_line(ax, "val/ema_mAP_50_95", "Val EMA AP50:95")
+    _plot_line(ax, "test/mAP_50_95", "Test AP50:95")
+    ax.set_title("AP")
+    ax.set_xlabel("Epoch")
+    ax.grid(True, alpha=0.3)
+    if ax.lines:
+        ax.legend()
+
+    ax = axes[1, 0]
+    _plot_line(ax, "val/precision", "Val precision")
+    _plot_line(ax, "val/recall", "Val recall")
+    _plot_line(ax, "val/mAR", "Val mAR")
+    ax.set_title("Precision / Recall")
+    ax.set_xlabel("Epoch")
+    ax.grid(True, alpha=0.3)
+    if ax.lines:
+        ax.legend()
+
+    ax = axes[1, 1]
+    _plot_line(ax, "train/lr", "LR")
+    _plot_line(ax, "train/lr_max", "LR max")
+    ax.set_title("Learning Rate")
+    ax.set_xlabel("Epoch")
+    ax.grid(True, alpha=0.3)
+    if ax.lines:
+        ax.legend()
+
+    fig.tight_layout()
+    fig.savefig(output_dir / "metrics_plot.png", dpi=180, bbox_inches="tight")
+    plt.close(fig)
+
+    per_class_metrics = [
+        "val/AP/Leucocyte",
+        "val/AP/Squamous Epithelial Cell",
+        "test/AP/Leucocyte",
+        "test/AP/Squamous Epithelial Cell",
+    ]
+    if any(any(value is not None for value in series.get(name, [])) for name in per_class_metrics):
+        fig, ax = plt.subplots(figsize=(12, 6))
+        _plot_line(ax, "val/AP/Leucocyte", "Val AP Leucocyte")
+        _plot_line(ax, "val/AP/Squamous Epithelial Cell", "Val AP Squamous")
+        _plot_line(ax, "test/AP/Leucocyte", "Test AP Leucocyte")
+        _plot_line(ax, "test/AP/Squamous Epithelial Cell", "Test AP Squamous")
+        ax.set_title("Per-class AP50:95")
+        ax.set_xlabel("Epoch")
+        ax.grid(True, alpha=0.3)
+        if ax.lines:
+            ax.legend()
+        fig.tight_layout()
+        fig.savefig(output_dir / "metrics_plot_per_class.png", dpi=180, bbox_inches="tight")
+        plt.close(fig)
+
+
 def find_best_val(output_dir: Path) -> dict:
-    # 1) prefer RFDETR results.json if present
+    # 1) prefer metrics.csv from newer RFDETR runs
+    best_from_metrics = _best_metrics_csv_row(_read_metrics_csv(output_dir))
+    if best_from_metrics is not None:
+        return best_from_metrics
+
+    # 2) fall back to RFDETR results.json if present
     p = output_dir / "results.json"
     if p.exists():
         js = json.loads(p.read_text())
@@ -2174,7 +2349,7 @@ def find_best_val(output_dir: Path) -> dict:
                 "source": "results.json",
             }
 
-    # 2) fall back to old behaviour (also check eval/ subfolder)
+    # 3) fall back to old behaviour (also check eval/ subfolder)
     candidates = [
         "val_best_summary.json",
         "val_metrics.json", "metrics_val.json", "coco_eval_val.json",
@@ -2298,7 +2473,7 @@ def _cfg_text(name: str) -> str:
         os.getenv("RFDETR_MODEL_CLS", DEFAULT_UCLOUD_MODEL_CLS).strip() or DEFAULT_UCLOUD_MODEL_CLS,
         default=DEFAULT_UCLOUD_MODEL_CLS,
     )
-    if PREFER_BEST_2XL_DEFAULTS and model_cls_name == DEFAULT_UCLOUD_MODEL_CLS:
+    if PREFER_MODEL_NATIVE_DEFAULTS and model_cls_name == DEFAULT_UCLOUD_MODEL_CLS:
         legacy_upgrade_map = {
             "RFDETR_EPI_NUM_QUERIES": ("120", "300"),
             "RFDETR_LEU_NUM_QUERIES": ("400", "600"),
