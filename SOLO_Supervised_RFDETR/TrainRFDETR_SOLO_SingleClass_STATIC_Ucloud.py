@@ -40,6 +40,7 @@ def _env_truthy(name: str, default: str = "0") -> bool:
 PREFER_BEST_2XL_DEFAULTS = _env_truthy("RFDETR_PREFER_BEST_DEFAULTS", "1")
 ALLOW_SUBDEFAULT_RESOLUTION = _env_truthy("RFDETR_ALLOW_SUBDEFAULT_RESOLUTION", "0")
 ALLOW_LEGACY_PATCH_DEFAULTS = _env_truthy("RFDETR_ALLOW_LEGACY_PATCH_DEFAULTS", "0")
+ALLOW_NON_NATIVE_PRETRAIN_RESOLUTION = _env_truthy("RFDETR_ALLOW_NON_NATIVE_PRETRAIN_RESOLUTION", "0")
 
 def _normalize_hpo_target(raw: str) -> str:
     value = (raw or DEFAULT_HPO_TARGET).strip().lower()
@@ -78,6 +79,16 @@ def _round_up_to_multiple(v: int, m: int) -> int:
     return ((v + m - 1) // m) * m
 
 def _resolve_input_mode() -> tuple[bool, str, int, int]:
+    default_model_cls = canonical_rfdetr_model_name(
+        os.getenv("RFDETR_MODEL_CLS", DEFAULT_UCLOUD_MODEL_CLS).strip() or DEFAULT_UCLOUD_MODEL_CLS,
+        default=DEFAULT_UCLOUD_MODEL_CLS,
+    )
+    default_full_resolution = int(
+        default_rfdetr_resolution(default_model_cls, DEFAULT_UCLOUD_FULL_RESOLUTION)
+        or DEFAULT_UCLOUD_FULL_RESOLUTION
+    )
+    prefer_best_full_mode = PREFER_BEST_2XL_DEFAULTS and default_model_cls == DEFAULT_UCLOUD_MODEL_CLS
+
     mode_raw = os.getenv("RFDETR_INPUT_MODE", "").strip().lower()
     if mode_raw:
         aliases = {
@@ -101,21 +112,26 @@ def _resolve_input_mode() -> tuple[bool, str, int, int]:
 
         use_patch = mode_size != 640
         patch_size = mode_size if use_patch else 224
-        full_resolution = int(os.getenv("RFDETR_FULL_RESOLUTION", str(mode_size)))
+        if not use_patch and prefer_best_full_mode:
+            requested_full_resolution = int(os.getenv("RFDETR_FULL_RESOLUTION", str(default_full_resolution)))
+            if (
+                requested_full_resolution < default_full_resolution
+                and not ALLOW_SUBDEFAULT_RESOLUTION
+            ):
+                _main_print(
+                    f"[INPUT MODE][WARN] RFDETR_FULL_RESOLUTION={requested_full_resolution} is below the "
+                    f"2XL default {default_full_resolution}; using {default_full_resolution}. "
+                    "Set RFDETR_ALLOW_SUBDEFAULT_RESOLUTION=1 to keep lower values."
+                )
+                full_resolution = default_full_resolution
+            else:
+                full_resolution = requested_full_resolution
+        else:
+            full_resolution = int(os.getenv("RFDETR_FULL_RESOLUTION", str(mode_size)))
         return use_patch, str(mode_size), patch_size, full_resolution
 
     # Backward-compatible path: keep old env behavior if RFDETR_INPUT_MODE is unset.
     # For the B200/2XL default path we prefer full-image mode at the model's native resolution.
-    default_model_cls = canonical_rfdetr_model_name(
-        os.getenv("RFDETR_MODEL_CLS", DEFAULT_UCLOUD_MODEL_CLS).strip() or DEFAULT_UCLOUD_MODEL_CLS,
-        default=DEFAULT_UCLOUD_MODEL_CLS,
-    )
-    default_full_resolution = int(
-        default_rfdetr_resolution(default_model_cls, DEFAULT_UCLOUD_FULL_RESOLUTION)
-        or DEFAULT_UCLOUD_FULL_RESOLUTION
-    )
-    prefer_best_full_mode = PREFER_BEST_2XL_DEFAULTS and default_model_cls == DEFAULT_UCLOUD_MODEL_CLS
-
     legacy_patch_env_set = _env_is_set("RFDETR_USE_PATCH_224") or _env_is_set("RFDETR_PATCH_SIZE")
     if prefer_best_full_mode and legacy_patch_env_set and not ALLOW_LEGACY_PATCH_DEFAULTS:
         _main_print(
@@ -147,13 +163,28 @@ def _resolve_input_mode() -> tuple[bool, str, int, int]:
 # If RFDETR_INPUT_MODE != 640 we run patch mode with patch size = int(RFDETR_INPUT_MODE).
 # If RFDETR_INPUT_MODE == 640 we run full-image mode.
 USE_PATCH_224, INPUT_MODE, PATCH_SIZE, FULL_RESOLUTION = _resolve_input_mode()
-if not USE_PATCH_224 and FULL_RESOLUTION % BACKBONE_BLOCK_SIZE != 0:
-    old = FULL_RESOLUTION
-    FULL_RESOLUTION = _round_up_to_multiple(FULL_RESOLUTION, BACKBONE_BLOCK_SIZE)
-    _main_print(
-        f"[INPUT MODE][WARN] Full-mode resolution {old} is not divisible by "
-        f"{BACKBONE_BLOCK_SIZE}; using {FULL_RESOLUTION}."
+if not USE_PATCH_224:
+    current_model_cls = canonical_rfdetr_model_name(
+        os.getenv("RFDETR_MODEL_CLS", DEFAULT_UCLOUD_MODEL_CLS).strip() or DEFAULT_UCLOUD_MODEL_CLS,
+        default=DEFAULT_UCLOUD_MODEL_CLS,
     )
+    current_default_full_resolution = int(
+        default_rfdetr_resolution(current_model_cls, DEFAULT_UCLOUD_FULL_RESOLUTION)
+        or DEFAULT_UCLOUD_FULL_RESOLUTION
+    )
+    prefer_native_full_resolution = (
+        PREFER_BEST_2XL_DEFAULTS
+        and current_model_cls == DEFAULT_UCLOUD_MODEL_CLS
+        and not ALLOW_NON_NATIVE_PRETRAIN_RESOLUTION
+    )
+    if not (prefer_native_full_resolution and FULL_RESOLUTION == current_default_full_resolution):
+        if FULL_RESOLUTION % BACKBONE_BLOCK_SIZE != 0:
+            old = FULL_RESOLUTION
+            FULL_RESOLUTION = _round_up_to_multiple(FULL_RESOLUTION, BACKBONE_BLOCK_SIZE)
+            _main_print(
+                f"[INPUT MODE][WARN] Full-mode resolution {old} is not divisible by "
+                f"{BACKBONE_BLOCK_SIZE}; using {FULL_RESOLUTION}."
+            )
 
 
 def _env_bool(name: str, default: str = "0") -> bool:
@@ -1792,6 +1823,27 @@ def train_one_run(target_name: str,
     else:
         model = instantiate_rfdetr_model(model_cls)
 
+    model_name = canonical_rfdetr_model_name(model_cls, default=DEFAULT_UCLOUD_MODEL_CLS)
+    native_full_resolution = int(
+        default_rfdetr_resolution(model_name, DEFAULT_UCLOUD_FULL_RESOLUTION)
+        or DEFAULT_UCLOUD_FULL_RESOLUTION
+    )
+    prefer_native_full_resolution = (
+        PREFER_BEST_2XL_DEFAULTS
+        and model_name == DEFAULT_UCLOUD_MODEL_CLS
+        and init_mode == "default"
+        and not USE_PATCH_224
+        and not ALLOW_NON_NATIVE_PRETRAIN_RESOLUTION
+    )
+    if prefer_native_full_resolution and resolution != native_full_resolution:
+        old = resolution
+        resolution = native_full_resolution
+        print(
+            f"[INPUT MODE][WARN] For pretrained {model_name}, forcing native full resolution "
+            f"{native_full_resolution} instead of {old} to keep positional embeddings compatible. "
+            "Set RFDETR_ALLOW_NON_NATIVE_PRETRAIN_RESOLUTION=1 to override."
+        )
+
     if not USE_PATCH_224:
         cfg = getattr(model, "model_config", None)
         cfg_patch = int(getattr(cfg, "patch_size", 0) or 0)
@@ -2240,7 +2292,28 @@ def _matrix_dynamic_defaults() -> dict:
 def _cfg_text(name: str) -> str:
     dyn = _matrix_dynamic_defaults()
     default = dyn.get(name, MATRIX_QUICK_DEFAULTS.get(name, ""))
-    return os.getenv(name, default).strip()
+    value = os.getenv(name, default).strip()
+
+    model_cls_name = canonical_rfdetr_model_name(
+        os.getenv("RFDETR_MODEL_CLS", DEFAULT_UCLOUD_MODEL_CLS).strip() or DEFAULT_UCLOUD_MODEL_CLS,
+        default=DEFAULT_UCLOUD_MODEL_CLS,
+    )
+    if PREFER_BEST_2XL_DEFAULTS and model_cls_name == DEFAULT_UCLOUD_MODEL_CLS:
+        legacy_upgrade_map = {
+            "RFDETR_EPI_NUM_QUERIES": ("120", "300"),
+            "RFDETR_LEU_NUM_QUERIES": ("400", "600"),
+            "RFDETR_TWO_CLASS_LR": ("8e-5", "6e-5"),
+            "RFDETR_TWO_CLASS_NUM_QUERIES": ("400", "600"),
+        }
+        old_new = legacy_upgrade_map.get(name)
+        if old_new is not None and value == old_new[0]:
+            _main_print(
+                f"[CONFIG][WARN] Upgrading legacy {name}={value} to {old_new[1]} "
+                "for the preferred 2XL configuration."
+            )
+            return old_new[1]
+
+    return value
 
 
 def _cfg_early_stopping_metric(name: str) -> str:
