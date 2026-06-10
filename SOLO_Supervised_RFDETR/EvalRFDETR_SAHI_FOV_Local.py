@@ -217,6 +217,12 @@ def load_model_for_fov(
             model.optimize_for_inference()
         except Exception:
             pass
+    for candidate in (model, getattr(model, "model", None), getattr(model, "model_ema", None)):
+        if hasattr(candidate, "eval"):
+            try:
+                candidate.eval()
+            except Exception:
+                pass
     return model
 
 
@@ -608,6 +614,69 @@ def build_sahi_model(model: Any, class_names: Sequence[str], confidence_threshol
         category_mapping=category_mapping,
         load_at_init=True,
     )
+
+
+def run_sahi_prediction_for_image(
+    image_path: Path,
+    get_sliced_prediction: Any,
+    sahi_model: Any,
+    class_names: Sequence[str],
+    class_score_thresholds: Dict[str, float],
+    score_threshold: float,
+    slice_height: Optional[int],
+    slice_width: Optional[int],
+    overlap_height_ratio: float,
+    overlap_width_ratio: float,
+    perform_standard_pred: bool,
+    postprocess_type: str,
+    postprocess_match_metric: str,
+    postprocess_match_threshold: float,
+    postprocess_class_agnostic: bool,
+) -> Dict[str, np.ndarray]:
+    prediction_result = get_sliced_prediction(
+        str(image_path),
+        detection_model=sahi_model,
+        slice_height=slice_height,
+        slice_width=slice_width,
+        overlap_height_ratio=overlap_height_ratio,
+        overlap_width_ratio=overlap_width_ratio,
+        perform_standard_pred=perform_standard_pred,
+        postprocess_type=postprocess_type,
+        postprocess_match_metric=postprocess_match_metric,
+        postprocess_match_threshold=postprocess_match_threshold,
+        postprocess_class_agnostic=postprocess_class_agnostic,
+        verbose=0,
+    )
+
+    pred_boxes_list: List[List[float]] = []
+    pred_scores_list: List[float] = []
+    pred_cls_list: List[int] = []
+    for obj in prediction_result.object_prediction_list:
+        x1, y1, x2, y2 = obj.bbox.to_xyxy()
+        pred_boxes_list.append([float(x1), float(y1), float(x2), float(y2)])
+        pred_scores_list.append(float(obj.score.value))
+        pred_cls_list.append(int(obj.category.id))
+
+    pred_boxes = np.asarray(pred_boxes_list, dtype=np.float32).reshape((-1, 4)) if pred_boxes_list else np.zeros((0, 4), dtype=np.float32)
+    pred_scores = np.asarray(pred_scores_list, dtype=np.float32) if pred_scores_list else np.zeros((0,), dtype=np.float32)
+    pred_cls = np.asarray(pred_cls_list, dtype=np.int64) if pred_cls_list else np.zeros((0,), dtype=np.int64)
+    pred_cls = normalize_model_class_ids(pred_cls, class_names)
+
+    keep = per_class_keep_mask(
+        pred_scores,
+        pred_cls,
+        class_names,
+        class_score_thresholds,
+        score_threshold,
+    )
+    return {
+        "pred_boxes": pred_boxes,
+        "pred_scores": pred_scores,
+        "pred_cls": pred_cls,
+        "kept_boxes": pred_boxes[keep],
+        "kept_scores": pred_scores[keep],
+        "kept_cls": pred_cls[keep],
+    }
 
 
 def discover_gt_image_mapping(coco: Any) -> Dict[str, Dict[str, Any]]:
@@ -1044,9 +1113,13 @@ def run_fov_sahi_eval(cfg: FOVSahiConfig) -> None:
             pct = 100.0 * idx / max(1, len(image_paths))
             print(f"[SAHI FOV] Inference progress: {idx}/{len(image_paths)} ({pct:.1f}%)")
 
-        prediction_result = get_sliced_prediction(
-            str(image_path),
-            detection_model=sahi_model,
+        prediction = run_sahi_prediction_for_image(
+            image_path=image_path,
+            get_sliced_prediction=get_sliced_prediction,
+            sahi_model=sahi_model,
+            class_names=effective_class_names,
+            class_score_thresholds=effective_class_score_thresholds,
+            score_threshold=cfg.score_threshold,
             slice_height=cfg.slice_height,
             slice_width=cfg.slice_width,
             overlap_height_ratio=cfg.overlap_height_ratio,
@@ -1056,32 +1129,13 @@ def run_fov_sahi_eval(cfg: FOVSahiConfig) -> None:
             postprocess_match_metric=cfg.postprocess_match_metric,
             postprocess_match_threshold=cfg.postprocess_match_threshold,
             postprocess_class_agnostic=cfg.postprocess_class_agnostic,
-            verbose=0,
         )
-
-        pred_boxes_list: List[List[float]] = []
-        pred_scores_list: List[float] = []
-        pred_cls_list: List[int] = []
-        for obj in prediction_result.object_prediction_list:
-            x1, y1, x2, y2 = obj.bbox.to_xyxy()
-            pred_boxes_list.append([float(x1), float(y1), float(x2), float(y2)])
-            pred_scores_list.append(float(obj.score.value))
-            pred_cls_list.append(int(obj.category.id))
-
-        pred_boxes = np.asarray(pred_boxes_list, dtype=np.float32).reshape((-1, 4)) if pred_boxes_list else np.zeros((0, 4), dtype=np.float32)
-        pred_scores = np.asarray(pred_scores_list, dtype=np.float32) if pred_scores_list else np.zeros((0,), dtype=np.float32)
-        pred_cls = np.asarray(pred_cls_list, dtype=np.int64) if pred_cls_list else np.zeros((0,), dtype=np.int64)
-        pred_cls = normalize_model_class_ids(pred_cls, effective_class_names)
-        keep = per_class_keep_mask(
-            pred_scores,
-            pred_cls,
-            effective_class_names,
-            effective_class_score_thresholds,
-            cfg.score_threshold,
-        )
-        kept_boxes = pred_boxes[keep]
-        kept_scores = pred_scores[keep]
-        kept_cls = pred_cls[keep]
+        pred_boxes = prediction["pred_boxes"]
+        pred_scores = prediction["pred_scores"]
+        pred_cls = prediction["pred_cls"]
+        kept_boxes = prediction["kept_boxes"]
+        kept_scores = prediction["kept_scores"]
+        kept_cls = prediction["kept_cls"]
 
         sample_name = extract_sample_name(image_path)
         rel_name = safe_relpath(image_path, cfg.images_root)

@@ -523,6 +523,12 @@ def load_model(model_class: str, checkpoint: Path, resolution: Optional[int]):
             model.optimize_for_inference()
         except Exception:
             pass
+    for candidate in (model, getattr(model, "model", None), getattr(model, "model_ema", None)):
+        if hasattr(candidate, "eval"):
+            try:
+                candidate.eval()
+            except Exception:
+                pass
     return model
 
 
@@ -555,35 +561,22 @@ def resolve_image_path_local(file_name: str, test_json: Path, images_root: Optio
     )
 
 
-def predict_one_image(model: Any, img_pil: Image.Image, score_floor: float):
-    arr = np.array(img_pil.convert("RGB"))
-    ten = torch.from_numpy(arr).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+_PREDICT_CALL_CACHE_ATTR = "_aipm_predict_one_image_call"
 
-    out = None
-    for name in ("predict", "infer", "inference", "forward_inference"):
-        fn = getattr(model, name, None)
-        if callable(fn):
-            for inp in (img_pil, arr, ten):
-                for kw in ({"threshold": float(score_floor)}, {}):
-                    try:
-                        out = fn(inp, **kw)
-                        break
-                    except TypeError:
-                        out = None
-                    except Exception:
-                        out = None
-                if out is not None:
-                    break
-            if out is not None:
-                break
 
-    if out is None:
-        forward = getattr(model, "forward", None)
-        if callable(forward):
-            out = forward(ten)
-        else:
-            raise RuntimeError("Model has no supported inference method.")
+def _prediction_input(img_pil: Image.Image, input_kind: str) -> Any:
+    if input_kind == "pil":
+        return img_pil
 
+    arr = np.asarray(img_pil.convert("RGB"))
+    if input_kind == "array":
+        return arr
+    if input_kind == "tensor":
+        return torch.from_numpy(arr).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+    raise ValueError(f"Unsupported prediction input kind: {input_kind}")
+
+
+def _prediction_output_to_arrays(out: Any, score_floor: float):
     try:
         import supervision as sv
 
@@ -640,6 +633,50 @@ def predict_one_image(model: Any, img_pil: Image.Image, score_floor: float):
 
     keep = scores_np >= score_floor
     return boxes_np[keep], scores_np[keep], labels_np[keep]
+
+
+def predict_one_image(model: Any, img_pil: Image.Image, score_floor: float):
+    score_floor = float(score_floor)
+    cached_call = getattr(model, _PREDICT_CALL_CACHE_ATTR, None)
+    if cached_call is not None:
+        name, input_kind, with_threshold = cached_call
+        fn = getattr(model, name, None)
+        if callable(fn):
+            kwargs = {"threshold": score_floor} if with_threshold else {}
+            try:
+                out = fn(_prediction_input(img_pil, input_kind), **kwargs)
+                return _prediction_output_to_arrays(out, score_floor)
+            except Exception:
+                try:
+                    delattr(model, _PREDICT_CALL_CACHE_ATTR)
+                except Exception:
+                    pass
+
+    for name in ("predict", "infer", "inference", "forward_inference"):
+        fn = getattr(model, name, None)
+        if not callable(fn):
+            continue
+
+        for input_kind in ("pil", "array", "tensor"):
+            inp = _prediction_input(img_pil, input_kind)
+            for with_threshold in (True, False):
+                kwargs = {"threshold": score_floor} if with_threshold else {}
+                try:
+                    out = fn(inp, **kwargs)
+                    result = _prediction_output_to_arrays(out, score_floor)
+                except Exception:
+                    continue
+                setattr(model, _PREDICT_CALL_CACHE_ATTR, (name, input_kind, with_threshold))
+                return result
+
+    forward = getattr(model, "forward", None)
+    if callable(forward):
+        out = forward(_prediction_input(img_pil, "tensor"))
+        result = _prediction_output_to_arrays(out, score_floor)
+        setattr(model, _PREDICT_CALL_CACHE_ATTR, ("forward", "tensor", False))
+        return result
+
+    raise RuntimeError("Model has no supported inference method.")
 
 
 def coco_categories(coco: COCO) -> Tuple[Dict[int, str], Dict[int, int], Dict[int, int]]:
