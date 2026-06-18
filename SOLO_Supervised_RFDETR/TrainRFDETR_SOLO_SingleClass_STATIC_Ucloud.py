@@ -1694,6 +1694,7 @@ def train_one_run(target_name: str,
                   out_dir: Path,
                   model_cls,
                   class_names: list[str] | None,
+                  requested_resolution: int | None,
                   init_mode: str,
                   run_variant: str,
                   epochs: int,
@@ -1806,11 +1807,12 @@ def train_one_run(target_name: str,
                 "Consider lowering RFDETR_GRAD_ACCUM_STEPS and/or batch size."
             )
 
-    # Force resolution from selected input mode for consistent runs.
+    # Force resolution from selected input mode for consistent runs unless a
+    # matrix row explicitly requests a model-specific full-image resolution.
     if USE_PATCH_224:
         resolution = PATCH_SIZE
     else:
-        resolution = FULL_RESOLUTION
+        resolution = int(requested_resolution or FULL_RESOLUTION)
     # Initialization modes:
     # - default: RF-DETR default pretrained init.
     # - scratch: no detector pretrain.
@@ -1899,7 +1901,7 @@ def train_one_run(target_name: str,
         early_stopping_use_ema=early_stopping_use_ema,
         early_stopping_metric=str(early_stopping_metric),
         checkpoint_interval=10,
-        run_test=True,
+        run_test=RUN_TEST_DURING_TRAIN,
     )
     if lr_encoder is not None:
         kwargs["lr_encoder"] = float(lr_encoder)
@@ -2814,12 +2816,118 @@ def _build_ssl_triage_cfgs_for_target(target_key: str, matrix_cfg: dict) -> list
                     cfgs.append(cfg)
     return cfgs
 
-# One-click matrix mode (both classes, with/without SSL, chosen fractions) with env flags.
-EXPERIMENT_MODE = os.getenv("RFDETR_EXPERIMENT_MODE", "matrix").strip().lower()
-if EXPERIMENT_MODE not in ("matrix", "ssl_triage"):
-    raise ValueError(
-        "RFDETR_EXPERIMENT_MODE must be one of: matrix, ssl_triage."
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    return int(raw) if raw else int(default)
+
+
+def _build_final_b200_cfgs_for_target(target_key: str, matrix_cfg: dict) -> list[dict]:
+    """
+    Final-study B200 preset for the clinically validated two-class dataset.
+    This is intentionally a compact validation-selection matrix, not a broad HPO.
+    Test-set evaluation is disabled by default for this mode via RFDETR_RUN_TEST=0.
+    """
+    if target_key != "two_class":
+        raise ValueError("final_b200 is only defined for RFDETR_HPO_TARGET=two-class.")
+
+    epochs = _env_int("RFDETR_FINAL_B200_EPOCHS", 160)
+    patience = _env_int("RFDETR_FINAL_B200_PATIENCE", 25)
+    base_seed = _env_int("RFDETR_FINAL_B200_BASE_SEED", SEED)
+    replicate_seed = _env_int("RFDETR_FINAL_B200_REPLICATE_SEED", 7)
+    include_large = _env_bool("RFDETR_FINAL_B200_INCLUDE_LARGE", "1")
+    include_2xl = _env_bool("RFDETR_FINAL_B200_INCLUDE_2XL", "1")
+    lr_encoder_raw = os.getenv("RFDETR_FINAL_B200_LR_ENCODER", "").strip()
+    warmup_raw = os.getenv("RFDETR_FINAL_B200_WARMUP_EPOCHS", "").strip()
+
+    large_res = _env_int(
+        "RFDETR_FINAL_B200_LARGE_RESOLUTION",
+        default_rfdetr_resolution("RFDETRLarge", 704) or 704,
     )
+    x2_res = _env_int(
+        "RFDETR_FINAL_B200_2XL_RESOLUTION",
+        default_rfdetr_resolution("RFDETR2XLarge", 880) or 880,
+    )
+    large_batch = _env_int("RFDETR_FINAL_B200_LARGE_BATCH", 16)
+    large_dense_batch = _env_int("RFDETR_FINAL_B200_LARGE_DENSE_BATCH", 12)
+    x2_batch = _env_int("RFDETR_FINAL_B200_2XL_BATCH", 8)
+    x2_dense_batch = _env_int("RFDETR_FINAL_B200_2XL_DENSE_BATCH", 6)
+
+    shared = {
+        "INIT_MODE": "default",
+        "SSL_CKPT": "",
+        "LR_ENCODER": float(lr_encoder_raw) if lr_encoder_raw else None,
+        "WARMUP_EPOCHS": float(warmup_raw) if warmup_raw else None,
+        "FREEZE_ENCODER": None,
+        "GRAD_ACCUM_STEPS": matrix_cfg["grad_accum_steps"],
+        "WEIGHT_DECAY": matrix_cfg["weight_decay"],
+        "DROPOUT": matrix_cfg["dropout"],
+        "MULTI_SCALE": True,
+        "EXPANDED_SCALES": False,
+        "AUG_COPIES": matrix_cfg["aug_copies"],
+        "EARLY_STOPPING": True,
+        "EARLY_STOPPING_PATIENCE": patience,
+        "EARLY_STOPPING_MIN_DELTA": matrix_cfg["early_stopping_min_delta"],
+        "EARLY_STOPPING_USE_EMA": True,
+        "EARLY_STOPPING_METRIC": "map5095",
+        "TRAIN_FRACTION": 1.0,
+        "FRACTION_SEED": base_seed,
+        "EPOCHS": epochs,
+    }
+
+    specs = []
+    if include_large:
+        specs.extend([
+            ("large_anchor_lr8e-5_q400", "RFDETRLarge", large_res, 8e-5, 400, large_batch, base_seed),
+            ("large_lower_lr5e-5_q400", "RFDETRLarge", large_res, 5e-5, 400, large_batch, base_seed),
+            ("large_higher_lr1e-4_q400", "RFDETRLarge", large_res, 1e-4, 400, large_batch, base_seed),
+            ("large_dense_lr8e-5_q600", "RFDETRLarge", large_res, 8e-5, 600, large_dense_batch, base_seed),
+        ])
+        if replicate_seed != base_seed:
+            specs.append(
+                ("large_anchor_lr8e-5_q400_seedrep", "RFDETRLarge", large_res, 8e-5, 400, large_batch, replicate_seed)
+            )
+    if include_2xl:
+        specs.extend([
+            ("2xl_anchor_lr8e-5_q400", "RFDETR2XLarge", x2_res, 8e-5, 400, x2_batch, base_seed),
+            ("2xl_lower_lr5e-5_q400", "RFDETR2XLarge", x2_res, 5e-5, 400, x2_batch, base_seed),
+            ("2xl_higher_lr1e-4_q400", "RFDETR2XLarge", x2_res, 1e-4, 400, x2_batch, base_seed),
+            ("2xl_dense_lr8e-5_q600", "RFDETR2XLarge", x2_res, 8e-5, 600, x2_dense_batch, base_seed),
+            ("2xl_dense_lr5e-5_q600", "RFDETR2XLarge", x2_res, 5e-5, 600, x2_dense_batch, base_seed),
+        ])
+        if replicate_seed != base_seed:
+            specs.append(
+                ("2xl_anchor_lr8e-5_q400_seedrep", "RFDETR2XLarge", x2_res, 8e-5, 400, x2_batch, replicate_seed)
+            )
+
+    cfgs = []
+    for run_variant, model_cls, resolution, lr, queries, batch, seed in specs:
+        cfg = dict(shared)
+        cfg.update({
+            "MODEL_CLS": model_cls,
+            "RUN_VARIANT": run_variant,
+            "RESOLUTION": int(resolution),
+            "LR": float(lr),
+            "BATCH": int(batch),
+            "NUM_QUERIES": int(queries),
+            "SEED": int(seed),
+        })
+        cfgs.append(cfg)
+    if not cfgs:
+        raise ValueError("final_b200 produced no configs. Enable at least one model family.")
+    return cfgs
+
+
+# One-click experiment modes with env flags.
+EXPERIMENT_MODE = os.getenv("RFDETR_EXPERIMENT_MODE", "matrix").strip().lower()
+if EXPERIMENT_MODE not in ("matrix", "ssl_triage", "final_b200"):
+    raise ValueError(
+        "RFDETR_EXPERIMENT_MODE must be one of: matrix, ssl_triage, final_b200."
+    )
+RUN_TEST_DURING_TRAIN = _env_bool(
+    "RFDETR_RUN_TEST",
+    "0" if EXPERIMENT_MODE == "final_b200" else "1",
+)
+PLAN_ONLY = _env_bool("RFDETR_PLAN_ONLY", "0")
 
 MATRIX_CFG = _build_matrix_runtime_config()
 need_leu = HPO_TARGET in ("leu", "all")
@@ -2835,7 +2943,7 @@ if EXPERIMENT_MODE == "matrix":
         f"fraction_seeds={','.join(str(x) for x in MATRIX_CFG['fraction_seeds'])} "
         f"seeds={','.join(str(x) for x in MATRIX_CFG['seeds'])}"
     )
-else:
+elif EXPERIMENT_MODE == "ssl_triage":
     SEARCH_LEUCO = _build_ssl_triage_cfgs_for_target("leu", MATRIX_CFG) if need_leu else []
     SEARCH_EPI = _build_ssl_triage_cfgs_for_target("epi", MATRIX_CFG) if need_epi else []
     SEARCH_TWO_CLASS = _build_ssl_triage_cfgs_for_target("two_class", MATRIX_CFG) if need_two_class else []
@@ -2846,6 +2954,17 @@ else:
         f"fractions={','.join(str(x) for x in MATRIX_CFG['train_fractions'])} "
         f"fraction_seeds={','.join(str(x) for x in MATRIX_CFG['fraction_seeds'])} "
         f"seeds={','.join(str(x) for x in MATRIX_CFG['seeds'])}"
+    )
+else:
+    if not need_two_class:
+        raise ValueError("RFDETR_EXPERIMENT_MODE=final_b200 requires RFDETR_HPO_TARGET=two-class.")
+    SEARCH_LEUCO = {}
+    SEARCH_EPI = {}
+    SEARCH_TWO_CLASS = _build_final_b200_cfgs_for_target("two_class", MATRIX_CFG)
+    _main_print(
+        f"[EXPERIMENT] mode=final_b200 configs={len(SEARCH_TWO_CLASS)} "
+        f"run_test_during_train={RUN_TEST_DURING_TRAIN} "
+        f"plan_only={PLAN_ONLY}"
     )
 
 
@@ -2905,6 +3024,7 @@ def _build_training_plan_rows(jobs: list[dict]) -> list[dict]:
             "early_stopping_use_ema": cfg.get("EARLY_STOPPING_USE_EMA"),
             "early_stopping_metric": cfg.get("EARLY_STOPPING_METRIC"),
             "resolution": cfg.get("RESOLUTION"),
+            "run_test_during_train": RUN_TEST_DURING_TRAIN,
             "input_mode": INPUT_MODE,
             "dataset_dir": job["dataset_dir"],
             "out_root": job["out_root"],
@@ -2931,9 +3051,9 @@ def _print_and_save_training_plan(plan_rows: list[dict], session_root: Path):
     concise_cols = [
         "run_idx", "target", "run_variant", "init_mode", "train_fraction", "fraction_seed", "seed", "epochs", "lr",
         "lr_encoder", "warmup_epochs", "freeze_encoder",
-        "batch", "grad_accum_steps", "multi_scale", "expanded_scales", "num_queries", "weight_decay", "dropout",
+        "batch", "grad_accum_steps", "resolution", "multi_scale", "expanded_scales", "num_queries", "weight_decay", "dropout",
         "early_stopping", "early_stopping_patience", "early_stopping_min_delta",
-        "early_stopping_use_ema", "early_stopping_metric", "ssl_ckpt_name",
+        "early_stopping_use_ema", "early_stopping_metric", "run_test_during_train", "ssl_ckpt_name",
     ]
     if print_rows:
         print("[PLAN] Columns: " + ", ".join(concise_cols))
@@ -3068,6 +3188,7 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
                     out_dir=run_dir,
                     model_cls=model_cls,
                     class_names=class_names,
+                    requested_resolution=try_cfg.get("RESOLUTION"),
                     init_mode=init_mode,
                     run_variant=run_variant,
                     epochs=try_cfg["EPOCHS"],
@@ -3173,9 +3294,10 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
             "input_mode": INPUT_MODE,
             "use_patch_224": USE_PATCH_224,
             "patch_size": PATCH_SIZE if USE_PATCH_224 else None,
-            "full_resolution": None if USE_PATCH_224 else FULL_RESOLUTION,
+            "requested_full_resolution": None if USE_PATCH_224 else try_cfg.get("RESOLUTION"),
             "soft_teacher_enabled": bool(RFDETR_USE_SOFT_TEACHER),
             "soft_teacher_unlabeled_dataset_dir": (RFDETR_UNLABELED_DATASET_DIR or None),
+            "run_test_during_train": RUN_TEST_DURING_TRAIN,
         }
         (run_dir / "hpo_record.json").write_text(json.dumps(row, indent=2), encoding="utf-8")
         result_q.put(("ok", row))
@@ -3224,13 +3346,6 @@ def run_hpo_all_classes(session_root: Path) -> dict:
         out_root.mkdir(parents=True, exist_ok=True)
         class_out_roots[target_name] = out_root
 
-    gpu_ids = _get_visible_gpu_ids()
-    if not gpu_ids:
-        raise RuntimeError("No visible GPUs. Set CUDA_VISIBLE_DEVICES or ensure CUDA is available.")
-    max_parallel = max(1, min(MAX_PARALLEL, len(gpu_ids)))
-    print(f"[HPO] Visible GPUs: {gpu_ids}  |  MAX_PARALLEL={max_parallel}")
-    print(f"[HPO] Input mode: {INPUT_MODE} (patch={USE_PATCH_224}, full_resolution={FULL_RESOLUTION})")
-
     jobs = []
     for target_name, class_names, dataset_dir, search_space in selected:
         for cfg in _iter_cfgs(search_space):
@@ -3244,8 +3359,25 @@ def run_hpo_all_classes(session_root: Path) -> dict:
 
     plan_rows = _build_training_plan_rows(jobs)
     _print_and_save_training_plan(plan_rows, session_root)
+    if PLAN_ONLY:
+        print("[PLAN_ONLY] RFDETR_PLAN_ONLY=1; no training workers launched.")
+        return {
+            target_name: {
+                "leaderboard": [],
+                "best": None,
+                "out_dir": str(class_out_roots[target_name]),
+            }
+            for target_name, _, _, _ in selected
+        }
 
     ctx = mp.get_context("spawn")
+    gpu_ids = _get_visible_gpu_ids()
+    if not gpu_ids:
+        raise RuntimeError("No visible GPUs. Set CUDA_VISIBLE_DEVICES or ensure CUDA is available.")
+    max_parallel = max(1, min(MAX_PARALLEL, len(gpu_ids)))
+    print(f"[HPO] Visible GPUs: {gpu_ids}  |  MAX_PARALLEL={max_parallel}")
+    print(f"[HPO] Input mode: {INPUT_MODE} (patch={USE_PATCH_224}, full_resolution={FULL_RESOLUTION})")
+
     result_q: mp.Queue = ctx.Queue()
     active: dict[int, mp.Process] = {}
     leaderboard_all = []
@@ -3409,6 +3541,8 @@ def main():
         "use_patch_224": USE_PATCH_224,
         "patch_size": PATCH_SIZE if USE_PATCH_224 else None,
         "full_resolution": None if USE_PATCH_224 else FULL_RESOLUTION,
+        "run_test_during_train": RUN_TEST_DURING_TRAIN,
+        "plan_only": PLAN_ONLY,
     }
 
     final["matrix_config"] = MATRIX_CFG
