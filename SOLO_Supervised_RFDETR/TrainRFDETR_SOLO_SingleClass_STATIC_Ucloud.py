@@ -3049,7 +3049,7 @@ def _print_and_save_training_plan(plan_rows: list[dict], session_root: Path):
         print(f"[PLAN] {target_name}: runs={len(rows)} {counts_txt}")
 
     concise_cols = [
-        "run_idx", "target", "run_variant", "init_mode", "train_fraction", "fraction_seed", "seed", "epochs", "lr",
+        "run_idx", "target", "model", "run_variant", "init_mode", "train_fraction", "fraction_seed", "seed", "epochs", "lr",
         "lr_encoder", "warmup_epochs", "freeze_encoder",
         "batch", "grad_accum_steps", "resolution", "multi_scale", "expanded_scales", "num_queries", "weight_decay", "dropout",
         "early_stopping", "early_stopping_patience", "early_stopping_min_delta",
