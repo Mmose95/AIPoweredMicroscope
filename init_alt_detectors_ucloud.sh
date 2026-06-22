@@ -11,6 +11,7 @@ ENV_NAME="${ALTDET_ENV_NAME:-altdet311}"
 PYTHON_VERSION="${ALTDET_PYTHON_VERSION:-3.11}"
 PROJECT_ROOT="${PROJECT_ROOT:-/work/projects}"
 PROJECT_NAME="${PROJECT_NAME:-myproj}"
+PROJECT_ALIAS="${PROJECT_ALIAS:-Myproj}"
 REPO_URL="${REPO_URL:-https://github.com/Mmose95/AIPoweredMicroscope}"
 
 echo "[InitAlt] Starting alternative-detector UCloud init"
@@ -49,15 +50,26 @@ echo "[InitAlt] USER_BASE_DIR=${USER_BASE_DIR}"
 mkdir -p "${PROJECT_ROOT}"
 cd "${PROJECT_ROOT}"
 
-if [ ! -d "${PROJECT_NAME}/.git" ]; then
-  echo "[InitAlt] Cloning repo into ${PROJECT_ROOT}/${PROJECT_NAME} ..."
-  git clone "${REPO_URL}" "${PROJECT_NAME}"
+PROJECT_DIR="${PROJECT_ROOT}/${PROJECT_NAME}"
+PROJECT_ALIAS_DIR="${PROJECT_ROOT}/${PROJECT_ALIAS}"
+
+if [ ! -d "${PROJECT_DIR}/.git" ]; then
+  echo "[InitAlt] Cloning repo into ${PROJECT_DIR} ..."
+  git clone "${REPO_URL}" "${PROJECT_DIR}"
 else
-  echo "[InitAlt] Pulling latest in ${PROJECT_ROOT}/${PROJECT_NAME} ..."
-  (cd "${PROJECT_NAME}" && git pull --ff-only || true)
+  echo "[InitAlt] Pulling latest in ${PROJECT_DIR} ..."
+  (cd "${PROJECT_DIR}" && git pull --ff-only || true)
 fi
 
-cd "${PROJECT_NAME}"
+if [ "${PROJECT_ALIAS}" != "${PROJECT_NAME}" ] && [ ! -e "${PROJECT_ALIAS_DIR}" ]; then
+  echo "[InitAlt] Creating convenience symlink ${PROJECT_ALIAS_DIR} -> ${PROJECT_DIR}"
+  ln -s "${PROJECT_DIR}" "${PROJECT_ALIAS_DIR}" || true
+fi
+
+echo "[InitAlt] Project directory listing:"
+ls -la "${PROJECT_ROOT}" || true
+
+cd "${PROJECT_DIR}"
 
 # 4) CUDA-aware PyTorch install.
 # For B200 jobs, prefer a CUDA wheel index. Do not silently fall back to CPU
@@ -137,7 +149,7 @@ export ALTDET_INSTALL_REQUIREMENTS_MODE="${ALTDET_INSTALL_REQUIREMENTS_MODE:-non
 export MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-file:/work/CondaEnv/mlflow/mlruns}"
 export MLFLOW_EXPERIMENT_NAME="${MLFLOW_EXPERIMENT_NAME:-AIPoweredMicroscope}"
 
-cat > "${PROJECT_ROOT}/${PROJECT_NAME}/alt_detector_env_ucloud.sh" <<EOF
+cat > "${PROJECT_DIR}/alt_detector_env_ucloud.sh" <<EOF
 export ALTDET_PYTHON="${ALTDET_PYTHON}"
 export ALTDET_INSTALL_REQUIREMENTS_MODE="${ALTDET_INSTALL_REQUIREMENTS_MODE}"
 export MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI}"
@@ -159,9 +171,12 @@ if torch.cuda.is_available():
     print(" gpu0:", torch.cuda.get_device_name(0))
 PY
 
-echo "[InitAlt] Repo at: ${PROJECT_ROOT}/${PROJECT_NAME}"
+echo "[InitAlt] Repo at: ${PROJECT_DIR}"
+if [ -e "${PROJECT_ALIAS_DIR}" ]; then
+  echo "[InitAlt] Alias: ${PROJECT_ALIAS_DIR}"
+fi
 echo "[InitAlt] Kernel: Python (${ENV_NAME})"
-echo "[InitAlt] Env file: ${PROJECT_ROOT}/${PROJECT_NAME}/alt_detector_env_ucloud.sh"
+echo "[InitAlt] Env file: ${PROJECT_DIR}/alt_detector_env_ucloud.sh"
 echo "=================="
 echo "==  Ready       =="
 echo "=================="
