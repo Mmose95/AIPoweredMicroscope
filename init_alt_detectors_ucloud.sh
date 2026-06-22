@@ -59,6 +59,13 @@ conda activate "${ENV_NAME}"
 echo "[InitAlt] Python: $(which python)"
 python --version || true
 
+# Register the Jupyter kernel early so it is visible even if a later package
+# install fails. Re-running this is harmless.
+python -m pip install --upgrade pip setuptools wheel ipykernel
+python -m ipykernel install --user \
+  --name "${ENV_NAME}" \
+  --display-name "Python (${ENV_NAME})"
+
 # 3) Detect AAU vs SDU user base.
 if compgen -G "/work/Member Files:*" >/dev/null; then
   USER_BASE_DIR="$(basename "$(ls -d /work/Member\ Files:* | head -n1)")"
@@ -105,7 +112,6 @@ if ! python -c "import torch; raise SystemExit(0 if torch.cuda.is_available() el
 
   echo "[InitAlt] CUDA_VER=${CUDA_VER:-unknown}"
   echo "[InitAlt] Using PyTorch index: ${TORCH_IDX}"
-  python -m pip install --upgrade pip setuptools wheel
 
   if [ -n "${ALTDET_TORCH_VERSION:-}" ] || [ -n "${ALTDET_TORCHVISION_VERSION:-}" ] || [ -n "${ALTDET_TORCHAUDIO_VERSION:-}" ]; then
     if [ -z "${ALTDET_TORCH_VERSION:-}" ] || [ -z "${ALTDET_TORCHVISION_VERSION:-}" ] || [ -z "${ALTDET_TORCHAUDIO_VERSION:-}" ]; then
@@ -135,15 +141,9 @@ python -m pip install --upgrade --no-cache-dir \
   scipy==1.16.0 \
   calflops transformers tabulate \
   onnx==1.19.0 onnxruntime opencv-python \
-  einops timm \
-  ipykernel
+  einops timm
 
-# 6) Register Jupyter kernel.
-python -m ipykernel install --user \
-  --name "${ENV_NAME}" \
-  --display-name "Python (${ENV_NAME})"
-
-# 7) Persistent defaults for the benchmark notebook.
+# 6) Persistent defaults for the benchmark notebook.
 export ALTDET_PYTHON="${CONDA_PREFIX}/bin/python"
 export ALTDET_INSTALL_REQUIREMENTS_MODE="${ALTDET_INSTALL_REQUIREMENTS_MODE:-non_torch}"
 export MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-file:/work/CondaEnv/mlflow/mlruns}"
@@ -156,7 +156,7 @@ export MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI}"
 export MLFLOW_EXPERIMENT_NAME="${MLFLOW_EXPERIMENT_NAME}"
 EOF
 
-# 8) Final checks.
+# 7) Final checks.
 echo "[InitAlt] Torch check:"
 python - <<'PY'
 import sys
