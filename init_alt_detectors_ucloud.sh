@@ -13,11 +13,46 @@ PROJECT_ROOT="${PROJECT_ROOT:-/work/projects}"
 PROJECT_NAME="${PROJECT_NAME:-myproj}"
 PROJECT_ALIAS="${PROJECT_ALIAS:-Myproj}"
 REPO_URL="${REPO_URL:-https://github.com/Mmose95/AIPoweredMicroscope}"
+SCRIPT_VERSION="2026-06-22-clone-first"
+INIT_LOG="${INIT_LOG:-/work/projects/init_alt_detectors_ucloud.log}"
+
+mkdir -p "$(dirname "${INIT_LOG}")"
+exec > >(tee -a "${INIT_LOG}") 2>&1
 
 echo "[InitAlt] Starting alternative-detector UCloud init"
+echo "[InitAlt] SCRIPT_VERSION=${SCRIPT_VERSION}"
+echo "[InitAlt] Log: ${INIT_LOG}"
 echo "[InitAlt] ENV_NAME=${ENV_NAME}"
 
-# 1) Load conda and create/activate isolated env.
+# 1) Get code first. If later env setup fails, the repo should still be visible.
+mkdir -p "${PROJECT_ROOT}"
+cd "${PROJECT_ROOT}"
+
+PROJECT_DIR="${PROJECT_ROOT}/${PROJECT_NAME}"
+PROJECT_ALIAS_DIR="${PROJECT_ROOT}/${PROJECT_ALIAS}"
+
+if [ ! -d "${PROJECT_DIR}/.git" ] && [ -d "${PROJECT_ALIAS_DIR}/.git" ]; then
+  echo "[InitAlt] Found existing alias repo at ${PROJECT_ALIAS_DIR}; using it as PROJECT_DIR."
+  PROJECT_DIR="${PROJECT_ALIAS_DIR}"
+fi
+
+if [ ! -d "${PROJECT_DIR}/.git" ]; then
+  echo "[InitAlt] Cloning repo into ${PROJECT_DIR} ..."
+  git clone "${REPO_URL}" "${PROJECT_DIR}"
+else
+  echo "[InitAlt] Pulling latest in ${PROJECT_DIR} ..."
+  (cd "${PROJECT_DIR}" && git pull --ff-only || true)
+fi
+
+if [ "${PROJECT_ALIAS}" != "$(basename "${PROJECT_DIR}")" ] && [ ! -e "${PROJECT_ALIAS_DIR}" ]; then
+  echo "[InitAlt] Creating convenience symlink ${PROJECT_ALIAS_DIR} -> ${PROJECT_DIR}"
+  ln -s "${PROJECT_DIR}" "${PROJECT_ALIAS_DIR}" || true
+fi
+
+echo "[InitAlt] Project directory listing:"
+ls -la "${PROJECT_ROOT}" || true
+
+# 2) Load conda and create/activate isolated env.
 if [ ! -x "${CONDA_BIN}" ]; then
   echo "[InitAlt][ERROR] Could not find conda at ${CONDA_BIN}" >&2
   exit 1
@@ -36,7 +71,7 @@ conda activate "${ENV_NAME}"
 echo "[InitAlt] Python: $(which python)"
 python --version || true
 
-# 2) Detect AAU vs SDU user base.
+# 3) Detect AAU vs SDU user base.
 if compgen -G "/work/Member Files:*" >/dev/null; then
   USER_BASE_DIR="$(basename "$(ls -d /work/Member\ Files:* | head -n1)")"
 else
@@ -45,29 +80,6 @@ fi
 
 export USER_BASE_DIR
 echo "[InitAlt] USER_BASE_DIR=${USER_BASE_DIR}"
-
-# 3) Get code.
-mkdir -p "${PROJECT_ROOT}"
-cd "${PROJECT_ROOT}"
-
-PROJECT_DIR="${PROJECT_ROOT}/${PROJECT_NAME}"
-PROJECT_ALIAS_DIR="${PROJECT_ROOT}/${PROJECT_ALIAS}"
-
-if [ ! -d "${PROJECT_DIR}/.git" ]; then
-  echo "[InitAlt] Cloning repo into ${PROJECT_DIR} ..."
-  git clone "${REPO_URL}" "${PROJECT_DIR}"
-else
-  echo "[InitAlt] Pulling latest in ${PROJECT_DIR} ..."
-  (cd "${PROJECT_DIR}" && git pull --ff-only || true)
-fi
-
-if [ "${PROJECT_ALIAS}" != "${PROJECT_NAME}" ] && [ ! -e "${PROJECT_ALIAS_DIR}" ]; then
-  echo "[InitAlt] Creating convenience symlink ${PROJECT_ALIAS_DIR} -> ${PROJECT_DIR}"
-  ln -s "${PROJECT_DIR}" "${PROJECT_ALIAS_DIR}" || true
-fi
-
-echo "[InitAlt] Project directory listing:"
-ls -la "${PROJECT_ROOT}" || true
 
 cd "${PROJECT_DIR}"
 
