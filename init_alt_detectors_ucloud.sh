@@ -156,7 +156,7 @@ python -m pip install --upgrade --no-cache-dir \
   scipy==1.16.0 \
   calflops transformers tabulate \
   onnx==1.19.0 onnxruntime opencv-python \
-  einops timm
+  einops timm matplotlib
 
 # 6) Persistent defaults for the benchmark notebook.
 export ALTDET_PYTHON="${CONDA_PREFIX}/bin/python"
