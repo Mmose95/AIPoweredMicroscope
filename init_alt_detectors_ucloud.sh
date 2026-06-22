@@ -11,7 +11,6 @@ ENV_NAME="${ALTDET_ENV_NAME:-altdet311}"
 PYTHON_VERSION="${ALTDET_PYTHON_VERSION:-3.11}"
 PROJECT_ROOT="${PROJECT_ROOT:-/work/projects}"
 PROJECT_NAME="${PROJECT_NAME:-myproj}"
-PROJECT_ALIAS="${PROJECT_ALIAS:-Myproj}"
 REPO_URL="${REPO_URL:-https://github.com/Mmose95/AIPoweredMicroscope}"
 SCRIPT_VERSION="2026-06-22-clone-first"
 INIT_LOG="${INIT_LOG:-/work/projects/init_alt_detectors_ucloud.log}"
@@ -29,12 +28,6 @@ mkdir -p "${PROJECT_ROOT}"
 cd "${PROJECT_ROOT}"
 
 PROJECT_DIR="${PROJECT_ROOT}/${PROJECT_NAME}"
-PROJECT_ALIAS_DIR="${PROJECT_ROOT}/${PROJECT_ALIAS}"
-
-if [ ! -d "${PROJECT_DIR}/.git" ] && [ -d "${PROJECT_ALIAS_DIR}/.git" ]; then
-  echo "[InitAlt] Found existing alias repo at ${PROJECT_ALIAS_DIR}; using it as PROJECT_DIR."
-  PROJECT_DIR="${PROJECT_ALIAS_DIR}"
-fi
 
 if [ ! -d "${PROJECT_DIR}/.git" ]; then
   echo "[InitAlt] Cloning repo into ${PROJECT_DIR} ..."
@@ -42,11 +35,6 @@ if [ ! -d "${PROJECT_DIR}/.git" ]; then
 else
   echo "[InitAlt] Pulling latest in ${PROJECT_DIR} ..."
   (cd "${PROJECT_DIR}" && git pull --ff-only || true)
-fi
-
-if [ "${PROJECT_ALIAS}" != "$(basename "${PROJECT_DIR}")" ] && [ ! -e "${PROJECT_ALIAS_DIR}" ]; then
-  echo "[InitAlt] Creating convenience symlink ${PROJECT_ALIAS_DIR} -> ${PROJECT_DIR}"
-  ln -s "${PROJECT_DIR}" "${PROJECT_ALIAS_DIR}" || true
 fi
 
 echo "[InitAlt] Project directory listing:"
@@ -184,9 +172,6 @@ if torch.cuda.is_available():
 PY
 
 echo "[InitAlt] Repo at: ${PROJECT_DIR}"
-if [ -e "${PROJECT_ALIAS_DIR}" ]; then
-  echo "[InitAlt] Alias: ${PROJECT_ALIAS_DIR}"
-fi
 echo "[InitAlt] Kernel: Python (${ENV_NAME})"
 echo "[InitAlt] Env file: ${PROJECT_DIR}/alt_detector_env_ucloud.sh"
 echo "=================="
