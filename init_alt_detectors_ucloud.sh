@@ -50,6 +50,19 @@ fi
 
 eval "$("${CONDA_BIN}" shell.bash hook)"
 
+accept_conda_tos() {
+  local channel
+  for channel in \
+    "https://repo.anaconda.com/pkgs/main" \
+    "https://repo.anaconda.com/pkgs/r"
+  do
+    echo "[InitAlt] Accepting Anaconda Terms of Service for ${channel} ..."
+    conda tos accept --override-channels --channel "${channel}" || true
+  done
+}
+
+accept_conda_tos
+
 if [ ! -x "${ENV_DIR}/bin/python" ]; then
   echo "[InitAlt] Creating conda env at ${ENV_DIR} with Python ${PYTHON_VERSION} ..."
   conda create -y -p "${ENV_DIR}" "python=${PYTHON_VERSION}"
