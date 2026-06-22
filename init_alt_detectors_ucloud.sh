@@ -8,6 +8,7 @@ set -Eeuo pipefail
 
 CONDA_BIN="${CONDA_BIN:-/work/CondaEnv/miniconda3/bin/conda}"
 ENV_NAME="${ALTDET_ENV_NAME:-altdet311}"
+ENV_DIR="${ALTDET_ENV_DIR:-/work/CondaEnv/envs/${ENV_NAME}}"
 PYTHON_VERSION="${ALTDET_PYTHON_VERSION:-3.11}"
 PROJECT_ROOT="${PROJECT_ROOT:-/work/projects}"
 PROJECT_NAME="${PROJECT_NAME:-myproj}"
@@ -22,6 +23,7 @@ echo "[InitAlt] Starting alternative-detector UCloud init"
 echo "[InitAlt] SCRIPT_VERSION=${SCRIPT_VERSION}"
 echo "[InitAlt] Log: ${INIT_LOG}"
 echo "[InitAlt] ENV_NAME=${ENV_NAME}"
+echo "[InitAlt] ENV_DIR=${ENV_DIR}"
 
 # 1) Get code first. If later env setup fails, the repo should still be visible.
 mkdir -p "${PROJECT_ROOT}"
@@ -48,14 +50,14 @@ fi
 
 eval "$("${CONDA_BIN}" shell.bash hook)"
 
-if ! conda env list | awk '{print $1}' | grep -qx "${ENV_NAME}"; then
-  echo "[InitAlt] Creating conda env ${ENV_NAME} with Python ${PYTHON_VERSION} ..."
-  conda create -y -n "${ENV_NAME}" "python=${PYTHON_VERSION}"
+if [ ! -x "${ENV_DIR}/bin/python" ]; then
+  echo "[InitAlt] Creating conda env at ${ENV_DIR} with Python ${PYTHON_VERSION} ..."
+  conda create -y -p "${ENV_DIR}" "python=${PYTHON_VERSION}"
 else
-  echo "[InitAlt] Conda env ${ENV_NAME} already exists."
+  echo "[InitAlt] Conda env already exists at ${ENV_DIR}."
 fi
 
-conda activate "${ENV_NAME}"
+conda activate "${ENV_DIR}"
 echo "[InitAlt] Python: $(which python)"
 python --version || true
 
