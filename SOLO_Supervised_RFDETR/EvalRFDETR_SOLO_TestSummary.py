@@ -52,8 +52,9 @@ from rfdetr_model_registry import (
 # -----------------------------------------------------------------------------
 # Optional top-level config for running directly from PyCharm
 # -----------------------------------------------------------------------------
-# Leave disabled for normal CLI usage.
-PYCHARM_USE_TOP_LEVEL_CONFIG = False
+# Enabled so running this script with no command-line arguments evaluates the
+# final HPO-selected object detector on the held-out COCO test split.
+PYCHARM_USE_TOP_LEVEL_CONFIG = True
 PYCHARM_MODE = "evaluate"  # "evaluate" or "summarize"
 
 PYCHARM_SUMMARIZE = {
@@ -64,11 +65,11 @@ PYCHARM_SUMMARIZE = {
 }
 
 PYCHARM_EVALUATE = {
-    "run_dir": "",
-    "checkpoint": "",
-    "test_json": "",
-    "output_dir": "",
-    "model_class": "RFDETRLarge",
+    "run_dir": r"E:\PHD\Results\Quality Assessment\FINAL_B200\session_20260618_113853\TwoClass\HPO_Config_009",
+    "checkpoint": r"E:\PHD\Results\Quality Assessment\FINAL_B200\session_20260618_113853\TwoClass\HPO_Config_009\checkpoint_best_ema.pth",
+    "test_json": r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\SOLO_Supervised_RFDETR\Stat_Dataset\QA-2025v1_TwoClass_OVR_V2_20260618-101346\test\_annotations.coco.json",
+    "output_dir": r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\EvaluationOutput\TwoClass_HPO009_EMA_TestEval",
+    "model_class": "auto",
     "score_floor": 0.001,
     "score_threshold": 0.30,
     "confmat_iou": 0.50,
@@ -82,7 +83,7 @@ PYCHARM_EVALUATE = {
     "image_max_side": 1600,
     "seed": 42,
     "path_rewrite": "",
-    "images_root": "",
+    "images_root": r"D:\PHD\PhdData\CellScanData\Zoom10x - Quality Assessment_Cleaned",
     "skip_missing_images": False,
     "no_plots": False,
 }
