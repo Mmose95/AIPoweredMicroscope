@@ -226,7 +226,9 @@ def patch_transformers_torch_compat() -> None:
         )
 
     try:
+        import transformers
         import transformers.utils as tf_utils
+        import transformers.utils.backbone_utils as tf_backbone_utils
         import transformers.utils.import_utils as tf_import_utils
     except Exception:
         return
@@ -251,6 +253,10 @@ def patch_transformers_torch_compat() -> None:
     tf_import_utils.get_torch_version = _torch_version
     tf_utils.is_torch_available = _always_true
     tf_utils.get_torch_version = _torch_version
+
+    for attr_name in ("BackboneConfigMixin", "BackboneMixin"):
+        if attr_name not in transformers.__dict__ and hasattr(tf_backbone_utils, attr_name):
+            setattr(transformers, attr_name, getattr(tf_backbone_utils, attr_name))
 
     if hasattr(tf_import_utils, "_torch_available"):
         tf_import_utils._torch_available = True

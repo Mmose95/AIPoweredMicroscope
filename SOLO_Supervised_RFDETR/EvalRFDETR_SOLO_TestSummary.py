@@ -29,6 +29,7 @@ import argparse
 import csv
 import glob
 import json
+import math
 import os
 import os.path as op
 import random
@@ -48,6 +49,11 @@ from rfdetr_model_registry import (
     instantiate_rfdetr_model,
     supported_rfdetr_model_names,
 )
+
+try:
+    import EvalRFDETR_SOLO_LocalOnly as local_eval_compat
+except Exception:  # pragma: no cover - optional compatibility helper
+    local_eval_compat = None  # type: ignore[assignment]
 
 # -----------------------------------------------------------------------------
 # Optional top-level config for running directly from PyCharm
@@ -492,31 +498,152 @@ def resolve_image_path(
 
 
 def infer_model_class(run_dir: Path, checkpoint: Path) -> str:
-    meta_model = run_dir / "rfdetr_run" / "run_meta" / "model_architecture.json"
-    if meta_model.exists():
-        try:
-            js = json.loads(meta_model.read_text(encoding="utf-8"))
-            name = str(js.get("model_name", "")).strip()
-            if name in SUPPORTED_RFDETR_MODEL_NAME_SET:
-                return name
-        except Exception:
-            pass
+    metadata_candidates = [
+        (run_dir / "rfdetr_run" / "run_meta" / "model_architecture.json", ("model_name",)),
+        (run_dir / "run_meta" / "model_architecture.json", ("model_name",)),
+        (checkpoint.parent / "run_meta" / "model_architecture.json", ("model_name",)),
+        (run_dir / "rfdetr_run" / "run_meta" / "train_kwargs.json", ("RFDETR_MODEL_CLS", "model_cls", "model_class")),
+        (run_dir / "run_meta" / "train_kwargs.json", ("RFDETR_MODEL_CLS", "model_cls", "model_class")),
+        (checkpoint.parent / "run_meta" / "train_kwargs.json", ("RFDETR_MODEL_CLS", "model_cls", "model_class")),
+        (run_dir / "hpo_record.json", ("MODEL_CLS", "model_cls", "model_class")),
+        (checkpoint.parent / "hpo_record.json", ("MODEL_CLS", "model_cls", "model_class")),
+    ]
 
-    meta_train = run_dir / "rfdetr_run" / "run_meta" / "train_kwargs.json"
-    if meta_train.exists():
+    for path, keys in metadata_candidates:
+        if not path.exists():
+            continue
         try:
-            js = json.loads(meta_train.read_text(encoding="utf-8"))
-            name = str(js.get("RFDETR_MODEL_CLS", "")).strip()
+            js = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for key in keys:
+            name = str(js.get(key, "")).strip()
             if name in SUPPORTED_RFDETR_MODEL_NAME_SET:
                 return name
-        except Exception:
-            pass
 
     return infer_rfdetr_model_name_from_checkpoint_name(checkpoint.name.lower())
 
 
-def load_model(model_class: str, checkpoint: Path):
-    model = instantiate_rfdetr_model(model_class, pretrain_weights=str(checkpoint))
+def _read_json_if_exists(path: Path) -> Optional[Dict[str, Any]]:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _first_int_from_metadata(
+    run_dir: Path,
+    checkpoint: Path,
+    keys: Sequence[str],
+) -> Optional[int]:
+    metadata_paths = [
+        run_dir / "rfdetr_run" / "run_meta" / "train_kwargs.json",
+        run_dir / "run_meta" / "train_kwargs.json",
+        checkpoint.parent / "run_meta" / "train_kwargs.json",
+        run_dir / "hpo_record.json",
+        checkpoint.parent / "hpo_record.json",
+    ]
+    for path in metadata_paths:
+        js = _read_json_if_exists(path)
+        if js is None:
+            continue
+        for key in keys:
+            raw = js.get(key)
+            if raw is None or raw == "":
+                continue
+            try:
+                return int(raw)
+            except Exception:
+                continue
+    return None
+
+
+def _int_from_mapping(mapping: Any, key: str) -> Optional[int]:
+    if not isinstance(mapping, dict):
+        return None
+    raw = mapping.get(key)
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except Exception:
+        return None
+
+
+def _checkpoint_constructor_kwargs(checkpoint: Path) -> Dict[str, int]:
+    if torch is None:
+        return {}
+    try:
+        payload = torch.load(str(checkpoint), map_location="cpu", weights_only=False)
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+
+    model_state = payload.get("model")
+    if not isinstance(model_state, dict):
+        return {}
+    args_payload = payload.get("args")
+    if not isinstance(args_payload, dict):
+        args_payload = {}
+
+    kwargs: Dict[str, int] = {}
+
+    class_bias = model_state.get("class_embed.bias")
+    if hasattr(class_bias, "shape") and len(class_bias.shape) >= 1:
+        kwargs["num_classes"] = max(1, int(class_bias.shape[0]) - 1)
+
+    group_detr = _int_from_mapping(args_payload, "group_detr")
+    if group_detr is not None and group_detr > 0:
+        kwargs["group_detr"] = group_detr
+
+    num_select = _int_from_mapping(args_payload, "num_select")
+    if num_select is not None and num_select > 0:
+        kwargs["num_select"] = num_select
+
+    refpoint_weight = model_state.get("refpoint_embed.weight")
+    if hasattr(refpoint_weight, "shape") and len(refpoint_weight.shape) >= 1:
+        total_query_slots = int(refpoint_weight.shape[0])
+        if group_detr is not None and group_detr > 0 and total_query_slots % group_detr == 0:
+            kwargs["num_queries"] = total_query_slots // group_detr
+
+    patch_weight = model_state.get("backbone.0.encoder.encoder.embeddings.patch_embeddings.projection.weight")
+    patch_size: Optional[int] = None
+    if hasattr(patch_weight, "shape") and len(patch_weight.shape) >= 4:
+        patch_size = int(patch_weight.shape[-1])
+        if patch_size > 0:
+            kwargs["patch_size"] = patch_size
+
+    pos_embed = model_state.get("backbone.0.encoder.encoder.embeddings.position_embeddings")
+    if (
+        patch_size is not None
+        and patch_size > 0
+        and hasattr(pos_embed, "shape")
+        and len(pos_embed.shape) >= 2
+    ):
+        patch_positions = int(pos_embed.shape[1]) - 1
+        grid_size = int(round(math.sqrt(max(0, patch_positions))))
+        if grid_size > 0 and grid_size * grid_size == patch_positions:
+            kwargs["resolution"] = grid_size * patch_size
+
+    return kwargs
+
+
+def load_model(model_class: str, checkpoint: Path, run_dir: Path):
+    if local_eval_compat is not None:
+        local_eval_compat.patch_transformers_torch_compat()
+        local_eval_compat.ensure_rfdetr_import()
+    model_kwargs: Dict[str, Any] = {"pretrain_weights": str(checkpoint)}
+    model_kwargs.update(_checkpoint_constructor_kwargs(checkpoint))
+
+    resolution = _first_int_from_metadata(run_dir, checkpoint, ("resolution", "RESOLUTION"))
+    if resolution is not None and "resolution" not in model_kwargs:
+        model_kwargs["resolution"] = resolution
+
+    model = instantiate_rfdetr_model(model_class, **model_kwargs)
     if hasattr(model, "optimize_for_inference"):
         try:
             model.optimize_for_inference()
@@ -1064,7 +1191,7 @@ def run_evaluate_mode(args: argparse.Namespace) -> None:
     n_classes = len(id_to_idx)
     labels = [cat_id_to_name[idx_to_id[i]] for i in range(n_classes)]
 
-    model = load_model(cfg.model_class, cfg.checkpoint)
+    model = load_model(cfg.model_class, cfg.checkpoint, cfg.run_dir)
 
     all_img_ids = coco.getImgIds()
     if cfg.max_images is not None:
