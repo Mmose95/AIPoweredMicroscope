@@ -848,7 +848,11 @@ def confusion_matrix_with_background(
         pred_cls = sample["pred_cls"][keep]
 
         ious = iou_matrix(gt_boxes, pred_boxes)
-        matches = greedy_match(ious, iou_thr=iou_thr, valid_pairs=None)
+        if len(gt_boxes) and len(pred_boxes):
+            valid_pairs = gt_cls[:, None] == pred_cls[None, :]
+        else:
+            valid_pairs = None
+        matches = greedy_match(ious, iou_thr=iou_thr, valid_pairs=valid_pairs)
         matched_gt = {gi for gi, _ in matches}
         matched_pr = {pj for _, pj in matches}
 
@@ -1244,6 +1248,16 @@ def find_iou_index(iou_thrs: np.ndarray, target: float, tol: float = 1e-6) -> Op
     return int(idx[0])
 
 
+def timestamped_output_dir(base_dir: Path) -> Path:
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    output_dir = base_dir.parent / f"{base_dir.name}_{stamp}"
+    suffix = 2
+    while output_dir.exists():
+        output_dir = base_dir.parent / f"{base_dir.name}_{stamp}_{suffix:02d}"
+        suffix += 1
+    return output_dir
+
+
 def build_eval_config(args: argparse.Namespace) -> EvalConfig:
     run_dir = args.run_dir.resolve()
     checkpoint = args.checkpoint or (run_dir / "rfdetr_run" / "checkpoint_best_total.pth")
@@ -1251,7 +1265,7 @@ def build_eval_config(args: argparse.Namespace) -> EvalConfig:
     test_json = args.test_json or (run_dir / "test" / "_annotations.coco.json")
     test_json = test_json.resolve()
     output_dir = args.output_dir or (run_dir / "rfdetr_run" / "eval_custom")
-    output_dir = output_dir.resolve()
+    output_dir = timestamped_output_dir(output_dir.resolve())
 
     if args.model_class == "auto":
         model_class = infer_model_class(run_dir, checkpoint)
@@ -1497,6 +1511,7 @@ def run_evaluate_mode(args: argparse.Namespace) -> None:
             "matrix": cm.tolist(),
             "score_threshold": cfg.score_threshold,
             "iou_threshold": cfg.confmat_iou,
+            "matching": "class_aware",
         },
     )
 
