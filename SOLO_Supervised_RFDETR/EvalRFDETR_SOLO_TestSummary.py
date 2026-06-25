@@ -86,6 +86,7 @@ PYCHARM_EVALUATE = {
     "threshold_points": 51,
     "max_images": None,
     "num_overlays": 8,
+
     "image_max_side": 1600,
     "seed": 42,
     "path_rewrite": "",
@@ -963,8 +964,6 @@ def make_threshold_grid(all_scores: np.ndarray, n_points: int) -> np.ndarray:
 
 def draw_overlay(
     img_path: Path,
-    gt_boxes: np.ndarray,
-    gt_names: List[str],
     pred_boxes: np.ndarray,
     pred_names: List[str],
     pred_scores: np.ndarray,
@@ -981,18 +980,52 @@ def draw_overlay(
     def sc(box: np.ndarray) -> List[float]:
         return [float(box[0] * scale), float(box[1] * scale), float(box[2] * scale), float(box[3] * scale)]
 
-    for box, name in zip(gt_boxes, gt_names):
-        x1, y1, x2, y2 = sc(box)
-        draw.rectangle([x1, y1, x2, y2], outline=(0, 255, 0), width=2)
-        draw.text((x1 + 2, y1 + 2), str(name), fill=(0, 255, 0))
+    def class_color(name: str) -> Tuple[int, int, int]:
+        key = str(name).strip().lower()
+        if "leucocyte" in key or "leukocyte" in key:
+            return (220, 30, 30)
+        if "epithelial" in key or "squamous" in key:
+            return (30, 95, 220)
+        return (255, 160, 0)
 
     for box, name, score in zip(pred_boxes, pred_names, pred_scores):
         x1, y1, x2, y2 = sc(box)
-        draw.rectangle([x1, y1, x2, y2], outline=(255, 0, 0), width=2)
-        draw.text((x1 + 2, y1 + 2), f"{float(score):.2f} {name}", fill=(255, 0, 0))
+        color = class_color(name)
+        draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
+        draw.text((x1 + 2, y1 + 2), f"{float(score):.2f} {name}", fill=color)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     img.save(out_path)
+
+
+def matched_correct_predictions(
+    sample: Dict[str, Any],
+    score_threshold: float,
+    iou_thr: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    keep = sample["pred_scores"] >= score_threshold
+    pred_boxes = sample["pred_boxes"][keep]
+    pred_scores = sample["pred_scores"][keep]
+    pred_cls = sample["pred_cls"][keep]
+
+    if len(sample["gt_boxes"]) == 0 or len(pred_boxes) == 0:
+        return (
+            np.zeros((0, 4), dtype=np.float32),
+            np.zeros((0,), dtype=np.float32),
+            np.zeros((0,), dtype=np.int64),
+        )
+
+    ious = iou_matrix(sample["gt_boxes"], pred_boxes)
+    valid = sample["gt_cls"][:, None] == pred_cls[None, :]
+    matches = greedy_match(ious, iou_thr=iou_thr, valid_pairs=valid)
+    pred_indices = [pj for _, pj in matches]
+    if not pred_indices:
+        return (
+            np.zeros((0, 4), dtype=np.float32),
+            np.zeros((0,), dtype=np.float32),
+            np.zeros((0,), dtype=np.int64),
+        )
+    return pred_boxes[pred_indices], pred_scores[pred_indices], pred_cls[pred_indices]
 
 
 def save_confusion_csv(path: Path, labels: List[str], cm: np.ndarray) -> None:
@@ -1002,6 +1035,101 @@ def save_confusion_csv(path: Path, labels: List[str], cm: np.ndarray) -> None:
         writer.writerow(["true\\pred"] + labels)
         for idx, row in enumerate(cm):
             writer.writerow([labels[idx]] + row.tolist())
+
+
+def save_confusion_figure(path: Path, labels: List[str], cm: np.ndarray) -> None:
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        print("[EVALUATE][WARN] matplotlib not available; skipping confusion matrix PNG.")
+        return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    row_totals = cm.sum(axis=1, keepdims=True)
+    pct = np.divide(
+        cm,
+        row_totals,
+        out=np.zeros_like(cm, dtype=np.float64),
+        where=row_totals != 0,
+    ) * 100.0
+
+    fig_size = max(7.0, 1.85 * len(labels))
+    fig, ax = plt.subplots(figsize=(fig_size, fig_size))
+    im = ax.imshow(pct, interpolation="nearest", cmap="Blues", vmin=0.0, vmax=100.0)
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="Row-normalized percentage")
+
+    ax.set_title("Object Detection Confusion Matrix", fontsize=16, pad=12)
+    ax.set_xlabel("Predicted class", fontsize=12)
+    ax.set_ylabel("Ground truth class", fontsize=12)
+    ax.set_xticks(np.arange(len(labels)))
+    ax.set_yticks(np.arange(len(labels)))
+    ax.set_xticklabels(labels, rotation=30, ha="right")
+    ax.set_yticklabels(labels, rotation=30, va="center")
+
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            color = "white" if pct[i, j] >= 50.0 else "black"
+            ax.text(
+                j,
+                i,
+                f"{int(cm[i, j])}\n{pct[i, j]:.1f}%",
+                ha="center",
+                va="center",
+                color=color,
+                fontsize=11,
+            )
+
+    ax.set_ylim(len(labels) - 0.5, -0.5)
+    fig.tight_layout()
+    fig.savefig(path, dpi=220)
+    plt.close(fig)
+
+
+def save_iou_ap_figure(
+    path: Path,
+    iou_rows: Sequence[Dict[str, Any]],
+    per_class_iou_rows: Sequence[Dict[str, Any]],
+) -> None:
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        print("[EVALUATE][WARN] matplotlib not available; skipping mAP-by-IoU PNG.")
+        return
+
+    if not iou_rows:
+        return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    x_vals = [float(row["iou_threshold"]) for row in iou_rows]
+    y_vals = [float(row["AP_all"]) for row in iou_rows]
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(x_vals, y_vals, marker="o", linewidth=2.3, label="mAP")
+
+    class_rows: Dict[str, List[Tuple[float, float]]] = {}
+    for row in per_class_iou_rows:
+        class_rows.setdefault(str(row["class"]), []).append((float(row["iou_threshold"]), float(row["AP"])))
+    for class_name, points in sorted(class_rows.items()):
+        points.sort(key=lambda item: item[0])
+        ax.plot(
+            [p[0] for p in points],
+            [p[1] for p in points],
+            marker=".",
+            linewidth=1.6,
+            alpha=0.85,
+            label=f"AP {class_name}",
+        )
+
+    ax.set_title("AP by IoU Threshold")
+    ax.set_xlabel("IoU threshold")
+    ax.set_ylabel("AP / mAP")
+    ax.set_xlim(min(x_vals), max(x_vals))
+    ax.set_ylim(0.0, 1.0)
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=220)
+    plt.close(fig)
 
 
 def try_plot_curves(
@@ -1347,6 +1475,11 @@ def run_evaluate_mode(args: argparse.Namespace) -> None:
         ["category_id", "class", "AP_iou_sweep", "AR_iou_sweep", "AP@50", "AR@50", "AP@75", "AR@75"],
         per_class_rows,
     )
+    save_iou_ap_figure(
+        cfg.output_dir / "map_by_iou_threshold.png",
+        iou_rows=iou_rows,
+        per_class_iou_rows=per_class_iou_rows,
+    )
 
     cm = confusion_matrix_with_background(
         samples=samples,
@@ -1356,6 +1489,7 @@ def run_evaluate_mode(args: argparse.Namespace) -> None:
     )
     cm_labels = labels + ["background"]
     save_confusion_csv(cfg.output_dir / "confusion_matrix.csv", cm_labels, cm)
+    save_confusion_figure(cfg.output_dir / "confusion_matrix.png", cm_labels, cm)
     json_dump(
         cfg.output_dir / "confusion_matrix.json",
         {
@@ -1449,21 +1583,23 @@ def run_evaluate_mode(args: argparse.Namespace) -> None:
 
     overlays_dir = cfg.output_dir / "overlays"
     if cfg.num_overlays > 0 and samples:
-        eligible = [s for s in samples if len(s["gt_boxes"]) > 0 or np.any(s["pred_scores"] >= cfg.score_threshold)]
+        eligible = [
+            s
+            for s in samples
+            if len(matched_correct_predictions(s, cfg.score_threshold, cfg.confmat_iou)[0]) > 0
+        ]
         random.shuffle(eligible)
         chosen = eligible[: cfg.num_overlays]
         for idx, sample in enumerate(chosen, start=1):
-            keep = sample["pred_scores"] >= cfg.score_threshold
-            pred_boxes = sample["pred_boxes"][keep]
-            pred_cls = sample["pred_cls"][keep]
-            pred_scores = sample["pred_scores"][keep]
+            pred_boxes, pred_scores, pred_cls = matched_correct_predictions(
+                sample,
+                cfg.score_threshold,
+                cfg.confmat_iou,
+            )
 
-            gt_names = [labels[int(c)] for c in sample["gt_cls"]]
             pred_names = [labels[int(c)] for c in pred_cls]
             draw_overlay(
                 img_path=Path(sample["img_path"]),
-                gt_boxes=sample["gt_boxes"],
-                gt_names=gt_names,
                 pred_boxes=pred_boxes,
                 pred_names=pred_names,
                 pred_scores=pred_scores,
@@ -1512,6 +1648,8 @@ def run_evaluate_mode(args: argparse.Namespace) -> None:
             "per_class_metrics": str(cfg.output_dir / "per_class_metrics.csv"),
             "confusion_matrix_csv": str(cfg.output_dir / "confusion_matrix.csv"),
             "confusion_matrix_json": str(cfg.output_dir / "confusion_matrix.json"),
+            "confusion_matrix_figure": str(cfg.output_dir / "confusion_matrix.png"),
+            "map_by_iou_figure": str(cfg.output_dir / "map_by_iou_threshold.png"),
             "threshold_metrics": str(cfg.output_dir / "threshold_metrics.csv"),
             "pr_curve": str(cfg.output_dir / "pr_curve_overall.csv"),
             "roc_curve": str(cfg.output_dir / "roc_curve_overall.csv"),
