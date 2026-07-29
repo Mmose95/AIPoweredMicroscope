@@ -25,3 +25,8 @@
 /EvaluationOutput/*
 !/EvaluationOutput/RFDETR_ThresholdCalibration_20260701-140419/
 !/EvaluationOutput/RFDETR_ThresholdCalibration_20260701-140419/**
+!/EvaluationOutput/Combined_RFDETR_Study_Report_20260729-123927/
+!/EvaluationOutput/Combined_RFDETR_Study_Report_20260729-123927/RFDETR_Combined_Study_Results.docx
+
+# Microsoft Office temporary lock files
+~$*.docx
