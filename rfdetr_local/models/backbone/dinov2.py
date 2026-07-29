@@ -46,7 +46,19 @@ def get_config(size, use_registers):
 
 
 class DinoV2(nn.Module):
-    def __init__(self, shape=(640, 640), out_feature_indexes=[2, 4, 5, 9], size="base", use_registers=True, use_windowed_attn=True, gradient_checkpointing=False, load_dinov2_weights=True):
+    def __init__(
+        self,
+        shape=(640, 640),
+        out_feature_indexes=[2, 4, 5, 9],
+        size="base",
+        use_registers=True,
+        use_windowed_attn=True,
+        gradient_checkpointing=False,
+        load_dinov2_weights=True,
+        patch_size=None,
+        num_windows=4,
+        positional_encoding_size=None,
+    ):
         super().__init__()
 
         name = f"facebook/dinov2-with-registers-{size}" if use_registers else f"facebook/dinov2-{size}"
@@ -72,18 +84,24 @@ class DinoV2(nn.Module):
 
             dino_config["return_dict"] = False
             dino_config["out_features"] = [f"stage{i}" for i in out_feature_indexes]
+            if patch_size is not None:
+                dino_config["patch_size"] = int(patch_size)
+            if positional_encoding_size is not None:
+                dino_config["image_size"] = int(positional_encoding_size) * int(dino_config["patch_size"])
+            elif shape is not None:
+                dino_config["image_size"] = int(shape[0])
 
             if use_registers:
                 windowed_dino_config = WindowedDinov2WithRegistersConfig(
                     **dino_config,
-                    num_windows=4,
+                    num_windows=int(num_windows),
                     window_block_indexes=window_block_indexes,
                     gradient_checkpointing=gradient_checkpointing,
                 )
             else:
                 windowed_dino_config = WindowedDinov2WithRegistersConfig(
                     **dino_config,
-                    num_windows=4,
+                    num_windows=int(num_windows),
                     window_block_indexes=window_block_indexes,
                     num_register_tokens=0,
                     gradient_checkpointing=gradient_checkpointing,

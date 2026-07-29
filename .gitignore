@@ -1,2 +1,27 @@
 /SOLO_SemiDETR/runs/
 /SOLO_SemiDETR/cache/
+
+# Python and IDE-generated files
+**/__pycache__/
+*.py[cod]
+.idea/
+
+# Local checkpoints and converted model weights
+*.pth
+*.pt
+/Checkpoints/
+
+# Generated experiment and inference outputs
+/DICOMTilesOutput/
+/DownstreamOutput_Downstream/
+/SOLO_Supervised_RFDETR/RFDETR_SOLO_OUTPUT/
+/SOLO_Supervised_RFDETR/rfdeval_out/
+/outputLightly/
+**/mlruns/
+**/mlartifacts/
+
+# Keep the finalized threshold-calibration evidence; ignore other local
+# evaluation runs, which can be regenerated and may contain large overlays.
+/EvaluationOutput/*
+!/EvaluationOutput/RFDETR_ThresholdCalibration_20260701-140419/
+!/EvaluationOutput/RFDETR_ThresholdCalibration_20260701-140419/**

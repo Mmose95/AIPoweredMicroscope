@@ -1,0 +1,90 @@
+{
+  "timestamp": "2026-07-01T14:04:19",
+  "calibration_root": "E:\\PHD\\PhdData\\CellScanData\\Object Detection Calibration Dataset",
+  "images_root": "E:\\PHD\\PhdData\\CellScanData\\Zoom10x - Quality Assessment",
+  "run_dir": "E:\\PHD\\Results\\Quality Assessment\\FINAL_B200\\session_20260618_113853\\TwoClass\\HPO_Config_009",
+  "checkpoint": "E:\\PHD\\Results\\Quality Assessment\\FINAL_B200\\session_20260618_113853\\TwoClass\\HPO_Config_009\\checkpoint_best_ema.pth",
+  "model_class": "RFDETR2XLarge",
+  "score_floor": 0.001,
+  "iou_threshold": 0.5,
+  "task_count": 11,
+  "image_count": 53,
+  "empty_image_count": 0,
+  "annotation_counts": {
+    "Leucocyte": 572,
+    "Squamous Epithelial Cell": 204
+  },
+  "missing_images": [],
+  "threshold_grid": {
+    "min": 0.0,
+    "max": 0.95,
+    "step": 0.01,
+    "count": 97
+  },
+  "selection_metric": "macro_f1",
+  "selected_thresholds": {
+    "Leucocyte": 0.36000001430511475,
+    "Squamous Epithelial Cell": 0.3499999940395355
+  },
+  "selected_threshold_arg": "Leucocyte=0.3600;Squamous Epithelial Cell=0.3500",
+  "selected_joint_metrics": {
+    "leucocyte_threshold": 0.36000001430511475,
+    "epithelial_threshold": 0.3499999940395355,
+    "tp": 714,
+    "fp": 67,
+    "fn": 62,
+    "micro_precision": 0.9142125480153649,
+    "micro_recall": 0.9201030927835051,
+    "micro_f1": 0.9171483622350673,
+    "micro_jaccard": 0.8469750889679716,
+    "macro_precision": 0.9263033175355451,
+    "macro_recall": 0.9410736322501029,
+    "macro_f1": 0.933549258329289,
+    "macro_jaccard": 0.8774163113085598,
+    "leucocyte_precision": 0.9,
+    "leucocyte_recall": 0.8968531468531469,
+    "leucocyte_f1": 0.8984238178633974,
+    "leucocyte_jaccard": 0.8155802861685215,
+    "leucocyte_fp_per_image": 1.0754716981132075,
+    "epithelial_precision": 0.95260663507109,
+    "epithelial_recall": 0.9852941176470589,
+    "epithelial_f1": 0.9686746987951808,
+    "epithelial_jaccard": 0.9392523364485982,
+    "epithelial_fp_per_image": 0.18867924528301888
+  },
+  "best_per_class_by_f1": {
+    "Leucocyte": {
+      "class": "Leucocyte",
+      "threshold": 0.36000001430511475,
+      "tp": 513,
+      "fp": 57,
+      "fn": 59,
+      "precision": 0.9,
+      "recall": 0.8968531468531469,
+      "f1": 0.8984238178633974,
+      "jaccard": 0.8155802861685215,
+      "fp_per_image": 1.0754716981132075,
+      "fn_per_image": 1.1132075471698113
+    },
+    "Squamous Epithelial Cell": {
+      "class": "Squamous Epithelial Cell",
+      "threshold": 0.3499999940395355,
+      "tp": 201,
+      "fp": 10,
+      "fn": 3,
+      "precision": 0.95260663507109,
+      "recall": 0.9852941176470589,
+      "f1": 0.9686746987951808,
+      "jaccard": 0.9392523364485982,
+      "fp_per_image": 0.18867924528301888,
+      "fn_per_image": 0.05660377358490566
+    }
+  },
+  "outputs": {
+    "dataset_summary": "C:\\Users\\SH37YE\\Desktop\\PhD_Code_github\\AIPoweredMicroscope\\EvaluationOutput\\RFDETR_ThresholdCalibration_20260701-140419\\calibration_dataset_summary.json",
+    "predictions": "C:\\Users\\SH37YE\\Desktop\\PhD_Code_github\\AIPoweredMicroscope\\EvaluationOutput\\RFDETR_ThresholdCalibration_20260701-140419\\calibration_predictions.json",
+    "per_class_threshold_sweep": "C:\\Users\\SH37YE\\Desktop\\PhD_Code_github\\AIPoweredMicroscope\\EvaluationOutput\\RFDETR_ThresholdCalibration_20260701-140419\\per_class_threshold_sweep.csv",
+    "joint_threshold_sweep": "C:\\Users\\SH37YE\\Desktop\\PhD_Code_github\\AIPoweredMicroscope\\EvaluationOutput\\RFDETR_ThresholdCalibration_20260701-140419\\joint_threshold_sweep.csv",
+    "summary": "C:\\Users\\SH37YE\\Desktop\\PhD_Code_github\\AIPoweredMicroscope\\EvaluationOutput\\RFDETR_ThresholdCalibration_20260701-140419\\threshold_calibration_summary.json"
+  }
+}

@@ -31,6 +31,9 @@ class ModelConfig(BaseModel):
     pretrain_weights: Optional[str] = None
     device: Literal["cpu", "cuda", "mps"] = DEVICE
     resolution: int = 560
+    patch_size: int = 14
+    num_windows: int = 4
+    positional_encoding_size: Optional[int] = None
     group_detr: int = 13
     gradient_checkpointing: bool = False
 

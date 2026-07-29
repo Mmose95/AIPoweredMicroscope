@@ -1,0 +1,18 @@
+{
+  "timestamp": "2026-07-01T14:04:19",
+  "calibration_root": "E:\\PHD\\PhdData\\CellScanData\\Object Detection Calibration Dataset",
+  "images_root": "E:\\PHD\\PhdData\\CellScanData\\Zoom10x - Quality Assessment",
+  "run_dir": "E:\\PHD\\Results\\Quality Assessment\\FINAL_B200\\session_20260618_113853\\TwoClass\\HPO_Config_009",
+  "checkpoint": "E:\\PHD\\Results\\Quality Assessment\\FINAL_B200\\session_20260618_113853\\TwoClass\\HPO_Config_009\\checkpoint_best_ema.pth",
+  "model_class": "RFDETR2XLarge",
+  "score_floor": 0.001,
+  "iou_threshold": 0.5,
+  "task_count": 11,
+  "image_count": 53,
+  "empty_image_count": 0,
+  "annotation_counts": {
+    "Leucocyte": 572,
+    "Squamous Epithelial Cell": 204
+  },
+  "missing_images": []
+}

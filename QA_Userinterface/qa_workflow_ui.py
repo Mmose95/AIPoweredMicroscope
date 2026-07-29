@@ -1,7 +1,9 @@
+''' USE THE AI_POWMIC EENVIRONMENT TO RUN THIS CODE '''
+
+
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import queue
 import re
 import sys
@@ -10,8 +12,6 @@ import time
 import traceback
 import tkinter as tk
 from collections import Counter
-from contextlib import nullcontext
-from dataclasses import dataclass, field
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
@@ -39,15 +39,13 @@ for import_path in (PROJECT_ROOT, SOLO_DIR):
     if import_str not in sys.path:
         sys.path.insert(0, import_str)
 
-import DownstreamEvaluation as downstream_eval
-import EvalRFDETR_SAHI_FOV_Local as fov_eval
-import EvalRFDETR_SOLO_LocalOnly as local_eval
+import qa_inference_RFDETR as qa_inference
 
 
 QA_COLORS = {
     "Qualified": "#2e7d32",
-    "Partially qualified": "#d97706",
-    "Not qualified": "#c62828",
+    "Partially Qualified": "#d97706",
+    "Not Qualified": "#c62828",
     "Pending": "#475569",
     "Processing": "#2563eb",
     "Error": "#7f1d1d",
@@ -62,8 +60,8 @@ TEXT_SECONDARY = "#4b5563"
 
 SEVERITY = {
     "Qualified": 0,
-    "Partially qualified": 1,
-    "Not qualified": 2,
+    "Partially Qualified": 1,
+    "Not Qualified": 2,
 }
 
 OVERALL_RULES = (
@@ -75,157 +73,25 @@ OVERALL_RULES = (
 HEATMAP_FILTERS = (
     "All",
     "Qualified",
-    "Partially qualified",
-    "Not qualified",
+    "Partially Qualified",
+    "Not Qualified",
 )
 
-IMAGE_EXTENSIONS = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp"}
-SAMPLE_RE = re.compile(r"(Sample\s*\d+|Sample\d+)", re.IGNORECASE)
-COORD_RE = re.compile(r"BF\.(\d+)_(\d+)", re.IGNORECASE)
-
-DEFAULT_SCORE_FLOOR = 0.001
-DEFAULT_SCORE_THRESHOLD = 0.30
-DEFAULT_SLICE_HEIGHT = 672
-DEFAULT_SLICE_WIDTH = 672
-DEFAULT_OVERLAP_HEIGHT_RATIO = 0.20
-DEFAULT_OVERLAP_WIDTH_RATIO = 0.20
-DEFAULT_PERFORM_STANDARD_PRED = False
-DEFAULT_POSTPROCESS_TYPE = "GREEDYNMM"
-DEFAULT_POSTPROCESS_MATCH_METRIC = "IOU"
-DEFAULT_POSTPROCESS_MATCH_THRESHOLD = 0.50
-DEFAULT_POSTPROCESS_CLASS_AGNOSTIC = False
+IMAGE_EXTENSIONS = qa_inference.IMAGE_EXTENSIONS
+DEFAULT_CHECKPOINT = qa_inference.DEFAULT_CHECKPOINT
+DEFAULT_CLASS_NAMES = qa_inference.DEFAULT_CLASS_NAMES
 SELECTED_PREVIEW_SIZE = 220
 
-DEFAULT_CHECKPOINT = Path(
-    downstream_eval.DOWNSTREAM_PRESETS[downstream_eval.ACTIVE_PRESET]["checkpoint"]
-)
-
-
-def _hex_to_rgb(color: str) -> tuple[int, int, int]:
-    color = color.lstrip("#")
-    return int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16)
-
-
-def _blend_hex_color(low_color: str, high_color: str, fraction: float) -> str:
-    fraction = max(0.0, min(1.0, fraction))
-    low = _hex_to_rgb(low_color)
-    high = _hex_to_rgb(high_color)
-    blended = tuple(int(round(low[idx] + (high[idx] - low[idx]) * fraction)) for idx in range(3))
-    return f"#{blended[0]:02x}{blended[1]:02x}{blended[2]:02x}"
-
-
-@dataclass
-class FOVInferenceResult:
-    predicted_label_id: int
-    predicted_label: str
-    n_leucocyte: int
-    n_squamous_epithelial_cell: int
-    leucocyte_score: int
-    squamous_epithelial_score: int
-    total_quality_score: int
-    n_predictions_raw: int
-    n_predictions_kept_before_duplicate_suppression: int
-    n_cross_class_duplicates_suppressed: int
-    n_predictions_kept: int
-    pred_boxes: list[tuple[float, float, float, float]] = field(default_factory=list)
-    pred_scores: list[float] = field(default_factory=list)
-    pred_cls: list[int] = field(default_factory=list)
-
-
-@dataclass
-class FOVRecord:
-    ingest_index: int
-    coord_x: int
-    coord_y: int
-    image_path: Path
-    image_name: str
-    image_width: int = 1
-    image_height: int = 1
-    stage: str = "Pending"
-    result: FOVInferenceResult | None = None
-    error: str = ""
-    result_version: int = 0
-    inference_seconds: float | None = None
-
-
-@dataclass
-class SampleSession:
-    sample_id: str
-    sample_dir: Path
-    checkpoint_path: Path
-    model_class: str
-    model_resolution: int | None
-    class_names: list[str]
-    class_score_thresholds: dict[str, float]
-    fovs: list[FOVRecord]
-
-    @property
-    def grid_width(self) -> int:
-        return max((fov.coord_x for fov in self.fovs), default=0) + 1
-
-    @property
-    def grid_height(self) -> int:
-        return max((fov.coord_y for fov in self.fovs), default=0) + 1
-
-    @property
-    def by_position(self) -> dict[tuple[int, int], FOVRecord]:
-        return {(fov.coord_x, fov.coord_y): fov for fov in self.fovs}
-
-
-@dataclass
-class InferenceRuntime:
-    get_sliced_prediction: Any
-    sahi_model: Any
-    class_names: list[str]
-    class_score_thresholds: dict[str, float]
-    model_class: str
-    model_resolution: int | None
-
-
-def parse_sample_id(raw_value: str) -> str:
-    match = SAMPLE_RE.search(raw_value)
-    if match:
-        return match.group(1).replace(" ", "")
-    return Path(raw_value).stem.replace(" ", "")
-
-
-def explicit_sample_id(raw_value: str) -> str | None:
-    match = SAMPLE_RE.search(raw_value)
-    if not match:
-        return None
-    return match.group(1).replace(" ", "")
-
-
-def parse_coordinates(raw_value: str) -> tuple[int, int]:
-    match = COORD_RE.search(raw_value)
-    if match:
-        return int(match.group(1)), int(match.group(2))
-    fallback = re.search(r"(\d+)_(\d+)(?=\.[^.]+$)", raw_value)
-    if fallback:
-        return int(fallback.group(1)), int(fallback.group(2))
-    raise ValueError(f"Could not parse coordinates from '{raw_value}'")
-
-
-def overall_qa_label(processed_fovs: list[FOVRecord], rule_name: str) -> str:
-    completed = [fov for fov in processed_fovs if fov.result is not None]
-    if not completed:
-        return "Pending"
-    if rule_name == "Pending rule":
-        return "Rule pending"
-
-    labels = [fov.result.predicted_label for fov in completed if fov.result is not None]
-    if rule_name == "Worst FOV":
-        if "Not qualified" in labels:
-            return "Not qualified"
-        if "Partially qualified" in labels:
-            return "Partially qualified"
-        return "Qualified"
-
-    counts = Counter(labels)
-    return min(
-        counts.items(),
-        key=lambda item: (-item[1], -SEVERITY.get(item[0], 0)),
-    )[0]
+FOVInferenceResult = qa_inference.FOVInferenceResult
+FOVRecord = qa_inference.FOVRecord
+SampleSession = qa_inference.SampleSession
+InferenceRuntime = qa_inference.InferenceRuntime
+build_sample_session = qa_inference.build_sample_session
+build_runtime = qa_inference.build_runtime
+check_dependencies = qa_inference.check_dependencies
+overall_qa_label = qa_inference.overall_qa_label
+render_result_overlay = qa_inference.render_result_overlay
+run_inference_on_image = qa_inference.run_inference_on_image
 
 
 def make_placeholder_image(size: tuple[int, int], text: str, accent: str) -> Image.Image:
@@ -236,393 +102,6 @@ def make_placeholder_image(size: tuple[int, int], text: str, accent: str) -> Ima
     draw.rounded_rectangle((4, 4, size[0] - 4, size[1] - 4), radius=10, fill="#e5e7eb", outline=accent, width=4)
     draw.text((size[0] // 2, size[1] // 2), text, fill="#374151", anchor="mm")
     return image
-
-
-def discover_sample_images(sample_dir: Path) -> list[Path]:
-    if not sample_dir.exists() or not sample_dir.is_dir():
-        raise FileNotFoundError(f"Sample folder does not exist: {sample_dir}")
-
-    direct_images = [
-        path
-        for path in sample_dir.iterdir()
-        if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS and "patch" not in str(path).lower()
-    ]
-    if direct_images:
-        return sorted(direct_images, key=lambda path: str(path).lower())
-
-    child_sample_dirs = [
-        path
-        for path in sample_dir.iterdir()
-        if path.is_dir() and explicit_sample_id(path.name) is not None
-    ]
-    if child_sample_dirs:
-        raise RuntimeError(
-            f"{sample_dir} looks like a parent folder containing sample folders. "
-            "Open Add, browse to this parent folder, select one or more Sample folders in the list, then click Add selected."
-        )
-
-    images = [
-        path
-        for path in fov_eval.discover_images([sample_dir])
-        if path.suffix.lower() in IMAGE_EXTENSIONS and "patch" not in str(path).lower()
-    ]
-
-    if not images:
-        raise RuntimeError(f"No microscope images were found under {sample_dir}")
-    return images
-
-
-def inspect_checkpoint(checkpoint_path: Path) -> tuple[str, int | None, list[str], dict[str, float]]:
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(f"Checkpoint does not exist: {checkpoint_path}")
-
-    model_class = local_eval.infer_model_class(checkpoint_path.parent, checkpoint_path)
-    model_resolution = local_eval.infer_model_resolution(checkpoint_path)
-    ckpt_num_classes, ckpt_class_names = fov_eval.infer_checkpoint_runtime_metadata(checkpoint_path)
-
-    class_names = list(ckpt_class_names or fov_eval.DEFAULT_CLASS_NAMES)
-    if ckpt_num_classes is not None and ckpt_num_classes > len(class_names):
-        class_names = list(class_names) + [f"Class {idx}" for idx in range(len(class_names), ckpt_num_classes)]
-
-    class_score_thresholds = {
-        name: float(fov_eval.CLASS_SCORE_THRESHOLDS.get(name, DEFAULT_SCORE_THRESHOLD))
-        for name in class_names
-    }
-    return model_class, model_resolution, class_names, class_score_thresholds
-
-
-def force_repo_local_rfdetr() -> None:
-    local_pkg_dir = PROJECT_ROOT / "rfdetr_local"
-    init_py = local_pkg_dir / "__init__.py"
-    if not init_py.exists():
-        raise FileNotFoundError(f"Repo-local RF-DETR package was not found at {local_pkg_dir}")
-
-    project_root_str = str(PROJECT_ROOT)
-    local_pkg_dir_str = str(local_pkg_dir)
-    if project_root_str not in sys.path:
-        sys.path.insert(0, project_root_str)
-    if local_pkg_dir_str not in sys.path:
-        sys.path.insert(0, local_pkg_dir_str)
-
-    local_eval.patch_transformers_torch_compat()
-    _patch_transformers_pruning_compat()
-    _patch_transformers_backbone_compat()
-    for key in list(sys.modules):
-        if key == "rfdetr" or key.startswith("rfdetr."):
-            sys.modules.pop(key, None)
-
-    spec = importlib.util.spec_from_file_location(
-        "rfdetr",
-        init_py,
-        submodule_search_locations=[str(local_pkg_dir)],
-    )
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not create an import spec for {init_py}")
-
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["rfdetr"] = module
-    spec.loader.exec_module(module)
-
-
-def _patch_transformers_pruning_compat() -> None:
-    try:
-        import torch
-        import transformers.pytorch_utils as pytorch_utils
-    except Exception:
-        return
-
-    if hasattr(pytorch_utils, "find_pruneable_heads_and_indices"):
-        return
-
-    def find_pruneable_heads_and_indices(
-        heads: set[int],
-        n_heads: int,
-        head_size: int,
-        already_pruned_heads: set[int],
-    ) -> tuple[set[int], Any]:
-        heads = set(heads) - set(already_pruned_heads)
-        mask = torch.ones(n_heads, head_size)
-        for head in heads:
-            head = head - sum(1 if pruned_head < head else 0 for pruned_head in already_pruned_heads)
-            mask[head] = 0
-        mask = mask.view(-1).contiguous().eq(1)
-        index = torch.arange(len(mask))[mask].long()
-        return heads, index
-
-    pytorch_utils.find_pruneable_heads_and_indices = find_pruneable_heads_and_indices
-
-
-def _patch_transformers_backbone_compat() -> None:
-    try:
-        import transformers.backbone_utils as backbone_utils
-        import transformers.utils.backbone_utils as legacy_backbone_utils
-    except Exception:
-        return
-
-    def get_aligned_output_features_output_indices(
-        out_features: list[str] | tuple[str, ...] | None = None,
-        out_indices: list[int] | tuple[int, ...] | None = None,
-        stage_names: list[str] | tuple[str, ...] | None = None,
-    ) -> tuple[list[str], list[int]]:
-        stage_names = list(stage_names or [])
-        if not stage_names:
-            return list(out_features or []), [int(value) for value in (out_indices or [])]
-
-        if out_features is None and out_indices is None:
-            return [stage_names[-1]], [len(stage_names) - 1]
-
-        if out_features is None:
-            resolved_indices = [int(value) for value in out_indices or []]
-            resolved_features = [stage_names[idx] for idx in resolved_indices]
-            return resolved_features, resolved_indices
-
-        if out_indices is None:
-            feature_to_index = {name: idx for idx, name in enumerate(stage_names)}
-            resolved_features = [str(value) for value in out_features]
-            resolved_indices = [feature_to_index[name] for name in resolved_features]
-            return resolved_features, resolved_indices
-
-        return [str(value) for value in out_features], [int(value) for value in out_indices]
-
-    for module in (backbone_utils, legacy_backbone_utils):
-        if not hasattr(module, "get_aligned_output_features_output_indices"):
-            module.get_aligned_output_features_output_indices = get_aligned_output_features_output_indices
-
-
-def build_sample_session(checkpoint_path: Path, sample_dir: Path) -> SampleSession:
-    model_class, model_resolution, class_names, class_score_thresholds = inspect_checkpoint(checkpoint_path)
-    image_paths = discover_sample_images(sample_dir)
-
-    parsed_rows: list[tuple[int, int, Path, str]] = []
-    explicit_sample_ids: set[str] = set()
-    for path in image_paths:
-        image_name = path.name
-        coord_x, coord_y = parse_coordinates(image_name)
-        image_sample_id = explicit_sample_id(image_name)
-        if image_sample_id is not None:
-            explicit_sample_ids.add(image_sample_id)
-        parsed_rows.append((coord_x, coord_y, path, image_name))
-
-    folder_sample_id = explicit_sample_id(sample_dir.name) or sample_dir.name.replace(" ", "")
-    if not explicit_sample_ids:
-        sample_id = folder_sample_id
-    elif len(explicit_sample_ids) == 1:
-        sample_id = next(iter(explicit_sample_ids))
-    else:
-        raise RuntimeError(
-            "Selected folder contains images from multiple samples. "
-            f"Detected sample ids: {', '.join(sorted(explicit_sample_ids))}."
-        )
-
-    parsed_rows.sort(key=lambda item: (item[1], item[0], item[3].lower()))
-    fovs = [
-        FOVRecord(
-            ingest_index=index,
-            coord_x=coord_x,
-            coord_y=coord_y,
-            image_path=image_path,
-            image_name=image_name,
-            image_width=image_size[0],
-            image_height=image_size[1],
-        )
-        for index, (coord_x, coord_y, image_path, image_name) in enumerate(parsed_rows)
-        for image_size in [_read_image_size(image_path)]
-    ]
-
-    return SampleSession(
-        sample_id=sample_id,
-        sample_dir=sample_dir,
-        checkpoint_path=checkpoint_path,
-        model_class=model_class,
-        model_resolution=model_resolution,
-        class_names=class_names,
-        class_score_thresholds=class_score_thresholds,
-        fovs=fovs,
-    )
-
-
-def _read_image_size(image_path: Path) -> tuple[int, int]:
-    try:
-        with Image.open(image_path) as raw_img:
-            return max(1, int(raw_img.width)), max(1, int(raw_img.height))
-    except Exception:
-        return 1, 1
-
-
-def configure_torch_inference_backend() -> None:
-    try:
-        import torch
-    except Exception:
-        return
-
-    try:
-        torch.set_grad_enabled(False)
-    except Exception:
-        pass
-    try:
-        torch.set_float32_matmul_precision("high")
-    except Exception:
-        pass
-    try:
-        torch.backends.cudnn.benchmark = True
-    except Exception:
-        pass
-    try:
-        torch.backends.cuda.matmul.allow_tf32 = True
-    except Exception:
-        pass
-    try:
-        torch.backends.cudnn.allow_tf32 = True
-    except Exception:
-        pass
-
-
-def build_runtime(session: SampleSession) -> InferenceRuntime:
-    if np is None:
-        raise ImportError("numpy is required.")
-    configure_torch_inference_backend()
-    fov_eval.ensure_deps()
-    _, get_sliced_prediction, _ = fov_eval.import_sahi()
-    force_repo_local_rfdetr()
-
-    num_classes = len(session.class_names)
-    model = fov_eval.load_model_for_fov(
-        session.model_class,
-        session.checkpoint_path,
-        session.model_resolution,
-        num_classes,
-        session.class_names,
-    )
-    sahi_model = fov_eval.build_sahi_model(model, session.class_names, DEFAULT_SCORE_FLOOR)
-    return InferenceRuntime(
-        get_sliced_prediction=get_sliced_prediction,
-        sahi_model=sahi_model,
-        class_names=list(session.class_names),
-        class_score_thresholds=dict(session.class_score_thresholds),
-        model_class=session.model_class,
-        model_resolution=session.model_resolution,
-    )
-
-
-def run_inference_on_image(image_path: Path, runtime: InferenceRuntime) -> FOVInferenceResult:
-    if np is None:
-        raise ImportError("numpy is required.")
-
-    try:
-        import torch
-
-        inference_context = torch.inference_mode()
-    except Exception:
-        inference_context = nullcontext()
-
-    with inference_context:
-        prediction = fov_eval.run_sahi_prediction_for_image(
-            image_path=image_path,
-            get_sliced_prediction=runtime.get_sliced_prediction,
-            sahi_model=runtime.sahi_model,
-            class_names=runtime.class_names,
-            class_score_thresholds=runtime.class_score_thresholds,
-            score_threshold=DEFAULT_SCORE_THRESHOLD,
-            slice_height=DEFAULT_SLICE_HEIGHT,
-            slice_width=DEFAULT_SLICE_WIDTH,
-            overlap_height_ratio=DEFAULT_OVERLAP_HEIGHT_RATIO,
-            overlap_width_ratio=DEFAULT_OVERLAP_WIDTH_RATIO,
-            perform_standard_pred=DEFAULT_PERFORM_STANDARD_PRED,
-            postprocess_type=DEFAULT_POSTPROCESS_TYPE,
-            postprocess_match_metric=DEFAULT_POSTPROCESS_MATCH_METRIC,
-            postprocess_match_threshold=DEFAULT_POSTPROCESS_MATCH_THRESHOLD,
-            postprocess_class_agnostic=DEFAULT_POSTPROCESS_CLASS_AGNOSTIC,
-        )
-    pred_boxes = prediction["pred_boxes"]
-    kept_boxes = prediction["kept_boxes"]
-    kept_scores = prediction["kept_scores"]
-    kept_cls = prediction["kept_cls"]
-    n_kept_before_duplicate_suppression = int(len(kept_boxes))
-
-    kept_boxes, kept_scores, kept_cls, n_cross_class_duplicates_suppressed = downstream_eval.suppress_cross_class_duplicates(
-        kept_boxes,
-        kept_scores,
-        kept_cls,
-        runtime.class_names,
-        downstream_eval.CROSS_CLASS_DUPLICATE_IOS_THRESHOLD,
-        downstream_eval.CROSS_CLASS_DUPLICATE_IOU_THRESHOLD,
-        downstream_eval.CROSS_CLASS_DUPLICATE_AREA_RATIO_THRESHOLD,
-    )
-
-    count_map = downstream_eval.count_class_predictions(kept_cls, runtime.class_names)
-    leu_count = int(count_map.get("Leucocyte", 0))
-    epi_count = int(count_map.get("Squamous Epithelial Cell", 0))
-    predicted_label_id, leu_score, epi_score, total_score = downstream_eval.classify_quality_from_counts(leu_count, epi_count)
-
-    return FOVInferenceResult(
-        predicted_label_id=predicted_label_id,
-        predicted_label=downstream_eval.DOWNSTREAM_LABELS[predicted_label_id],
-        n_leucocyte=leu_count,
-        n_squamous_epithelial_cell=epi_count,
-        leucocyte_score=leu_score,
-        squamous_epithelial_score=epi_score,
-        total_quality_score=total_score,
-        n_predictions_raw=int(len(pred_boxes)),
-        n_predictions_kept_before_duplicate_suppression=n_kept_before_duplicate_suppression,
-        n_cross_class_duplicates_suppressed=int(n_cross_class_duplicates_suppressed),
-        n_predictions_kept=int(len(kept_boxes)),
-        pred_boxes=[tuple(float(value) for value in box.tolist()) for box in kept_boxes],
-        pred_scores=[float(value) for value in kept_scores.tolist()],
-        pred_cls=[int(value) for value in kept_cls.tolist()],
-    )
-
-
-def render_result_overlay(image_path: Path, result: FOVInferenceResult, class_names: list[str]) -> Image.Image:
-    if Image is None or ImageDraw is None or ImageFont is None:
-        raise ImportError("Pillow is required.")
-
-    with Image.open(image_path) as raw_img:
-        img = raw_img.convert("RGB")
-
-    draw = ImageDraw.Draw(img)
-    font = ImageFont.load_default()
-    colors = fov_eval.class_color_map(class_names)
-
-    for box, score, cls_idx in zip(result.pred_boxes, result.pred_scores, result.pred_cls):
-        color = colors.get(int(cls_idx), (255, 0, 0))
-        x1, y1, x2, y2 = [int(round(value)) for value in box]
-        draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
-        text = fov_eval.score_to_text(float(score))
-        text_w, text_h = fov_eval._measure_text(draw, text, font)
-        tx, ty = fov_eval._score_anchor(box, img.width, img.height, text_w, text_h)
-        fov_eval.draw_text_with_outline(draw, (tx, ty), text, fill=color, font=font)
-
-    info_lines = [
-        f"Predicted: {result.predicted_label}",
-        f"Leucocyte count: {result.n_leucocyte}",
-        f"Sq. epithelial count: {result.n_squamous_epithelial_cell}",
-        f"Quality score: {result.total_quality_score}",
-    ]
-    legend_lines = [f"{class_names[idx]} = prediction" for idx in range(len(class_names))]
-    all_lines = info_lines + legend_lines
-    pad = 6
-    line_h = max(fov_eval._measure_text(draw, "Ag", font)[1], 10) + 2
-    panel_w = max((fov_eval._measure_text(draw, line, font)[0] for line in all_lines), default=0) + 30
-    panel_h = len(all_lines) * line_h + pad * 2
-    draw.rectangle([6, 6, 6 + panel_w + pad * 2, 6 + panel_h], fill=(0, 0, 0))
-
-    for idx, line in enumerate(info_lines):
-        y = 6 + pad + idx * line_h
-        fov_eval.draw_text_with_outline(draw, (12, y), line, fill=(255, 255, 255), font=font)
-    for idx, line in enumerate(legend_lines, start=len(info_lines)):
-        y = 6 + pad + idx * line_h
-        color = colors.get(idx - len(info_lines), (255, 0, 0))
-        draw.rectangle([12, y + 2, 24, y + line_h - 2], outline=color, width=2)
-        fov_eval.draw_text_with_outline(draw, (30, y), line, fill=(255, 255, 255), font=font)
-
-    return img
-
-
-def check_dependencies() -> None:
-    if Image is None or ImageDraw is None or ImageFont is None or ImageOps is None or ImageTk is None:
-        raise ImportError("Pillow is required for the UI.")
-    if np is None:
-        raise ImportError("numpy is required.")
 
 
 class QAWorkflowUI:
@@ -948,8 +427,8 @@ class QAWorkflowUI:
         self._make_stat_row(summary, 1, "QA complete", self.completed_var)
         self._make_stat_row(summary, 2, "Pending QA", self.pending_var)
         self._make_stat_row(summary, 3, "Qualified", self.qualified_var, color=QA_COLORS["Qualified"])
-        self._make_stat_row(summary, 4, "Partially qualified", self.partial_var, color=QA_COLORS["Partially qualified"])
-        self._make_stat_row(summary, 5, "Not qualified", self.not_qualified_var, color=QA_COLORS["Not qualified"])
+        self._make_stat_row(summary, 4, "Partially Qualified", self.partial_var, color=QA_COLORS["Partially Qualified"])
+        self._make_stat_row(summary, 5, "Not Qualified", self.not_qualified_var, color=QA_COLORS["Not Qualified"])
         self._make_stat_row(summary, 6, "Leucocytes counted", self.leucocyte_total_var)
         self._make_stat_row(summary, 7, "Squamous cells counted", self.squamous_total_var)
         self._make_stat_row(summary, 8, "Inference time / FOV", self.inference_time_var)
@@ -1655,8 +1134,8 @@ class QAWorkflowUI:
         self.completed_var.set(f"{len(completed)} / {total}")
         self.pending_var.set(str(total - len(completed)))
         self.qualified_var.set(str(counts.get("Qualified", 0)))
-        self.partial_var.set(str(counts.get("Partially qualified", 0)))
-        self.not_qualified_var.set(str(counts.get("Not qualified", 0)))
+        self.partial_var.set(str(counts.get("Partially Qualified", 0)))
+        self.not_qualified_var.set(str(counts.get("Not Qualified", 0)))
         self.leucocyte_total_var.set(str(sum(fov.result.n_leucocyte for fov in completed if fov.result is not None)))
         self.squamous_total_var.set(str(sum(fov.result.n_squamous_epithelial_cell for fov in completed if fov.result is not None)))
         timed_fovs = [fov.inference_seconds for fov in self.sample.fovs if fov.inference_seconds is not None]
@@ -1861,7 +1340,7 @@ class QAWorkflowUI:
     def _preview_photo_for_fov(self, fov: FOVRecord, width: int, height: int) -> ImageTk.PhotoImage:
         if fov.result is not None:
             try:
-                overlay = render_result_overlay(fov.image_path, fov.result, self.sample.class_names if self.sample else fov_eval.DEFAULT_CLASS_NAMES)
+                overlay = render_result_overlay(fov.image_path, fov.result, self.sample.class_names if self.sample else DEFAULT_CLASS_NAMES)
                 fitted = ImageOps.fit(overlay, (width, height), Image.Resampling.LANCZOS)
                 return ImageTk.PhotoImage(fitted)
             except Exception:
@@ -2046,7 +1525,7 @@ class QAWorkflowUI:
             return render_result_overlay(
                 fov.image_path,
                 fov.result,
-                self.sample.class_names if self.sample else fov_eval.DEFAULT_CLASS_NAMES,
+                self.sample.class_names if self.sample else DEFAULT_CLASS_NAMES,
             )
 
         with Image.open(fov.image_path) as raw_img:
@@ -2060,7 +1539,7 @@ class QAWorkflowUI:
                 render_result_overlay(
                     fov.image_path,
                     fov.result,
-                    self.sample.class_names if self.sample else fov_eval.DEFAULT_CLASS_NAMES,
+                    self.sample.class_names if self.sample else DEFAULT_CLASS_NAMES,
                 )
                 if fov.result is not None
                 else raw_image.copy()
