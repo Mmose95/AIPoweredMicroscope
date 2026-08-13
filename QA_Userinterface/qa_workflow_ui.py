@@ -32,7 +32,7 @@ except Exception:
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent
+PROJECT_ROOT = SCRIPT_DIR.parent 
 SOLO_DIR = PROJECT_ROOT / "SOLO_Supervised_RFDETR"
 for import_path in (PROJECT_ROOT, SOLO_DIR):
     import_str = str(import_path)
