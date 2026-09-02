@@ -8,6 +8,7 @@ common detection metrics:
 - IoU-swept AP/AR from 0.10 to 0.95 (step configurable)
 - Confusion matrix with background class
 - Threshold sweep (precision/recall/F1 + FP/image)
+- Per-image count errors at the locked class-specific thresholds
 - PR and ROC-style curves from IoU-matched detections
 - Optional overlay images
 
@@ -1017,6 +1018,48 @@ def detection_counts(
     return tp, fp, fn
 
 
+def count_error_metrics(
+    samples: Sequence[Dict[str, Any]],
+    class_names: Sequence[str],
+    score_threshold: float,
+    class_score_thresholds: Optional[np.ndarray] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Summarize raw predicted-versus-annotated counts per image and class."""
+    per_image: List[Dict[str, Any]] = []
+    summary: List[Dict[str, Any]] = []
+    for class_idx, class_name in enumerate(class_names):
+        signed_errors: List[int] = []
+        for sample in samples:
+            keep = prediction_keep_mask(
+                sample["pred_scores"], sample["pred_cls"], score_threshold, class_score_thresholds
+            )
+            annotated = int(np.sum(sample["gt_cls"] == class_idx))
+            predicted = int(np.sum(sample["pred_cls"][keep] == class_idx))
+            signed = predicted - annotated
+            signed_errors.append(signed)
+            per_image.append(
+                {
+                    "image_id": int(sample["img_id"]),
+                    "class": class_name,
+                    "annotated_count": annotated,
+                    "predicted_count": predicted,
+                    "signed_error": signed,
+                    "absolute_error": abs(signed),
+                }
+            )
+        errors = np.asarray(signed_errors, dtype=np.float64)
+        summary.append(
+            {
+                "class": class_name,
+                "n_images": int(len(errors)),
+                "mean_absolute_error": float(np.mean(np.abs(errors))),
+                "median_absolute_error": float(np.median(np.abs(errors))),
+                "mean_signed_error": float(np.mean(errors)),
+            }
+        )
+    return per_image, summary
+
+
 def build_binary_curve_samples_for_class(
     samples: Sequence[Dict[str, Any]],
     class_idx: int,
@@ -1711,6 +1754,23 @@ def run_evaluate_mode(args: argparse.Namespace) -> None:
         "fp_per_image": float(operating_fp / max(1, len(samples))),
     }
 
+    per_image_count_rows, count_error_rows = count_error_metrics(
+        samples,
+        labels,
+        score_threshold=cfg.score_threshold,
+        class_score_thresholds=class_thresholds,
+    )
+    write_csv(
+        cfg.output_dir / "per_image_count_errors.csv",
+        ["image_id", "class", "annotated_count", "predicted_count", "signed_error", "absolute_error"],
+        per_image_count_rows,
+    )
+    write_csv(
+        cfg.output_dir / "count_error_metrics.csv",
+        ["class", "n_images", "mean_absolute_error", "median_absolute_error", "mean_signed_error"],
+        count_error_rows,
+    )
+
     pr_rows: List[Dict[str, Any]] = []
     roc_rows: List[Dict[str, Any]] = []
     pr_auc = float("nan")
@@ -1839,6 +1899,7 @@ def run_evaluate_mode(args: argparse.Namespace) -> None:
         },
         "coco_standard": coco_std,
         "operating_point": operating_point,
+        "count_error_metrics": count_error_rows,
         "pr_auc": pr_auc,
         "roc_auc": roc_auc,
         "roc_note": roc_note,
@@ -1846,6 +1907,8 @@ def run_evaluate_mode(args: argparse.Namespace) -> None:
             "predictions": str(predictions_path),
             "iou_sweep_metrics": str(cfg.output_dir / "iou_sweep_metrics.csv"),
             "per_class_metrics": str(cfg.output_dir / "per_class_metrics.csv"),
+            "count_error_metrics": str(cfg.output_dir / "count_error_metrics.csv"),
+            "per_image_count_errors": str(cfg.output_dir / "per_image_count_errors.csv"),
             "confusion_matrix_csv": str(cfg.output_dir / "confusion_matrix.csv"),
             "confusion_matrix_json": str(cfg.output_dir / "confusion_matrix.json"),
             "confusion_matrix_figure": str(cfg.output_dir / "confusion_matrix.png"),
