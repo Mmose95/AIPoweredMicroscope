@@ -16,7 +16,8 @@ import io
 import json
 import re
 import sys
-import warnings
+import hashlib
+import math
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -124,12 +125,6 @@ TRAIN_KWARGS = HPO_RECORD.parent / "run_meta" / "train_kwargs.json"
 DEFAULT_MANUAL_LABELS = Path(
     r"C:\Users\SH37YE\OneDrive\Full_FOV_Master_Review_2026-06-02_1154.xlsx"
 )
-CODE_COMMIT = "27c95e8875da3f11b486a03f522a0a27e82ab529"
-CODE_URL = (
-    "https://github.com/Mmose95/AIPoweredMicroscope/commit/"
-    + CODE_COMMIT
-)
-
 WD_ALIGN_LEFT = 0
 WD_ALIGN_CENTER = 1
 WD_BREAK_PAGE = 7
@@ -146,8 +141,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--downstream-output", type=Path, default=None)
     parser.add_argument("--manual-labels", type=Path, default=DEFAULT_MANUAL_LABELS)
     parser.add_argument("--output-dir", type=Path, default=None)
-    parser.add_argument("--bootstrap-replicates", type=int, default=10_000)
-    parser.add_argument("--bootstrap-seed", type=int, default=42)
+    parser.add_argument("--split-summary", type=Path, default=SPLIT_SUMMARY)
+    parser.add_argument("--test-coco", type=Path, default=TEST_COCO)
+    parser.add_argument("--hpo-record", type=Path, default=HPO_RECORD)
+    parser.add_argument("--train-kwargs", type=Path, default=None)
+    parser.add_argument("--check-inputs", action="store_true", help="Validate artifact inputs without generating a report.")
     return parser.parse_args()
 
 
@@ -159,36 +157,74 @@ def read_json(path: Path) -> dict[str, Any]:
     return payload
 
 
+def validate_report_inputs(object_summary, confusion, calibration, downstream, rows):
+    """Reject mixed operating points before writing any report artifacts."""
+    selected = calibration["selected_thresholds"]
+    settings = downstream["preflight"]["inference_settings"]
+    for label, values in (
+        ("held-out operating point", object_summary["operating_point"]["class_score_thresholds"]),
+        ("held-out confusion matrix", confusion["class_score_thresholds"]),
+        ("downstream inference", settings["class_score_thresholds"]),
+    ):
+        if set(values) != set(selected) or any(
+            not math.isclose(float(values[key]), float(selected[key]), abs_tol=1e-6, rel_tol=0)
+            for key in selected
+        ):
+            raise ValueError(f"{label} thresholds differ from independent calibration; regenerate the matching evaluation artifacts.")
+    for value in (confusion["iou_threshold"], object_summary["confmat_iou"], object_summary["curve_iou"]):
+        if not math.isclose(float(value), float(calibration["iou_threshold"]), abs_tol=1e-9):
+            raise ValueError("Detection/calibration matching IoUs differ; do not combine these artifacts.")
+    n = int(object_summary["images_processed"])
+    count_rows = object_summary.get("count_error_metrics")
+    if not count_rows or {r["class"] for r in count_rows} != set(selected):
+        raise ValueError("Missing per-class count_error_metrics. Rerun eval_object_detection_RFDETR.py; downstream metrics cannot substitute for patch counts.")
+    if len(count_rows) != len(selected) or any(int(r["n_images"]) != n for r in count_rows):
+        raise ValueError("Count-error patch totals do not match the held-out evaluation.")
+    if not rows or len(rows) != int(downstream["dataset"]["included_image_count"]):
+        raise ValueError("Downstream CSV row count does not match its summary.")
+    names = [r["source_image_name"].strip().casefold() for r in rows]
+    if len(set(names)) != len(names):
+        raise ValueError("Duplicate FOV names in downstream_predictions.csv.")
+    # Paths are recorded by the producing machine; compare normalized stored paths.
+    checkpoints = [object_summary.get("checkpoint"), calibration.get("checkpoint"),
+                   downstream["preflight"].get("checkpoint")]
+    checkpoint_ids = {str(p).replace("\\", "/").casefold() for p in checkpoints if p}
+    if len(checkpoint_ids) > 1:
+        raise ValueError("Artifacts record different checkpoints. Supply evaluations from the same selected checkpoint.")
+    metadata = object_summary.get("count_error_analysis", {})
+    if metadata and (metadata.get("unit") != "test_patch" or metadata.get("confidence_interval_method") is not None):
+        raise ValueError("Unsupported count-error analysis metadata; this report expects descriptive patch-level point estimates.")
+    if metadata and metadata.get("class_score_thresholds") != object_summary["operating_point"]["class_score_thresholds"]:
+        raise ValueError("Count-error thresholds differ from the held-out operating point.")
+
+
+def artifact_manifest(paths, calibration, object_summary):
+    return {
+        "schema_version": 2,
+        "stages": ["coco_ranking", "independent_calibration", "calibrated_test_detection", "downstream_count_based_classification"],
+        "reference_schemes": ["geckler", "collapsed_geckler", "murray_washington"],
+        "calibrated_thresholds": calibration["selected_thresholds"],
+        "test_patch_count": object_summary["images_processed"],
+        "count_error_confidence_intervals": None,
+        "inputs": {name: {"path": str(path.resolve()), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+                   for name, path in paths.items()},
+        "report_builder_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+    }
+
+
 def read_csv(path: Path) -> list[dict[str, str]]:
     with path.open("r", newline="", encoding="utf-8-sig") as handle:
         return list(csv.DictReader(handle))
 
 
-LEGACY_LABEL_IDS = {"Qualified": 1, "Partially Qualified": 2, "Not Qualified": 3}
+from quality_reference_schemes import (
+    normalized_count_bin as normalize_count_bin,
+    count_bin_from_integer as integer_count_bin,
+    geckler_class, collapsed_geckler_label, murray_washington_label as mw_label,
+)
 GECKLER_LABELS = [f"G{index}" for index in range(1, 7)]
 MW_LABELS = ["Acceptable", "Unacceptable"]
 COLLAPSED_GECKLER_LABELS = ["Acceptable", "Unacceptable", "Unknown"]
-
-
-def normalize_count_bin(value: Any) -> str:
-    text = str(value or "").strip().casefold().replace("–", "-").replace("—", "-")
-    compact = re.sub(r"\s+", "", text.replace("til", "-"))
-    if compact in {"0-9", "0to9"}:
-        return "0-9"
-    if compact in {"10-25", "10to25"}:
-        return "10-25"
-    if compact in {"26+", ">25", "26"}:
-        return "26+"
-    try:
-        number = int(float(compact))
-    except (TypeError, ValueError):
-        raise ValueError(f"Unsupported expert count category: {value!r}")
-    return "0-9" if number <= 9 else "10-25" if number <= 25 else "26+"
-
-
-def integer_count_bin(value: Any) -> str:
-    number = int(value)
-    return "0-9" if number <= 9 else "10-25" if number <= 25 else "26+"
 
 
 def count_adjustment_to_bin(predicted_count: Any, expert_bin: str) -> int:
@@ -210,28 +246,6 @@ def signed_adjustment(value: int) -> str:
     return f"+{value}" if value > 0 else str(value)
 
 
-def geckler_class(epithelial_bin: str, leucocyte_bin: str) -> str:
-    if epithelial_bin == "26+":
-        return {"0-9": "G1", "10-25": "G2", "26+": "G3"}[leucocyte_bin]
-    if epithelial_bin == "10-25" and leucocyte_bin == "26+":
-        return "G4"
-    if epithelial_bin == "0-9" and leucocyte_bin == "26+":
-        return "G5"
-    return "G6"
-
-
-def collapsed_geckler_label(group: str) -> str:
-    if group in {"G4", "G5"}:
-        return "Acceptable"
-    if group in {"G1", "G2", "G3"}:
-        return "Unacceptable"
-    return "Unknown"
-
-
-def mw_label(epithelial_bin: str, leucocyte_bin: str) -> str:
-    return "Acceptable" if epithelial_bin == "0-9" and leucocyte_bin == "26+" else "Unacceptable"
-
-
 def read_expert_references(path: Path, sheet_name: str = "Master") -> dict[str, dict[str, str]]:
     workbook = load_workbook(path, read_only=True, data_only=True)
     try:
@@ -240,18 +254,19 @@ def read_expert_references(path: Path, sheet_name: str = "Master") -> dict[str, 
         for row_number, row in enumerate(
             sheet.iter_rows(min_row=2, min_col=1, max_col=6, values_only=True), start=2
         ):
-            image, legacy, epithelial, leucocyte, annotator, comment = row
+            image, status, epithelial, leucocyte, annotator, comment = row
             if not image:
                 continue
-            legacy_text = str(legacy or "").strip()
-            if legacy_text.casefold() == "er ikke i projektet" or not legacy_text:
+            if str(status or "").strip().casefold() == "er ikke i projektet":
                 continue
-            if legacy_text not in LEGACY_LABEL_IDS:
-                raise ValueError(f"Workbook row {row_number}: unsupported legacy label {legacy!r}")
+            if epithelial is None and leucocyte is None:
+                continue
+            key = str(image).strip().casefold()
+            if key in references:
+                raise ValueError(f"Duplicate expert image name at workbook row {row_number}: {image}")
             epi_bin = normalize_count_bin(epithelial)
             leu_bin = normalize_count_bin(leucocyte)
             references[str(image).strip().casefold()] = {
-                "legacy_label": legacy_text,
                 "epithelial_bin": epi_bin,
                 "leucocyte_bin": leu_bin,
                 "geckler_class": geckler_class(epi_bin, leu_bin),
@@ -305,7 +320,7 @@ def named_classification_analysis(
     }
 
 
-def save_confusion_matrix_figure(analysis: dict[str, Any], scheme: str, path: Path) -> None:
+def save_confusion_matrix_figure(analysis: dict[str, Any], scheme: str, path: Path, *, detection: bool = False) -> None:
     """Render counts with a shared count scale and explicit reference/model axes."""
     from PIL import Image, ImageDraw, ImageFont
 
@@ -320,8 +335,8 @@ def save_confusion_matrix_figure(analysis: dict[str, Any], scheme: str, path: Pa
     image = Image.new("RGB", (1500, 1250), "white")
     draw = ImageDraw.Draw(image)
     draw.text((750, 45), scheme, font=font(42), fill="black", anchor="mt")
-    draw.text((870, 130), "Model classification (predicted)", font=font(32), fill="black", anchor="mt")
-    draw.text((35, 175), "Expert reference", font=font(28), fill="black")
+    draw.text((870, 130), "Predicted class" if detection else "Model classification (predicted)", font=font(32), fill="black", anchor="mt")
+    draw.text((35, 175), "Annotated class" if detection else "Expert reference", font=font(28), fill="black")
     draw.text((35, 212), "(actual)", font=font(28), fill="black")
     left, top, span = 390, 280, 930
     cell = span // len(labels)
@@ -387,70 +402,6 @@ def sample_id(image_name: str) -> str:
     return f"Sample{match.group(1)}" if match else image_name
 
 
-def cluster_bootstrap(
-    rows: Sequence[dict[str, str]],
-    replicates: int,
-    seed: int,
-) -> tuple[dict[str, dict[str, float]], int]:
-    true_ids = np.asarray([int(row["manual_label_id"]) for row in rows])
-    predicted_ids = np.asarray([int(row["predicted_label_id"]) for row in rows])
-    clusters: dict[str, list[int]] = defaultdict(list)
-    for index, row in enumerate(rows):
-        clusters[sample_id(row["source_image_name"])].append(index)
-    cluster_names = sorted(clusters)
-
-    def metric_vector(y_true: np.ndarray, y_pred: np.ndarray) -> list[float]:
-        return [
-            float(accuracy_score(y_true, y_pred)),
-            float(balanced_accuracy_score(y_true, y_pred)),
-            float(
-                f1_score(
-                    y_true,
-                    y_pred,
-                    labels=[1, 2, 3],
-                    average="macro",
-                    zero_division=0,
-                )
-            ),
-            float(cohen_kappa_score(y_true, y_pred)),
-            float(cohen_kappa_score(y_true, y_pred, weights="quadratic")),
-        ]
-
-    rng = np.random.default_rng(seed)
-    bootstrapped = np.empty((replicates, 5), dtype=np.float64)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        for replicate in range(replicates):
-            selected = rng.choice(
-                cluster_names,
-                size=len(cluster_names),
-                replace=True,
-            )
-            indices = np.concatenate([clusters[name] for name in selected])
-            bootstrapped[replicate] = metric_vector(
-                true_ids[indices],
-                predicted_ids[indices],
-            )
-
-    estimates = metric_vector(true_ids, predicted_ids)
-    names = [
-        "Accuracy",
-        "Balanced accuracy",
-        "Macro F1",
-        "Cohen's kappa",
-        "Quadratic-weighted kappa",
-    ]
-    intervals = {
-        name: {
-            "estimate": estimates[index],
-            "low": float(np.quantile(bootstrapped[:, index], 0.025)),
-            "high": float(np.quantile(bootstrapped[:, index], 0.975)),
-        }
-        for index, name in enumerate(names)
-    }
-    return intervals, len(cluster_names)
-
-
 def per_class_standard_coco(
     test_coco_path: Path,
     predictions_path: Path,
@@ -493,72 +444,16 @@ def per_class_standard_coco(
     return rows
 
 
-def downstream_descriptive_analysis(
-    rows: Sequence[dict[str, str]],
-) -> dict[str, Any]:
-    true_ids = np.asarray([int(row["manual_label_id"]) for row in rows])
-    predicted_ids = np.asarray([int(row["predicted_label_id"]) for row in rows])
-    difference = predicted_ids - true_ids
-
-    count_summary: dict[str, dict[str, Any]] = {}
-    for label_id, label_name in (
-        (1, "Qualified"),
-        (2, "Partially Qualified"),
-        (3, "Not Qualified"),
-    ):
-        selected = [row for row in rows if int(row["manual_label_id"]) == label_id]
-        leucocytes = np.asarray([int(row["n_leucocyte"]) for row in selected])
-        epithelial = np.asarray(
-            [int(row["n_squamous_epithelial_cell"]) for row in selected]
-        )
-        count_summary[label_name] = {
-            "n": len(selected),
-            "leucocyte_median": float(np.median(leucocytes)),
-            "leucocyte_q1": float(np.quantile(leucocytes, 0.25)),
-            "leucocyte_q3": float(np.quantile(leucocytes, 0.75)),
-            "epithelial_median": float(np.median(epithelial)),
-            "epithelial_q1": float(np.quantile(epithelial, 0.25)),
-            "epithelial_q3": float(np.quantile(epithelial, 0.75)),
-        }
-
-    misclassified = [
-        {
-            "image": row["source_image_name"],
-            "clinical": row["manual_label"],
-            "predicted": row["predicted_label"],
-            "leucocyte": int(row["n_leucocyte"]),
-            "epithelial": int(row["n_squamous_epithelial_cell"]),
-            "quality_score": int(row["total_quality_score"]),
-        }
-        for row in rows
-        if row["manual_label_id"] != row["predicted_label_id"]
-    ]
-
-    return {
-        "error_direction": {
-            "exact": int(np.sum(difference == 0)),
-            "predicted_more_severe": int(np.sum(difference > 0)),
-            "predicted_more_favorable": int(np.sum(difference < 0)),
-            "two_class_error": int(np.sum(np.abs(difference) == 2)),
-        },
-        "aggregate_detections": {
-            "raw": sum(int(row["n_predictions_raw"]) for row in rows),
-            "kept_before_cross_class": sum(
-                int(row["n_predictions_kept_before_duplicate_suppression"])
-                for row in rows
-            ),
-            "cross_class_suppressed": sum(
-                int(row["n_cross_class_duplicates_suppressed"]) for row in rows
-            ),
-            "final": sum(int(row["n_predictions_kept"]) for row in rows),
-            "leucocyte": sum(int(row["n_leucocyte"]) for row in rows),
-            "epithelial": sum(
-                int(row["n_squamous_epithelial_cell"]) for row in rows
-            ),
-        },
-        "counts_by_clinical_class": count_summary,
-        "misclassified": misclassified,
+def downstream_descriptive_analysis(rows: Sequence[dict[str, str]]) -> dict[str, Any]:
+    fields = {
+        "kept_before_cross_class": "n_predictions_kept_before_duplicate_suppression",
+        "cross_class_suppressed": "n_cross_class_duplicates_suppressed",
+        "final": "n_predictions_kept", "leucocyte": "n_leucocyte",
+        "epithelial": "n_squamous_epithelial_cell",
     }
+    totals = {name: sum(int(row[field]) for row in rows) for name, field in fields.items()}
+    totals["raw"] = sum(int(row.get("n_predictions_after_sahi_merge", row.get("n_predictions_raw", 0))) for row in rows)
+    return {"aggregate_detections": totals}
 
 
 class WordReport:
@@ -635,7 +530,7 @@ class WordReport:
     ) -> None:
         self.selection.Style = self.document.Styles.Item(style)
         self.selection.ParagraphFormat.Alignment = alignment
-        self.selection.Font.Bold = bold
+        self.selection.Font.Bold = bold or style.startswith("Heading")
         self.selection.Font.Italic = italic
         self.selection.TypeText(str(text))
         self.selection.TypeParagraph()
@@ -665,6 +560,7 @@ class WordReport:
         table.AllowAutoFit = True
         table.AutoFitBehavior(WD_AUTOFIT_CONTENT)
         table.Rows.Item(1).HeadingFormat = True
+        table.Rows.Item(1).Range.ParagraphFormat.KeepWithNext = bool(rows)
         table.Rows.Item(1).Range.Font.Bold = True
         table.Rows.Item(1).Range.Font.Color = rgb(255, 255, 255)
         table.Rows.Item(1).Shading.BackgroundPatternColor = rgb(31, 78, 121)
@@ -694,8 +590,7 @@ class WordReport:
         width_inches: float = 6.25,
     ) -> None:
         if not path.is_file():
-            self.paragraph(f"[Figure unavailable: {path}]", italic=True)
-            return
+            raise FileNotFoundError(f"Report figure is missing: {path}")
         self.selection.Style = self.document.Styles.Item("Normal")
         self.selection.ParagraphFormat.Alignment = WD_ALIGN_CENTER
         shape = self.selection.InlineShapes.AddPicture(
@@ -707,6 +602,7 @@ class WordReport:
         if shape.Width > maximum_width:
             shape.LockAspectRatio = True
             shape.Width = maximum_width
+        shape.Range.ParagraphFormat.KeepWithNext = True
         self.selection.SetRange(shape.Range.End, shape.Range.End)
         self.selection.TypeParagraph()
         self.paragraph(caption, style="Caption", alignment=WD_ALIGN_CENTER)
@@ -803,7 +699,7 @@ if win32com is None:
             paragraph = self.document.add_paragraph(style=style)
             paragraph.alignment = alignment
             run = paragraph.add_run(str(text))
-            run.bold = bold
+            run.bold = bold or style.startswith("Heading")
             run.italic = italic
 
         def bullets(self, items: Iterable[str]) -> None:
@@ -816,10 +712,13 @@ if win32com is None:
         def table(self, headers: Sequence[str], rows: Sequence[Sequence[Any]], font_size: float = 9) -> None:
             table = self.document.add_table(rows=1, cols=len(headers))
             table.style = "Table Grid"
+            header_repeat = OxmlElement("w:tblHeader")
+            table.rows[0]._tr.get_or_add_trPr().append(header_repeat)
             for index, value in enumerate(headers):
                 cell = table.rows[0].cells[index]
                 cell.text = str(value)
                 cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+                cell.paragraphs[0].paragraph_format.keep_with_next = bool(rows)
                 shading = OxmlElement("w:shd")
                 shading.set(qn("w:fill"), "1F4E79")
                 cell._tc.get_or_add_tcPr().append(shading)
@@ -835,6 +734,7 @@ if win32com is None:
                         shading.set(qn("w:fill"), "EEF4FA")
                         cells[column]._tc.get_or_add_tcPr().append(shading)
             for row in table.rows:
+                row._tr.get_or_add_trPr().append(OxmlElement("w:cantSplit"))
                 for cell in row.cells:
                     for paragraph in cell.paragraphs:
                         for run in paragraph.runs:
@@ -844,10 +744,10 @@ if win32com is None:
 
         def image(self, path: Path, caption: str, width_inches: float = 6.25) -> None:
             if not path.is_file():
-                self.paragraph(f"[Figure unavailable: {path}]", italic=True)
-                return
+                raise FileNotFoundError(f"Report figure is missing: {path}")
             paragraph = self.document.add_paragraph()
             paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            paragraph.paragraph_format.keep_with_next = True
             paragraph.add_run().add_picture(str(path.resolve()), width=Inches(width_inches))
             self.paragraph(caption, style="Caption", alignment=WD_ALIGN_PARAGRAPH.CENTER)
             self._figure_count += 1
@@ -892,14 +792,32 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
         )
     report_path = output_dir / "RFDETR_Combined_Study_Results.docx"
 
+    input_paths = {
+        "object_summary": object_output / "eval_summary.json",
+        "object_confusion": object_output / "confusion_matrix.json",
+        "calibration": calibration_output / "threshold_calibration_summary.json",
+        "downstream_summary": downstream_output / "downstream_evaluation_summary.json",
+        "downstream_predictions": downstream_output / "downstream_predictions.csv",
+        "expert_counts": args.manual_labels,
+        "split_summary": args.split_summary,
+        "test_annotations": args.test_coco,
+        "hpo_record": args.hpo_record,
+        "train_kwargs": args.train_kwargs or args.hpo_record.parent / "run_meta" / "train_kwargs.json",
+    }
+    missing = [f"{name}: {path}" for name, path in input_paths.items() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError("Missing report inputs; supply the corresponding path options:\n" + "\n".join(missing))
+
     object_summary = read_json(object_output / "eval_summary.json")
     object_confusion = read_json(object_output / "confusion_matrix.json")
     calibration = read_json(calibration_output / "threshold_calibration_summary.json")
     downstream = read_json(downstream_output / "downstream_evaluation_summary.json")
-    split = read_json(SPLIT_SUMMARY)
-    hpo = read_json(HPO_RECORD)
-    train_kwargs = read_json(TRAIN_KWARGS)
+    split = read_json(args.split_summary)
+    hpo = read_json(args.hpo_record)
+    train_kwargs_path = args.train_kwargs or args.hpo_record.parent / "run_meta" / "train_kwargs.json"
+    train_kwargs = read_json(train_kwargs_path)
     downstream_rows = read_csv(downstream_output / "downstream_predictions.csv")
+    validate_report_inputs(object_summary, object_confusion, calibration, downstream, downstream_rows)
     expert_references = read_expert_references(args.manual_labels.resolve())
     for row in downstream_rows:
         key = row["source_image_name"].strip().casefold()
@@ -908,8 +826,6 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
                 f"No revised expert reference was found for {row['source_image_name']!r}"
             )
         reference = expert_references[key]
-        row["manual_label"] = reference["legacy_label"]
-        row["manual_label_id"] = str(LEGACY_LABEL_IDS[reference["legacy_label"]])
         row["expert_epithelial_bin"] = reference["epithelial_bin"]
         row["expert_leucocyte_bin"] = reference["leucocyte_bin"]
         row["expert_geckler_class"] = reference["geckler_class"]
@@ -927,12 +843,6 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
         )
         row["predicted_mw_label"] = mw_label(predicted_epi_bin, predicted_leu_bin)
 
-    legacy_analysis = named_classification_analysis(
-        downstream_rows,
-        "manual_label",
-        "predicted_label",
-        list(LEGACY_LABEL_IDS),
-    )
     geckler_analysis = named_classification_analysis(
         downstream_rows,
         "expert_geckler_class",
@@ -952,20 +862,28 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
         MW_LABELS,
     )
     scheme_analyses = {
-        "Original expert scheme": legacy_analysis,
         "Geckler (six groups)": geckler_analysis,
         "Collapsed Geckler (three-way)": collapsed_geckler_analysis,
         "Murray-Washington (binary)": mw_analysis,
     }
+    if args.check_inputs:
+        print("Report inputs validated; no report was written.")
+        return report_path, {"checked_only": 1}
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest = artifact_manifest(input_paths, calibration, object_summary)
+    manifest_path = output_dir / "report_provenance.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    (output_dir / "count_based_classification_results.json").write_text(
+        json.dumps(scheme_analyses, indent=2), encoding="utf-8"
+    )
+    # Generate from the validated matrix data; do not reuse a potentially stale PNG.
+    object_matrix_path = output_dir / "calibrated_test_detection_confusion_matrix.png"
+    save_confusion_matrix_figure(object_confusion, "Held-out detection at calibrated thresholds", object_matrix_path, detection=True)
     per_class_coco = per_class_standard_coco(
-        TEST_COCO,
+        args.test_coco,
         object_output / "predictions_coco.json",
     )
-    bootstrap, n_clusters = cluster_bootstrap(
-        downstream_rows,
-        args.bootstrap_replicates,
-        args.bootstrap_seed,
-    )
+    n_clusters = len({sample_id(row["source_image_name"]) for row in downstream_rows})
     descriptive = downstream_descriptive_analysis(downstream_rows)
 
     report = WordReport()
@@ -997,8 +915,8 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
                     "Class confidence thresholds",
                     threshold_text(calibration["selected_thresholds"]),
                 ],
-                ["Final downstream set", "98 FOVs from 34 samples"],
-                ["Code provenance", f"{CODE_COMMIT[:8]} — {CODE_URL}"],
+                ["Final downstream set", f"{len(downstream_rows)} FOVs from {n_clusters} samples"],
+                ["Artifact provenance", str(manifest_path.resolve())],
             ],
         )
         report.paragraph("Headline outcomes", style="Heading 2")
@@ -1016,7 +934,7 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
                     "Independent calibration",
                     "Macro F1 "
                     + fmt(calibration["selected_joint_metrics"]["macro_f1"], 4)
-                    + " at Leucocyte=0.36 and Epithelial=0.35",
+                    + " at " + threshold_text(calibration["selected_thresholds"]),
                 ],
                 [
                     "Final downstream task",
@@ -1025,9 +943,7 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
                     + "; collapsed Geckler accuracy "
                     + pct(collapsed_geckler_analysis["metrics"]["accuracy"], 2)
                     + "; Murray-Washington accuracy "
-                    + pct(mw_analysis["metrics"]["accuracy"], 2)
-                    + "; original expert-label accuracy "
-                    + pct(legacy_analysis["metrics"]["accuracy"], 2),
+                    + pct(mw_analysis["metrics"]["accuracy"], 2),
                 ],
             ],
         )
@@ -1049,23 +965,15 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
                 + fmt(object_summary["coco_standard"]["AP@50:95"], 4)
                 + " and AP@50 of "
                 + fmt(object_summary["coco_standard"]["AP@50"], 4)
-                + " on 331 held-out 640 × 640 patches containing 4,004 objects.",
-                "Independent calibration on 53 patches containing 776 objects "
-                "selected confidence thresholds of 0.36 for Leucocyte and 0.35 "
-                "for Squamous Epithelial Cell; joint macro F1 was "
+                + f" on {object_summary['images_processed']} held-out patches.",
+                f"Independent calibration on {calibration['image_count']} patches selected "
+                + threshold_text(calibration["selected_thresholds"]) + "; joint macro F1 was "
                 + fmt(calibration["selected_joint_metrics"]["macro_f1"], 4)
                 + ".",
-                "The final downstream evaluation included 98 expert-counted FOVs "
-                "after four prespecified exclusions. The revised primary references "
+                f"The final downstream evaluation included {len(downstream_rows)} FOVs "
+                f"after {downstream['dataset']['excluded_image_count']} exclusions. The references "
                 "were derived independently under full Geckler, collapsed Geckler, "
-                "and Murray-Washington rules; the original expert quality tags were "
-                "retained as a comparator.",
-                "Downstream errors were predominantly conservative: "
-                f"{descriptive['error_direction']['predicted_more_severe']} of "
-                f"{len(descriptive['misclassified'])} errors assigned a worse "
-                "quality category than the clinical reference, while "
-                f"{descriptive['error_direction']['predicted_more_favorable']} "
-                "assigned a more favorable category.",
+                "and Murray-Washington rules.",
                 "No threshold or quality-rule parameter was changed after the "
                 "downstream labels were inspected.",
             ]
@@ -1132,14 +1040,11 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
             ],
         )
         report.paragraph(
-            "The detector split was sample-wise (28/9/11 samples for "
-            "train/validation/test). The downstream workbook contained 102 "
-            "non-header image rows: 98 were eligible, one image was marked as "
-            "not present in the annotation project, and three were considered "
-            "too difficult for a reliable clinical classification."
+            "Detector partitions are separated by source specimen. Downstream exclusions "
+            "are listed individually in Appendix A; the cohort sizes above are read from the supplied results."
         )
 
-        report.paragraph("3. Final model and locked inference settings", style="Heading 1")
+        report.paragraph("3. Selected model and training settings", style="Heading 1")
         report.paragraph("3.1 Model selection and training", style="Heading 2")
         report.table(
             ["Parameter", "Value"],
@@ -1168,77 +1073,12 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
             "the slice is 640 × 640, while the model internally operates at 880."
         )
 
-        report.paragraph("3.2 Locked downstream inference", style="Heading 2")
-        settings = downstream["preflight"]["inference_settings"]
-        cross_class = settings["cross_class_duplicate_suppression"]
-        report.table(
-            ["Setting", "Locked value"],
-            [
-                ["SAHI slice", f"{settings['slice_width']} × {settings['slice_height']}"],
-                [
-                    "Slice overlap",
-                    f"{pct(settings['overlap_width_ratio'], 0)} horizontal and vertical",
-                ],
-                ["Standard whole-image prediction", str(settings["perform_standard_prediction"])],
-                [
-                    "Class confidence thresholds",
-                    threshold_text(settings["class_score_thresholds"]),
-                ],
-                [
-                    "Within-class postprocess",
-                    f"{settings['postprocess']['type']}, "
-                    f"{settings['postprocess']['match_metric']}="
-                    f"{settings['postprocess']['match_threshold']:.2f}, "
-                    "class-aware",
-                ],
-                [
-                    "Cross-class duplicate suppression",
-                    f"IOS≥{cross_class['ios_threshold']:.2f}, "
-                    f"IoU≥{cross_class['iou_threshold']:.2f}, "
-                    f"area ratio≥{cross_class['area_ratio_threshold']:.2f}",
-                ],
-            ],
-        )
-
-        report.paragraph("3.3 Count-to-quality classification rules", style="Heading 2")
-        report.table(
-            ["Component", "Observed count", "Score"],
-            [
-                ["Leucocyte", "<10", "−1"],
-                ["Leucocyte", "10–25", "0"],
-                ["Leucocyte", "26–50", "+1"],
-                ["Leucocyte", ">50", "+2"],
-                ["Squamous epithelial", "<10", "0"],
-                ["Squamous epithelial", "10–25", "−1"],
-                ["Squamous epithelial", ">25", "−2"],
-            ],
-        )
-        report.paragraph(
-            "The component scores were summed. An FOV was Qualified when the "
-            "total score was at least +1 and fewer than 10 epithelial cells were "
-            "detected; it was Not Qualified when the total was −1 or lower; all "
-            "remaining cases were Partially Qualified."
-        )
-        report.paragraph(
-            "For the revised primary analysis, both expert count bins and model "
-            "counts were converted by the same published cell-count boundaries. "
-            "Geckler groups G1-G3 contain >25 epithelial cells with respectively "
-            "0-9, 10-25, or >25 leukocytes; G4 contains 10-25 epithelial cells and "
-            ">25 leukocytes; G5 contains 0-9 epithelial cells and >25 leukocytes; "
-            "G6 contains the remaining low-epithelial/low-leukocyte combinations. "
-            "A three-way collapsed Geckler endpoint grouped G4-G5 as Acceptable, "
-            "G1-G3 as Unacceptable, and G6 as Unknown. "
-            "The Murray-Washington binary analysis defined an FOV as Acceptable "
-            "only when it contained 0-9 epithelial cells and >25 leukocytes."
-        )
-
-        report.paragraph("4. Held-out object-detection evaluation", style="Heading 1")
+        report.paragraph("4. Held-out COCO ranking evaluation", style="Heading 1")
         report.paragraph(
             "Standard COCO ranking metrics were calculated from detections "
             f"retained at the numerical score floor of {object_summary['score_floor']}. "
-            "They do not use the calibrated thresholds. The confusion matrix and "
-            "operating-point precision/recall/F1 are threshold-dependent and use "
-            "the independently calibrated class-specific thresholds at IoU=0.50."
+            "They do not use the calibrated thresholds. Threshold-dependent held-out "
+            "results are reported in Section 6, after independent calibration in Section 5."
         )
         overall = object_summary["coco_standard"]
         report.table(
@@ -1266,59 +1106,18 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
                 for row in per_class_coco
             ],
         )
-        operating = object_summary["operating_point"]
-        report.paragraph("Locked operating point at IoU=0.50", style="Heading 2")
-        report.table(
-            ["Thresholds", "TP", "FP", "FN", "Precision", "Recall", "F1", "FP/image"],
-            [
-                [
-                    threshold_text(operating["class_score_thresholds"]),
-                    operating["tp"],
-                    operating["fp"],
-                    operating["fn"],
-                    fmt(operating["precision"], 4),
-                    fmt(operating["recall"], 4),
-                    fmt(operating["f1"], 4),
-                    fmt(operating["fp_per_image"], 3),
-                ]
-            ],
-        )
-        report.image(
-            object_output / "confusion_matrix.png",
-            "Figure 1. Object-detection confusion matrix at the locked "
-            "class-specific confidence thresholds and IoU=0.50. Rows are "
-            "ground truth; columns are predictions. Background indicates misses "
-            "or unmatched detections.",
-        )
         report.image(
             object_output / "map_by_iou_threshold.png",
-            "Figure 2. Detector AP across IoU thresholds. The standard headline "
+            "Figure 1. Detector AP across IoU thresholds. The standard headline "
             "COCO result remains AP@50:95.",
         )
-        object_matrix = object_confusion["matrix"]
-        report.paragraph(
-            "The test set contained 2,851 annotated leucocytes and 1,153 "
-            "squamous epithelial cells. At the locked operating point, the "
-            f"confusion matrix recorded {object_matrix[0][0]:,} correctly "
-            f"localized leucocytes and {object_matrix[1][1]:,} correctly "
-            "localized epithelial cells. Epithelial cells showed higher "
-            "localization performance than leucocytes across AP@50:95, AP@50, "
-            "AP@75, and AR@100."
-        )
-        report.paragraph(
-            "The saved test threshold sweep is descriptive sensitivity analysis "
-            "only. Its test-set maximum was not used to select or revise the "
-            "operating thresholds and is intentionally not reported as a "
-            "selected operating point."
-        )
-
         report.paragraph("5. Independent confidence-threshold calibration", style="Heading 1")
         report.paragraph(
-            "Calibration used 53 images from 11 tasks, with 572 leucocyte and "
-            "204 squamous epithelial annotations. Predictions were matched at "
-            "IoU=0.50. Thresholds from 0.00 to 0.95 were evaluated at 0.01 "
-            "increments, with extra observed-score candidates, and macro F1 was "
-            "the prespecified selection criterion."
+            f"Calibration used {calibration['image_count']} patches from {calibration['task_count']} tasks. "
+            f"Predictions were matched at IoU={calibration['iou_threshold']:.2f}. "
+            f"The threshold grid ranged from {calibration['threshold_grid']['min']:.2f} "
+            f"to {calibration['threshold_grid']['max']:.2f} in steps of {calibration['threshold_grid']['step']:.2f}; "
+            f"the selection criterion was {calibration['selection_metric']}."
         )
         selected = calibration["selected_thresholds"]
         per_class = calibration["best_per_class_by_f1"]
@@ -1355,17 +1154,17 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
         )
         report.image(
             calibration_output / "leucocyte_threshold_sweep.png",
-            "Figure 3. Leucocyte precision, recall, F1, and Jaccard across "
-            "confidence thresholds. The selected F1-maximizing threshold was 0.36.",
+            "Figure 2. Leucocyte precision, recall, F1, and Jaccard across "
+            f"confidence thresholds. Selected threshold: {selected['Leucocyte']:.2f}.",
         )
         report.image(
             calibration_output / "squamous_epithelial_cell_threshold_sweep.png",
-            "Figure 4. Squamous epithelial cell calibration curves. The selected "
-            "F1-maximizing threshold was 0.35.",
+            "Figure 3. Squamous epithelial cell calibration curves. The selected "
+            f"threshold was {selected['Squamous Epithelial Cell']:.2f}.",
         )
         report.image(
             calibration_output / "joint_macro_f1_heatmap.png",
-            "Figure 5. Joint macro-F1 surface for the two class-specific "
+            "Figure 4. Joint macro-F1 surface for the two class-specific "
             "confidence thresholds.",
         )
         report.paragraph(
@@ -1375,8 +1174,107 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
             "inference."
         )
 
-        report.paragraph("6. Final downstream quality evaluation", style="Heading 1")
-        report.paragraph("6.1 Cohort flow and runtime", style="Heading 2")
+        report.paragraph("6. Held-out detection at calibrated thresholds", style="Heading 1")
+        operating = object_summary["operating_point"]
+        report.paragraph("6.1 Detection precision recall and confusion matrix", style="Heading 2")
+        report.table(
+            ["Thresholds", "TP", "FP", "FN", "Precision", "Recall", "F1", "FP/image"],
+            [
+                [
+                    threshold_text(operating["class_score_thresholds"]),
+                    operating["tp"],
+                    operating["fp"],
+                    operating["fn"],
+                    fmt(operating["precision"], 4),
+                    fmt(operating["recall"], 4),
+                    fmt(operating["f1"], 4),
+                    fmt(operating["fp_per_image"], 3),
+                ]
+            ],
+        )
+        report.image(
+            object_matrix_path,
+            "Figure 5. Held-out object-detection confusion matrix at the locked "
+            f"thresholds ({threshold_text(operating['class_score_thresholds'])}) and IoU={object_confusion['iou_threshold']:.2f}. Rows are "
+            "ground truth; columns are predictions. Background indicates misses "
+            "or unmatched detections.",
+        )
+        report.paragraph(
+            "The confusion matrix matches boxes without requiring class agreement, "
+            "whereas precision/recall/F1 match within class. Their diagonal and true-positive "
+            "totals need not be identical. Both use the held-out patches and the calibrated thresholds."
+        )
+        report.paragraph("6.2 Patch-level count agreement", style="Heading 2")
+        count_rows = object_summary.get("count_error_metrics")
+        if not count_rows:
+            raise ValueError("Missing count_error_metrics in eval_summary.json. Rerun the current object evaluator; do not substitute downstream metrics.")
+        report.table(
+            ["Class", "Patches", "MAE", "Median AE", "Mean signed error"],
+            [[r["class"], r["n_images"], fmt(r["mean_absolute_error"], 2),
+              fmt(r["median_absolute_error"], 2), fmt(r["mean_signed_error"], 2)] for r in count_rows],
+        )
+        report.paragraph(
+            "Count errors are in cells per test patch at the calibrated thresholds. Signed error "
+            "is predicted minus annotated count. These are descriptive point estimates; "
+            "no confidence intervals were calculated by this count-error analysis."
+        )
+        report.paragraph(
+            "The saved test threshold sweep is descriptive sensitivity analysis "
+            "only. Its test-set maximum was not used to select or revise the "
+            "operating thresholds and is intentionally not reported as a "
+            "selected operating point."
+        )
+
+
+        report.paragraph("7. Full-FOV count-based classification", style="Heading 1")
+        report.paragraph("7.1 Full-FOV inference settings", style="Heading 2")
+        settings = downstream["preflight"]["inference_settings"]
+        cross_class = settings["cross_class_duplicate_suppression"]
+        report.table(
+            ["Setting", "Locked value"],
+            [
+                ["SAHI slice", f"{settings['slice_width']} × {settings['slice_height']}"],
+                [
+                    "Slice overlap",
+                    f"{pct(settings['overlap_width_ratio'], 0)} horizontal; {pct(settings['overlap_height_ratio'], 0)} vertical",
+                ],
+                ["Standard whole-image prediction", str(settings["perform_standard_prediction"])],
+                [
+                    "Class confidence thresholds",
+                    threshold_text(settings["class_score_thresholds"]),
+                ],
+                [
+                    "Within-class postprocess",
+                    f"{settings['postprocess']['type']}, "
+                    f"{settings['postprocess']['match_metric']}="
+                    f"{settings['postprocess']['match_threshold']:.2f}, "
+                    + ("class-agnostic" if settings['postprocess']['class_agnostic'] else "class-aware"),
+                ],
+                [
+                    "Cross-class duplicate suppression",
+                    f"IOS≥{cross_class['ios_threshold']:.2f}, "
+                    f"IoU≥{cross_class['iou_threshold']:.2f}, "
+                    f"area ratio≥{cross_class['area_ratio_threshold']:.2f}",
+                ],
+            ],
+        )
+
+        report.paragraph("7.2 Count-based classification rules", style="Heading 2")
+        report.paragraph(
+            "For the revised primary analysis, both expert count bins and model "
+            "counts were converted by the same published cell-count boundaries. "
+            "Geckler groups G1-G3 contain >25 epithelial cells with respectively "
+            "0-9, 10-25, or >25 leukocytes; G4 contains 10-25 epithelial cells and "
+            ">25 leukocytes; G5 contains 0-9 epithelial cells and >25 leukocytes; "
+            "G6 contains the remaining low-epithelial/low-leukocyte combinations. "
+            "A three-way collapsed Geckler endpoint grouped G4-G5 as Acceptable, "
+            "G1-G3 as Unacceptable, and G6 as Unknown. "
+            "The Murray-Washington binary analysis defined an FOV as Acceptable "
+            "only when it contained 0-9 epithelial cells and >25 leukocytes."
+        )
+
+
+        report.paragraph("7.3 Cohort flow and runtime", style="Heading 2")
         report.table(
             ["Item", "Count/result"],
             [
@@ -1384,25 +1282,21 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
                 ["Eligible FOVs analyzed", downstream["dataset"]["included_image_count"]],
                 ["Represented samples", n_clusters],
                 ["Excluded FOVs", downstream["dataset"]["excluded_image_count"]],
-                ["Original Qualified references", legacy_analysis["reference_counts"].get("Qualified", 0)],
-                ["Original Partially Qualified references", legacy_analysis["reference_counts"].get("Partially Qualified", 0)],
-                ["Original Not Qualified references", legacy_analysis["reference_counts"].get("Not Qualified", 0)],
                 ["Total evaluation time", f"{downstream['runtime']['total_evaluation_seconds']:.1f} s"],
                 ["Mean detector time per FOV", f"{downstream['runtime']['mean_inference_seconds_per_image']:.2f} s"],
             ],
         )
         report.paragraph(
-            "All 98 eligible images completed without inference failure, and an "
-            "annotated overlay was produced for every included FOV."
+            f"Results are available for {len(downstream_rows)} eligible FOVs. "
+            "Overlay availability is recorded in the downstream output manifest."
         )
 
-        report.paragraph("6.2 Reference classification comparison", style="Heading 2")
+        report.paragraph("7.4 Count-based agreement", style="Heading 2")
         report.paragraph(
-            "The revised workbook retains the experts' original quality tag and "
-            "adds independently recorded epithelial-cell and leukocyte bins. The "
-            "count bins were converted to Geckler and Murray-Washington references "
-            "without using model output. The table below makes the resulting change "
-            "in endpoint explicit."
+            "Expert-recorded epithelial-cell and leucocyte count bins define the references. "
+            "The same three count-based schemes are applied to predicted cell counts. "
+            "Accuracy, mean class recall, unweighted macro F1, and unweighted Cohen's kappa "
+            "describe agreement across FOVs. Unknown is retained in collapsed Geckler."
         )
         report.table(
             ["Scheme", "Reference distribution", "Model distribution"],
@@ -1430,52 +1324,7 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
             ],
         )
 
-        report.paragraph("6.3 Original expert-label analysis", style="Heading 2")
-        report.paragraph(
-            f"Uncertainty intervals are percentile 95% confidence intervals from "
-            f"{args.bootstrap_replicates:,} cluster-bootstrap replicates, "
-            f"resampling the {n_clusters} source samples with replacement "
-            f"(seed {args.bootstrap_seed}). This preserves within-sample FOV "
-            "correlation better than an image-level bootstrap."
-        )
-        report.table(
-            ["Metric", "Estimate", "Cluster-bootstrap 95% CI"],
-            [
-                [
-                    metric,
-                    fmt(values["estimate"], 4),
-                    f"{fmt(values['low'], 4)}–{fmt(values['high'], 4)}",
-                ]
-                for metric, values in bootstrap.items()
-            ],
-        )
-        report.paragraph("6.4 Original expert-label class performance", style="Heading 2")
-        report.table(
-            ["Class", "Support", "TP", "FP", "FN", "Precision", "Recall", "F1", "Specificity"],
-            [
-                [
-                    row["label"],
-                    row["support"],
-                    row["tp"],
-                    row["fp"],
-                    row["fn"],
-                    fmt(row["precision"], 4),
-                    fmt(row["recall"], 4),
-                    fmt(row["f1"], 4),
-                    fmt(row["specificity"], 4),
-                ]
-                for row in legacy_analysis["per_class"]
-            ],
-        )
-        matrix = legacy_analysis["matrix"]
-        report.paragraph(
-            f"The pipeline correctly classified {sum(matrix[index][index] for index in range(3))} "
-            "of 98 FOVs under the original three-category expert scheme. These "
-            "results are retained for direct comparison and are no longer the "
-            "primary downstream endpoint."
-        )
-
-        report.paragraph("6.5 Count-based classification confusion matrices", style="Heading 2")
+        report.paragraph("7.5 Count-based classification confusion matrices", style="Heading 2")
         for scheme, analysis in (
             ("Geckler", geckler_analysis),
             ("Collapsed Geckler", collapsed_geckler_analysis),
@@ -1499,57 +1348,19 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
                 font_size=8,
             )
 
-        report.paragraph("6.6 Error direction and detected-count patterns", style="Heading 2")
-        errors = descriptive["error_direction"]
-        report.table(
-            ["Outcome", "FOVs", "Percentage of all FOVs"],
-            [
-                ["Exact class agreement", errors["exact"], pct(errors["exact"] / len(downstream_rows), 1)],
-                [
-                    "Predicted more severe than reference",
-                    errors["predicted_more_severe"],
-                    pct(errors["predicted_more_severe"] / len(downstream_rows), 1),
-                ],
-                [
-                    "Predicted more favorable than reference",
-                    errors["predicted_more_favorable"],
-                    pct(errors["predicted_more_favorable"] / len(downstream_rows), 1),
-                ],
-                [
-                    "Two-category errors",
-                    errors["two_class_error"],
-                    pct(errors["two_class_error"] / len(downstream_rows), 1),
-                ],
-            ],
-        )
-        report.table(
-            ["Clinical class", "n", "Leucocyte median (IQR)", "Epithelial median (IQR)"],
-            [
-                [
-                    class_name,
-                    values["n"],
-                    f"{fmt(values['leucocyte_median'], 1)} "
-                    f"({fmt(values['leucocyte_q1'], 1)}–{fmt(values['leucocyte_q3'], 1)})",
-                    f"{fmt(values['epithelial_median'], 1)} "
-                    f"({fmt(values['epithelial_q1'], 1)}–{fmt(values['epithelial_q3'], 1)})",
-                ]
-                for class_name, values in descriptive[
-                    "counts_by_clinical_class"
-                ].items()
-            ],
-        )
+        report.paragraph("7.6 Detection counts after post-processing", style="Heading 2")
         aggregate = descriptive["aggregate_detections"]
         report.paragraph(
-            f"Across all FOVs, {aggregate['raw']:,} raw sliced predictions were "
+            f"Across all FOVs, {aggregate['raw']:,} predictions after SAHI merging were "
             f"reduced to {aggregate['kept_before_cross_class']:,} candidates by "
-            "the locked confidence thresholds and within-class SAHI postprocess. "
+            "the locked confidence thresholds. "
             f"Cross-class suppression removed {aggregate['cross_class_suppressed']:,} "
-            f"additional duplicates, leaving {aggregate['final']:,} detections "
+            f"overlapping predictions, leaving {aggregate['final']:,} detections "
             f"({aggregate['leucocyte']:,} leucocytes and "
             f"{aggregate['epithelial']:,} epithelial cells)."
         )
 
-        report.paragraph("7. Integrated interpretation", style="Heading 1")
+        report.paragraph("8. Integrated interpretation", style="Heading 1")
         report.bullets(
             [
                 "The final RFDETR2XLarge detector showed strong held-out "
@@ -1566,9 +1377,6 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
                 "collapsed Geckler treats G4-G5 as acceptable, G1-G3 as unacceptable, "
                 "and G6 as unknown. Murray-Washington uses the narrower G5-like "
                 "acceptable-cellularity criterion.",
-                "The original expert quality tags remain visible as a sensitivity "
-                "analysis, allowing the effect of changing the endpoint definition "
-                "to be separated from detector performance.",
                 "The final downstream set must remain untouched for optimization. "
                 "Any future revision of thresholds or the count-to-quality rule "
                 "should be developed on a new training/development cohort and "
@@ -1576,19 +1384,17 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
             ]
         )
 
-        report.paragraph("8. Limitations", style="Heading 1")
+        report.paragraph("9. Limitations", style="Heading 1")
         report.bullets(
             [
                 "The downstream reference is the final expert-review workbook. "
                 "The experts recorded count bins rather than exact counts, so the "
                 "analysis can resolve published threshold categories but cannot "
                 "recover within-bin cell counts.",
-                "Four of 102 reviewed rows were excluded: one was not present in "
-                "the annotation project and three were too difficult for a "
-                "reliable clinical classification.",
+                "Excluded images and their recorded reasons are listed in Appendix A.",
                 "The downstream analysis contains multiple FOVs from some source "
-                "samples. Cluster-bootstrap intervals account for this grouping, "
-                "but the number of represented samples remains 34.",
+                "samples. The reported point estimates are descriptive and do not "
+                "treat those FOVs as independent specimens.",
                 "Confidence thresholds were calibrated on 640 × 640 object-level "
                 "patches, whereas the downstream task uses overlapping SAHI "
                 "slices extracted from full FOVs. The locked approach preserves "
@@ -1597,16 +1403,16 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
                 "The full Geckler, collapsed Geckler, and Murray-Washington rules "
                 "were applied identically to expert bins and model counts and were "
                 "not tuned on downstream outcomes.",
-                "Confidence intervals quantify resampling uncertainty in this "
-                "dataset; they do not establish external generalizability.",
+                "Point estimates do not quantify specimen-level sampling uncertainty "
+                "or establish external generalizability.",
             ]
         )
 
-        report.paragraph("9. Reproducibility and result artifacts", style="Heading 1")
+        report.paragraph("10. Reproducibility and result artifacts", style="Heading 1")
         report.table(
             ["Artifact", "Location"],
             [
-                ["Code commit", CODE_URL],
+                ["Source artifacts and checksums", str(manifest_path.resolve())],
                 ["Object-detection summary", str((object_output / "eval_summary.json").resolve())],
                 ["Object predictions", str((object_output / "predictions_coco.json").resolve())],
                 ["Calibration summary", str((calibration_output / "threshold_calibration_summary.json").resolve())],
@@ -1651,26 +1457,21 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
             "signed adjustment needed to move each model count into its expert bin: "
             "negative means fewer predicted cells are needed, positive means more, "
             "and zero means the count is already in the correct bin. Complete results "
-            "for all 98 FOVs remain available in downstream_predictions.csv."
+            f"for all {len(downstream_rows)} FOVs remain available in downstream_predictions.csv."
         )
         error_schemes = [
             (
-                "B.1 Original expert quality scheme",
-                "manual_label",
-                "predicted_label",
-            ),
-            (
-                "B.2 Geckler classification",
+                "B.1 Geckler classification",
                 "expert_geckler_class",
                 "predicted_geckler_class",
             ),
             (
-                "B.3 Collapsed Geckler classification",
+                "B.2 Collapsed Geckler classification",
                 "expert_collapsed_geckler_label",
                 "predicted_collapsed_geckler_label",
             ),
             (
-                "B.4 Murray-Washington classification",
+                "B.3 Murray-Washington classification",
                 "expert_mw_label",
                 "predicted_mw_label",
             ),
@@ -1734,16 +1535,16 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
 
 
 def validate_saved_report(path: Path, expected_statistics: dict[str, int]) -> None:
-    if not path.is_file() or path.stat().st_size < 100_000:
+    if not path.is_file() or path.stat().st_size == 0:
         raise RuntimeError(f"Report was not created correctly: {path}")
 
     required_phrases = [
-        "Held-out object-detection evaluation",
+        "Held-out COCO ranking evaluation",
         "Independent confidence-threshold calibration",
-        "Final downstream quality evaluation",
+        "Full-FOV count-based classification",
         "Geckler",
         "Murray-Washington",
-        "Original expert-label analysis",
+        "Held-out detection at calibrated thresholds",
     ]
     if win32com is None:
         document = Document(path)
@@ -1770,8 +1571,6 @@ def validate_saved_report(path: Path, expected_statistics: dict[str, int]) -> No
         missing = [phrase for phrase in required_phrases if phrase not in text]
         if missing:
             raise RuntimeError(f"Report validation failed; missing text: {missing}")
-        if pages < 8:
-            raise RuntimeError(f"Report unexpectedly contains only {pages} pages.")
         if int(document.Tables.Count) != expected_statistics["tables"]:
             raise RuntimeError("Table count changed after reopening the report.")
         if int(document.InlineShapes.Count) != expected_statistics["figures"]:
@@ -1785,6 +1584,8 @@ def validate_saved_report(path: Path, expected_statistics: dict[str, int]) -> No
 def main() -> int:
     args = parse_args()
     report_path, statistics = build_report(args)
+    if statistics.get("checked_only"):
+        return 0
     validate_saved_report(report_path, statistics)
     print(
         json.dumps(

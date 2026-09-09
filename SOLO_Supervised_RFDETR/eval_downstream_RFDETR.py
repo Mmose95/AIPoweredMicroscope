@@ -148,65 +148,10 @@ def _cell_text(value: Any) -> str:
     return "" if value is None else str(value).strip()
 
 
-COUNT_BINS = ("0-9", "10-25", "26+")
-
-
-def normalized_count_bin(value: Any) -> str:
-    """Normalize the expert count categories without inventing exact counts."""
-    text = _cell_text(value).casefold().replace("–", "-").replace("—", "-")
-    compact = re.sub(r"\s+", "", text.replace("til", "-"))
-    if compact in {"0-9", "0to9"}:
-        return "0-9"
-    if compact in {"10-25", "10to25"}:
-        return "10-25"
-    if compact in {"26+", ">25", "26"}:
-        return "26+"
-    try:
-        number = int(float(compact))
-    except (TypeError, ValueError):
-        raise ValueError(f"Unsupported expert count category: {value!r}")
-    if number <= 9:
-        return "0-9"
-    if number <= 25:
-        return "10-25"
-    return "26+"
-
-
-def count_bin_from_integer(value: int) -> str:
-    if value <= 9:
-        return "0-9"
-    if value <= 25:
-        return "10-25"
-    return "26+"
-
-
-def geckler_class(epithelial_bin: str, leucocyte_bin: str) -> str:
-    """Return Geckler group 1-6 from the study's three expert count bins."""
-    if epithelial_bin == "26+":
-        return {"0-9": "G1", "10-25": "G2", "26+": "G3"}[leucocyte_bin]
-    if epithelial_bin == "10-25" and leucocyte_bin == "26+":
-        return "G4"
-    if epithelial_bin == "0-9" and leucocyte_bin == "26+":
-        return "G5"
-    return "G6"
-
-
-def collapsed_geckler_label(group: str) -> str:
-    """Collapse Geckler to acceptable, unacceptable, and unknown."""
-    if group in {"G4", "G5"}:
-        return "Acceptable"
-    if group in {"G1", "G2", "G3"}:
-        return "Unacceptable"
-    return "Unknown"
-
-
-def murray_washington_label(epithelial_bin: str, leucocyte_bin: str) -> str:
-    """Binary Murray-Washington culture-quality interpretation."""
-    return (
-        "Acceptable"
-        if epithelial_bin == "0-9" and leucocyte_bin == "26+"
-        else "Unacceptable"
-    )
+from quality_reference_schemes import (
+    COUNT_BINS, normalized_count_bin, count_bin_from_integer, geckler_class,
+    collapsed_geckler_label, murray_washington_label,
+)
 
 
 def read_clinical_workbook(
@@ -284,7 +229,7 @@ def read_clinical_workbook(
                 )
                 continue
 
-            if not label_text:
+            if not _cell_text(epithelial_value) and not _cell_text(leucocyte_value):
                 excluded.append(
                     ExcludedRecord(
                         source_row=row_number,
@@ -298,7 +243,6 @@ def read_clinical_workbook(
                 continue
 
             try:
-                label_id = normalized_label(label_text)
                 epithelial_bin = normalized_count_bin(epithelial_value)
                 leucocyte_bin = normalized_count_bin(leucocyte_value)
             except ValueError as exc:
@@ -308,8 +252,8 @@ def read_clinical_workbook(
                 ClinicalRecord(
                     source_row=row_number,
                     source_image_name=image_text,
-                    manual_label_id=label_id,
-                    manual_label=LABELS_BY_ID[label_id],
+                    manual_label_id=0,  # Compatibility fields; not an endpoint.
+                    manual_label="",
                     epithelial_count_bin=epithelial_bin,
                     leucocyte_count_bin=leucocyte_bin,
                     geckler_class=geckler_class(epithelial_bin, leucocyte_bin),
@@ -482,7 +426,6 @@ def verify_clinical_dataset(
     excluded: Sequence[ExcludedRecord],
     workbook_rows: int,
 ) -> None:
-    label_counts = Counter(record.manual_label for record in included)
     exclusion_counts = Counter(record.exclusion_reason for record in excluded)
 
     if workbook_rows != EXPECTED_WORKBOOK_ROWS:
@@ -494,11 +437,6 @@ def verify_clinical_dataset(
         raise ValueError(
             f"Clinical test set contains {len(included)} included images; "
             f"expected {EXPECTED_INCLUDED_IMAGES}."
-        )
-    if dict(label_counts) != EXPECTED_LABEL_COUNTS:
-        raise ValueError(
-            f"Clinical label counts are {dict(label_counts)!r}; "
-            f"expected {EXPECTED_LABEL_COUNTS!r}."
         )
     if dict(exclusion_counts) != EXPECTED_EXCLUSION_COUNTS:
         raise ValueError(
@@ -538,9 +476,6 @@ def run_preflight(args: argparse.Namespace) -> dict[str, Any]:
         "clinical_sheet": args.sheet_name,
         "workbook_rows": workbook_rows,
         "included_image_count": len(resolved),
-        "manual_label_counts": dict(
-            Counter(record.manual_label for record in resolved)
-        ),
         "expert_geckler_counts": dict(
             Counter(record.geckler_class for record in resolved)
         ),
@@ -586,7 +521,7 @@ def print_preflight(summary: dict[str, Any]) -> None:
         f"{summary['workbook_rows']} reviewed rows; "
         f"{summary['excluded_image_count']} excluded"
     )
-    print(f"Manual labels: {summary['manual_label_counts']}")
+    print(f"Geckler references: {summary['expert_geckler_counts']}")
     print(f"Resolved full-FOV root: {summary['images_root']}")
 
 
@@ -886,25 +821,18 @@ def evaluate(args: argparse.Namespace, preflight: dict[str, Any]) -> Path:
         inference_seconds = time.perf_counter() - started
 
         row = {
-            **asdict(record),
-            "predicted_label_id": result.predicted_label_id,
-            "predicted_label": result.predicted_label,
+            **{key: value for key, value in asdict(record).items()
+               if key not in {"manual_label_id", "manual_label"}},
             "predicted_epithelial_count_bin": count_bin_from_integer(
                 result.n_squamous_epithelial_cell
             ),
             "predicted_leucocyte_count_bin": count_bin_from_integer(
                 result.n_leucocyte
             ),
-            "correct": int(result.predicted_label_id == record.manual_label_id),
-            "absolute_class_error": abs(
-                result.predicted_label_id - record.manual_label_id
-            ),
             "n_leucocyte": result.n_leucocyte,
             "n_squamous_epithelial_cell": result.n_squamous_epithelial_cell,
-            "leucocyte_score": result.leucocyte_score,
-            "squamous_epithelial_score": result.squamous_epithelial_score,
-            "total_quality_score": result.total_quality_score,
-            "n_predictions_raw": result.n_predictions_raw,
+            "n_predictions_after_sahi_merge": result.n_predictions_raw,
+            "n_predictions_raw": result.n_predictions_raw,  # Backward-compatible alias.
             "n_predictions_kept_before_duplicate_suppression": (
                 result.n_predictions_kept_before_duplicate_suppression
             ),
@@ -932,11 +860,12 @@ def evaluate(args: argparse.Namespace, preflight: dict[str, Any]) -> Path:
                 image_path,
                 result,
                 runtime.class_names,
+                show_quality_label=False,
             )
             add_clinical_label_to_overlay(
                 overlay,
-                record.manual_label,
-                result.predicted_label,
+                f"Geckler {record.geckler_class}",
+                f"Geckler {row['predicted_geckler_class']}",
             )
             overlay_name = (
                 f"{image_index:03d}_row{record.source_row}_"
@@ -947,15 +876,13 @@ def evaluate(args: argparse.Namespace, preflight: dict[str, Any]) -> Path:
 
         print(
             f"[{image_index:03d}/{len(resolved):03d}] {image_path.name}: "
-            f"clinical={record.manual_label}, predicted={result.predicted_label}, "
+            f"Geckler reference={record.geckler_class}, "
+            f"predicted={row['predicted_geckler_class']}, "
             f"Leu={result.n_leucocyte}, Epi={result.n_squamous_epithelial_cell}, "
             f"{inference_seconds:.1f}s"
         )
 
     elapsed_seconds = time.perf_counter() - evaluation_started
-    true_ids = [int(row["manual_label_id"]) for row in rows]
-    predicted_ids = [int(row["predicted_label_id"]) for row in rows]
-    metrics, per_class_metrics, matrix = calculate_metrics(true_ids, predicted_ids)
     scheme_inputs = {
         "geckler": (
             [str(row["geckler_class"]) for row in rows],
@@ -1002,15 +929,11 @@ def evaluate(args: argparse.Namespace, preflight: dict[str, Any]) -> Path:
         list(ExcludedRecord.__dataclass_fields__),
     )
 
-    per_class_path = output_dir / "downstream_per_class_metrics.csv"
-    write_csv(per_class_path, per_class_metrics, list(per_class_metrics[0]))
-
-    confusion_csv_path = output_dir / "downstream_confusion_matrix.csv"
-    save_confusion_csv(confusion_csv_path, matrix)
-    confusion_png_path = output_dir / "downstream_confusion_matrix.png"
-    confusion_figure_saved = save_confusion_figure(confusion_png_path, matrix)
-
     summary = {
+        "schema_version": 2,
+        "analysis_stage": "downstream_count_based_classification",
+        "reference_source": "expert_cell_count_bins",
+        "prediction_count_stage": "after_sahi_merge_before_class_thresholds",
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "purpose": (
             "Final downstream evaluation using settings locked before inspecting "
@@ -1020,23 +943,9 @@ def evaluate(args: argparse.Namespace, preflight: dict[str, Any]) -> Path:
         "dataset": {
             "included_image_count": len(rows),
             "excluded_image_count": len(excluded),
-            "manual_label_counts": dict(
-                Counter(row["manual_label"] for row in rows)
-            ),
-            "predicted_label_counts": dict(
-                Counter(row["predicted_label"] for row in rows)
-            ),
             "exclusions": exclusion_rows,
         },
-        "metrics": metrics,
-        "per_class_metrics": per_class_metrics,
         "classification_schemes": scheme_results,
-        "confusion_matrix": {
-            "row_axis": "clinical_label",
-            "column_axis": "predicted_label",
-            "labels": [LABELS_BY_ID[label_id] for label_id in LABEL_IDS],
-            "counts": matrix,
-        },
         "runtime": {
             "total_evaluation_seconds": elapsed_seconds,
             "mean_inference_seconds_per_image": safe_ratio(
@@ -1047,13 +956,6 @@ def evaluate(args: argparse.Namespace, preflight: dict[str, Any]) -> Path:
         "outputs": {
             "predictions_csv": str(predictions_path.resolve()),
             "exclusions_csv": str(exclusions_path.resolve()),
-            "per_class_metrics_csv": str(per_class_path.resolve()),
-            "confusion_matrix_csv": str(confusion_csv_path.resolve()),
-            "confusion_matrix_png": (
-                str(confusion_png_path.resolve())
-                if confusion_figure_saved
-                else None
-            ),
             "overlays_dir": (
                 str(overlays_dir.resolve()) if not args.no_overlays else None
             ),
@@ -1064,11 +966,8 @@ def evaluate(args: argparse.Namespace, preflight: dict[str, Any]) -> Path:
         json.dump(summary, handle, indent=2, ensure_ascii=False)
 
     print(f"Final downstream evaluation complete: {output_dir}")
-    print(
-        f"Accuracy={metrics['accuracy']:.4f}, "
-        f"balanced accuracy={metrics['balanced_accuracy']:.4f}, "
-        f"macro F1={metrics['macro_f1']:.4f}"
-    )
+    for scheme, result in scheme_results.items():
+        print(f"{scheme}: accuracy={result['metrics']['accuracy']:.4f}")
     return output_dir
 
 

@@ -1490,7 +1490,7 @@ def run_inference_on_image(image_path: Path, runtime: InferenceRuntime) -> FOVIn
     )
 
 
-def render_result_overlay(image_path: Path, result: FOVInferenceResult, class_names: list[str]) -> Any:
+def render_result_overlay(image_path: Path, result: FOVInferenceResult, class_names: list[str], *, show_quality_label: bool = True) -> Any:
     if Image is None or ImageDraw is None or ImageFont is None:
         raise ImportError("Pillow is required.")
 
@@ -1517,6 +1517,11 @@ def render_result_overlay(image_path: Path, result: FOVInferenceResult, class_na
         f"Total score: {result.total_quality_score}",
     ]
     legend_lines = [f"{class_names[idx]} = prediction" for idx in range(len(class_names))]
+    if not show_quality_label:
+        info_lines = [
+            f"Leucocyte: {result.n_leucocyte}",
+            f"Squamous epithelial: {result.n_squamous_epithelial_cell}",
+        ]
     all_lines = info_lines + legend_lines
     pad = 6
     line_h = max(_measure_text(draw, "Ag", font)[1], 10) + 2
