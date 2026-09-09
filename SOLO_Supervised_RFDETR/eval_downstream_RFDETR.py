@@ -61,8 +61,8 @@ EXPECTED_WORKBOOK_ROWS = 102
 EXPECTED_INCLUDED_IMAGES = 98
 EXPECTED_LABEL_COUNTS = {
     "Qualified": 42,
-    "Partially Qualified": 26,
-    "Not Qualified": 30,
+    "Partially Qualified": 29,
+    "Not Qualified": 27,
 }
 EXPECTED_EXCLUSION_COUNTS = {
     "not_in_cvat_project": 1,
@@ -90,6 +90,11 @@ class ClinicalRecord:
     source_image_name: str
     manual_label_id: int
     manual_label: str
+    epithelial_count_bin: str
+    leucocyte_count_bin: str
+    geckler_class: str
+    collapsed_geckler_label: str
+    murray_washington_label: str
     annotator: str
     comment: str
     image_path: str = ""
@@ -143,6 +148,67 @@ def _cell_text(value: Any) -> str:
     return "" if value is None else str(value).strip()
 
 
+COUNT_BINS = ("0-9", "10-25", "26+")
+
+
+def normalized_count_bin(value: Any) -> str:
+    """Normalize the expert count categories without inventing exact counts."""
+    text = _cell_text(value).casefold().replace("–", "-").replace("—", "-")
+    compact = re.sub(r"\s+", "", text.replace("til", "-"))
+    if compact in {"0-9", "0to9"}:
+        return "0-9"
+    if compact in {"10-25", "10to25"}:
+        return "10-25"
+    if compact in {"26+", ">25", "26"}:
+        return "26+"
+    try:
+        number = int(float(compact))
+    except (TypeError, ValueError):
+        raise ValueError(f"Unsupported expert count category: {value!r}")
+    if number <= 9:
+        return "0-9"
+    if number <= 25:
+        return "10-25"
+    return "26+"
+
+
+def count_bin_from_integer(value: int) -> str:
+    if value <= 9:
+        return "0-9"
+    if value <= 25:
+        return "10-25"
+    return "26+"
+
+
+def geckler_class(epithelial_bin: str, leucocyte_bin: str) -> str:
+    """Return Geckler group 1-6 from the study's three expert count bins."""
+    if epithelial_bin == "26+":
+        return {"0-9": "G1", "10-25": "G2", "26+": "G3"}[leucocyte_bin]
+    if epithelial_bin == "10-25" and leucocyte_bin == "26+":
+        return "G4"
+    if epithelial_bin == "0-9" and leucocyte_bin == "26+":
+        return "G5"
+    return "G6"
+
+
+def collapsed_geckler_label(group: str) -> str:
+    """Collapse Geckler to acceptable, unacceptable, and unknown."""
+    if group in {"G4", "G5"}:
+        return "Acceptable"
+    if group in {"G1", "G2", "G3"}:
+        return "Unacceptable"
+    return "Unknown"
+
+
+def murray_washington_label(epithelial_bin: str, leucocyte_bin: str) -> str:
+    """Binary Murray-Washington culture-quality interpretation."""
+    return (
+        "Acceptable"
+        if epithelial_bin == "0-9" and leucocyte_bin == "26+"
+        else "Unacceptable"
+    )
+
+
 def read_clinical_workbook(
     workbook_path: Path,
     sheet_name: str,
@@ -167,11 +233,14 @@ def read_clinical_workbook(
                 f"{', '.join(workbook.sheetnames)}"
             )
         sheet = workbook[sheet_name]
-        header = [_cell_text(cell.value).casefold() for cell in sheet[1][:4]]
-        if len(header) < 2 or header[0] != "image" or header[1] != "tag":
+        header = [_cell_text(cell.value).casefold() for cell in sheet[1][:6]]
+        expected_header = [
+            "image", "tag", "epithelial cells", "leucocytes", "annotator", "comments"
+        ]
+        if [value.rstrip() for value in header[:6]] != expected_header:
             raise ValueError(
-                f"Expected columns A/B in {sheet_name!r} to be 'Image' and 'Tag'; "
-                f"found {header[:2]!r}."
+                f"Expected columns A:F in {sheet_name!r} to be {expected_header!r}; "
+                f"found {header[:6]!r}."
             )
 
         included: list[ClinicalRecord] = []
@@ -179,10 +248,17 @@ def read_clinical_workbook(
         workbook_rows = 0
 
         for row_number, row in enumerate(
-            sheet.iter_rows(min_row=2, min_col=1, max_col=4, values_only=True),
+            sheet.iter_rows(min_row=2, min_col=1, max_col=6, values_only=True),
             start=2,
         ):
-            image_name, label_value, annotator_value, comment_value = row
+            (
+                image_name,
+                label_value,
+                epithelial_value,
+                leucocyte_value,
+                annotator_value,
+                comment_value,
+            ) = row
             if all(value is None or not str(value).strip() for value in row):
                 continue
 
@@ -223,6 +299,8 @@ def read_clinical_workbook(
 
             try:
                 label_id = normalized_label(label_text)
+                epithelial_bin = normalized_count_bin(epithelial_value)
+                leucocyte_bin = normalized_count_bin(leucocyte_value)
             except ValueError as exc:
                 raise ValueError(f"Workbook row {row_number}: {exc}") from exc
 
@@ -232,6 +310,15 @@ def read_clinical_workbook(
                     source_image_name=image_text,
                     manual_label_id=label_id,
                     manual_label=LABELS_BY_ID[label_id],
+                    epithelial_count_bin=epithelial_bin,
+                    leucocyte_count_bin=leucocyte_bin,
+                    geckler_class=geckler_class(epithelial_bin, leucocyte_bin),
+                    collapsed_geckler_label=collapsed_geckler_label(
+                        geckler_class(epithelial_bin, leucocyte_bin)
+                    ),
+                    murray_washington_label=murray_washington_label(
+                        epithelial_bin, leucocyte_bin
+                    ),
                     annotator=annotator,
                     comment=comment,
                 )
@@ -454,6 +541,15 @@ def run_preflight(args: argparse.Namespace) -> dict[str, Any]:
         "manual_label_counts": dict(
             Counter(record.manual_label for record in resolved)
         ),
+        "expert_geckler_counts": dict(
+            Counter(record.geckler_class for record in resolved)
+        ),
+        "expert_murray_washington_counts": dict(
+            Counter(record.murray_washington_label for record in resolved)
+        ),
+        "expert_collapsed_geckler_counts": dict(
+            Counter(record.collapsed_geckler_label for record in resolved)
+        ),
         "excluded_image_count": len(excluded),
         "exclusion_counts": dict(
             Counter(record.exclusion_reason for record in excluded)
@@ -606,6 +702,83 @@ def calculate_metrics(
     return metrics, per_class, matrix
 
 
+def calculate_named_metrics(
+    true_labels: Sequence[str],
+    predicted_labels: Sequence[str],
+    labels: Sequence[str],
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[list[int]]]:
+    """Calculate the same classification metrics for an arbitrary label scheme."""
+    if len(true_labels) != len(predicted_labels) or not true_labels:
+        raise ValueError("Metric inputs must be non-empty and have equal lengths.")
+    positions = {label: index for index, label in enumerate(labels)}
+    unknown = (set(true_labels) | set(predicted_labels)) - set(labels)
+    if unknown:
+        raise ValueError(f"Unexpected classification labels: {sorted(unknown)!r}")
+    matrix = [[0 for _ in labels] for _ in labels]
+    for true_label, predicted_label in zip(true_labels, predicted_labels):
+        matrix[positions[true_label]][positions[predicted_label]] += 1
+
+    total = len(true_labels)
+    per_class: list[dict[str, Any]] = []
+    for index, label in enumerate(labels):
+        tp = matrix[index][index]
+        fn = sum(matrix[index]) - tp
+        fp = sum(row[index] for row in matrix) - tp
+        tn = total - tp - fn - fp
+        precision = safe_ratio(tp, tp + fp)
+        recall = safe_ratio(tp, tp + fn)
+        per_class.append(
+            {
+                "label": label,
+                "support": tp + fn,
+                "tp": tp,
+                "fp": fp,
+                "fn": fn,
+                "tn": tn,
+                "precision": precision,
+                "recall": recall,
+                "f1": safe_ratio(2 * precision * recall, precision + recall),
+                "specificity": safe_ratio(tn, tn + fp),
+            }
+        )
+
+    accuracy = safe_ratio(sum(matrix[i][i] for i in range(len(labels))), total)
+    macro_recall = sum(row["recall"] for row in per_class) / len(per_class)
+    macro_f1 = sum(row["f1"] for row in per_class) / len(per_class)
+    true_counts = Counter(true_labels)
+    predicted_counts = Counter(predicted_labels)
+    expected = sum(
+        true_counts[label] * predicted_counts[label] for label in labels
+    ) / (total * total)
+    return (
+        {
+            "n_images": total,
+            "accuracy": accuracy,
+            "balanced_accuracy": macro_recall,
+            "macro_f1": macro_f1,
+            "cohen_kappa": safe_ratio(accuracy - expected, 1.0 - expected),
+        },
+        per_class,
+        matrix,
+    )
+
+
+def save_named_confusion_csv(
+    path: Path,
+    matrix: Sequence[Sequence[int]],
+    labels: Sequence[str],
+) -> None:
+    fieldnames = ["reference_label"] + [f"predicted_{label}" for label in labels]
+    rows = []
+    for label, values in zip(labels, matrix):
+        row: dict[str, Any] = {"reference_label": label}
+        row.update(
+            {f"predicted_{predicted}": value for predicted, value in zip(labels, values)}
+        )
+        rows.append(row)
+    write_csv(path, rows, fieldnames)
+
+
 def save_confusion_csv(path: Path, matrix: Sequence[Sequence[int]]) -> None:
     fieldnames = ["manual_label"] + [
         f"predicted_{LABELS_BY_ID[label_id]}" for label_id in LABEL_IDS
@@ -716,6 +889,12 @@ def evaluate(args: argparse.Namespace, preflight: dict[str, Any]) -> Path:
             **asdict(record),
             "predicted_label_id": result.predicted_label_id,
             "predicted_label": result.predicted_label,
+            "predicted_epithelial_count_bin": count_bin_from_integer(
+                result.n_squamous_epithelial_cell
+            ),
+            "predicted_leucocyte_count_bin": count_bin_from_integer(
+                result.n_leucocyte
+            ),
             "correct": int(result.predicted_label_id == record.manual_label_id),
             "absolute_class_error": abs(
                 result.predicted_label_id - record.manual_label_id
@@ -735,6 +914,17 @@ def evaluate(args: argparse.Namespace, preflight: dict[str, Any]) -> Path:
             "n_predictions_kept": result.n_predictions_kept,
             "inference_seconds": inference_seconds,
         }
+        row["predicted_geckler_class"] = geckler_class(
+            row["predicted_epithelial_count_bin"],
+            row["predicted_leucocyte_count_bin"],
+        )
+        row["predicted_collapsed_geckler_label"] = collapsed_geckler_label(
+            row["predicted_geckler_class"]
+        )
+        row["predicted_murray_washington_label"] = murray_washington_label(
+            row["predicted_epithelial_count_bin"],
+            row["predicted_leucocyte_count_bin"],
+        )
         rows.append(row)
 
         if not args.no_overlays:
@@ -766,6 +956,39 @@ def evaluate(args: argparse.Namespace, preflight: dict[str, Any]) -> Path:
     true_ids = [int(row["manual_label_id"]) for row in rows]
     predicted_ids = [int(row["predicted_label_id"]) for row in rows]
     metrics, per_class_metrics, matrix = calculate_metrics(true_ids, predicted_ids)
+    scheme_inputs = {
+        "geckler": (
+            [str(row["geckler_class"]) for row in rows],
+            [str(row["predicted_geckler_class"]) for row in rows],
+            [f"G{index}" for index in range(1, 7)],
+        ),
+        "murray_washington": (
+            [str(row["murray_washington_label"]) for row in rows],
+            [str(row["predicted_murray_washington_label"]) for row in rows],
+            ["Acceptable", "Unacceptable"],
+        ),
+        "collapsed_geckler": (
+            [str(row["collapsed_geckler_label"]) for row in rows],
+            [str(row["predicted_collapsed_geckler_label"]) for row in rows],
+            ["Acceptable", "Unacceptable", "Unknown"],
+        ),
+    }
+    scheme_results: dict[str, Any] = {}
+    for scheme_name, (true_labels, predicted_labels, scheme_labels) in scheme_inputs.items():
+        scheme_metrics, scheme_per_class, scheme_matrix = calculate_named_metrics(
+            true_labels, predicted_labels, scheme_labels
+        )
+        scheme_csv = output_dir / f"downstream_{scheme_name}_confusion_matrix.csv"
+        save_named_confusion_csv(scheme_csv, scheme_matrix, scheme_labels)
+        scheme_results[scheme_name] = {
+            "labels": scheme_labels,
+            "reference_label_counts": dict(Counter(true_labels)),
+            "predicted_label_counts": dict(Counter(predicted_labels)),
+            "metrics": scheme_metrics,
+            "per_class_metrics": scheme_per_class,
+            "confusion_matrix": scheme_matrix,
+            "confusion_matrix_csv": str(scheme_csv.resolve()),
+        }
 
     prediction_fields = list(rows[0])
     predictions_path = output_dir / "downstream_predictions.csv"
@@ -807,6 +1030,7 @@ def evaluate(args: argparse.Namespace, preflight: dict[str, Any]) -> Path:
         },
         "metrics": metrics,
         "per_class_metrics": per_class_metrics,
+        "classification_schemes": scheme_results,
         "confusion_matrix": {
             "row_axis": "clinical_label",
             "column_axis": "predicted_label",

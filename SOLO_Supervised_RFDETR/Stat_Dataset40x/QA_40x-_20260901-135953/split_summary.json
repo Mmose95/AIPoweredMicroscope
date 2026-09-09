@@ -1,0 +1,244 @@
+{
+  "dataset_name": "QA-2025v1_TwoClass_OVR_V2_20260901-135953",
+  "source_coco": "E:\\PHD\\PhdData\\Patologi afd. - Aalborg\\Annotation_Backups_40x\\01-09-2026_40x\\annotations\\instances_default.json",
+  "images_root": "E:/PHD/PhdData/Patologi afd. - Aalborg/40x Input tiles for CVAT",
+  "target_class_mode": "multi_class",
+  "target_classes": [
+    "Leucocyte",
+    "Squamous Epithelial Cell",
+    "Columnar Epithelial Cell"
+  ],
+  "balance_per_class": true,
+  "seed": 42,
+  "split_ratio": {
+    "train": 0.6,
+    "valid": 0.2,
+    "test": 0.2
+  },
+  "split_strategy": "forced_test_annotation_aware",
+  "forced_test_samples_requested": [],
+  "forced_test_samples_used": [],
+  "forced_test_samples_without_target_annotations": [],
+  "target_box_planning": {
+    "balance_per_class": true,
+    "total_target_boxes": 16831,
+    "ratio_targets": {
+      "train": 10098.6,
+      "valid": 3366.2,
+      "test": 3366.2
+    },
+    "assignment_targets": {
+      "train": 10098.6,
+      "valid": 3366.2,
+      "test": 3366.2
+    },
+    "actual_sample_assignment": {
+      "train": 10512,
+      "valid": 3133,
+      "test": 3186
+    },
+    "per_class": {
+      "Leucocyte": {
+        "total_target_boxes": 13657,
+        "ratio_targets": {
+          "train": 8194.2,
+          "valid": 2731.4,
+          "test": 2731.4
+        },
+        "assignment_targets": {
+          "train": 8194.2,
+          "valid": 2731.4,
+          "test": 2731.4
+        },
+        "actual_sample_assignment": {
+          "train": 8639,
+          "valid": 2401,
+          "test": 2617
+        }
+      },
+      "Squamous Epithelial Cell": {
+        "total_target_boxes": 3059,
+        "ratio_targets": {
+          "train": 1835.4,
+          "valid": 611.8,
+          "test": 611.8
+        },
+        "assignment_targets": {
+          "train": 1835.4,
+          "valid": 611.8,
+          "test": 611.8
+        },
+        "actual_sample_assignment": {
+          "train": 1769,
+          "valid": 730,
+          "test": 560
+        }
+      },
+      "Columnar Epithelial Cell": {
+        "total_target_boxes": 115,
+        "ratio_targets": {
+          "train": 69.0,
+          "valid": 23.0,
+          "test": 23.0
+        },
+        "assignment_targets": {
+          "train": 69.0,
+          "valid": 23.0,
+          "test": 23.0
+        },
+        "actual_sample_assignment": {
+          "train": 104,
+          "valid": 2,
+          "test": 9
+        }
+      }
+    },
+    "classes_exceeding_test_target_due_to_forced_samples": []
+  },
+  "target_sample_planning": {
+    "ratio_targets": {
+      "train": 52,
+      "valid": 17,
+      "test": 19
+    },
+    "assignment_targets": {
+      "train": 52,
+      "valid": 17,
+      "test": 19
+    },
+    "actual_sample_assignment": {
+      "train": 52,
+      "valid": 17,
+      "test": 19
+    }
+  },
+  "file_name_mode": "relative",
+  "samples": {
+    "train": [
+      "Sample_013 - 2026-08-04 16.19.56",
+      "Sample_015 - 2026-08-04 16.23.02",
+      "Sample_018 - 2026-08-04 16.27.41",
+      "Sample_019 - 2026-08-04 16.29.36",
+      "Sample_021 - 2026-08-04 16.32.19",
+      "Sample_022 - 2026-08-04 16.33.44",
+      "Sample_024 - 2026-08-04 16.36.57",
+      "Sample_026 - 2026-08-04 16.41.55",
+      "Sample_027 - 2026-08-04 16.45.07",
+      "Sample_029 - 2026-08-04 16.50.52",
+      "Sample_030 - 2026-08-04 16.53.54",
+      "Sample_033 - 2026-08-04 16.56.17",
+      "Sample_035 - 2026-08-04 16.58.58",
+      "Sample_037 - 2026-08-04 17.04.54",
+      "Sample_038 - 2026-08-04 17.07.58",
+      "Sample_039 - 2026-08-04 17.10.53",
+      "Sample_043 - 2026-08-04 17.23.15",
+      "Sample_049 - 2026-08-04 17.38.49",
+      "Sample_051 - 2026-08-04 17.41.32",
+      "Sample_053 - 2026-08-04 17.44.06",
+      "Sample_054 - 2026-08-04 17.45.17",
+      "Sample_057 - 2026-08-04 17.50.38",
+      "Sample_058 - 2026-08-04 17.52.24",
+      "Sample_059 - 2026-08-04 17.54.03",
+      "Sample_060 - 2026-08-04 17.55.59",
+      "Sample_062 - 2026-08-04 18.00.21",
+      "Sample_063 - 2026-08-04 18.02.34",
+      "Sample_064 - 2026-08-04 18.05.30",
+      "Sample_067 - 2026-08-04 18.13.25",
+      "Sample_068 - 2026-08-04 18.16.22",
+      "Sample_069 - 2026-08-04 18.18.46",
+      "Sample_070 - 2026-08-04 18.21.14",
+      "Sample_074 - 2026-08-04 18.30.34",
+      "Sample_077 - 2026-08-04 18.37.23",
+      "Sample_078 - 2026-08-04 18.40.05",
+      "Sample_079 - 2026-08-04 18.42.57",
+      "Sample_080 - 2026-08-04 18.45.53",
+      "Sample_081 - 2026-08-04 18.48.38",
+      "Sample_083 - 2026-08-04 18.51.27",
+      "Sample_086 - 2026-08-04 18.56.21",
+      "Sample_088 - 2026-08-04 19.01.08",
+      "Sample_089 - 2026-08-04 19.03.57",
+      "Sample_091 - 2026-08-04 19.07.17",
+      "Sample_093 - 2026-08-04 19.12.55",
+      "Sample_094 - 2026-08-04 19.15.58",
+      "Sample_097 - 2026-08-04 19.22.04",
+      "Sample_103 - 2026-08-04 19.36.36",
+      "Sample_104 - 2026-08-04 19.38.48",
+      "Sample_105 - 2026-08-04 19.40.13",
+      "Sample_106 - 2026-08-04 19.42.15",
+      "Sample_107 - 2026-08-04 19.44.12",
+      "Sample_108 - 2026-08-04 19.45.28"
+    ],
+    "valid": [
+      "Sample_012 - 2026-08-04 16.17.20",
+      "Sample_014 - 2026-08-04 16.21.15",
+      "Sample_016 - 2026-08-04 16.25.09",
+      "Sample_031 - 2026-08-04 16.55.09",
+      "Sample_034 - 2026-08-04 16.58.39",
+      "Sample_036 - 2026-08-04 17.02.01",
+      "Sample_041 - 2026-08-04 17.16.53",
+      "Sample_044 - 2026-08-04 17.26.10",
+      "Sample_050 - 2026-08-04 17.40.16",
+      "Sample_052 - 2026-08-04 17.42.46",
+      "Sample_061 - 2026-08-04 17.58.37",
+      "Sample_085 - 2026-08-04 18.54.23",
+      "Sample_090 - 2026-08-04 19.05.04",
+      "Sample_096 - 2026-08-04 19.19.16",
+      "Sample_100 - 2026-08-04 19.29.57",
+      "Sample_102 - 2026-08-04 19.34.04",
+      "Sample_109 - 2026-08-04 19.48.21"
+    ],
+    "test": [
+      "Sample_020 - 2026-08-04 16.30.58",
+      "Sample_023 - 2026-08-04 16.35.49",
+      "Sample_025 - 2026-08-04 16.39.12",
+      "Sample_028 - 2026-08-04 16.47.48",
+      "Sample_040 - 2026-08-04 17.13.55",
+      "Sample_042 - 2026-08-04 17.20.10",
+      "Sample_046 - 2026-08-04 17.32.07",
+      "Sample_055 - 2026-08-04 17.47.05",
+      "Sample_056 - 2026-08-04 17.49.57",
+      "Sample_065 - 2026-08-04 18.08.26",
+      "Sample_072 - 2026-08-04 18.25.19",
+      "Sample_073 - 2026-08-04 18.28.15",
+      "Sample_075 - 2026-08-04 18.33.33",
+      "Sample_076 - 2026-08-04 18.35.27",
+      "Sample_087 - 2026-08-04 18.59.01",
+      "Sample_092 - 2026-08-04 19.10.08",
+      "Sample_098 - 2026-08-04 19.24.55",
+      "Sample_099 - 2026-08-04 19.27.33",
+      "Sample_101 - 2026-08-04 19.31.23"
+    ]
+  },
+  "counts": {
+    "train": {
+      "n_samples": 52,
+      "n_images": 533,
+      "n_target_boxes": 10512,
+      "n_target_boxes_by_class": {
+        "Leucocyte": 8639,
+        "Squamous Epithelial Cell": 1769,
+        "Columnar Epithelial Cell": 104
+      }
+    },
+    "valid": {
+      "n_samples": 17,
+      "n_images": 186,
+      "n_target_boxes": 3133,
+      "n_target_boxes_by_class": {
+        "Leucocyte": 2401,
+        "Squamous Epithelial Cell": 730,
+        "Columnar Epithelial Cell": 2
+      }
+    },
+    "test": {
+      "n_samples": 19,
+      "n_images": 137,
+      "n_target_boxes": 3186,
+      "n_target_boxes_by_class": {
+        "Leucocyte": 2617,
+        "Squamous Epithelial Cell": 560,
+        "Columnar Epithelial Cell": 9
+      }
+    }
+  }
+}

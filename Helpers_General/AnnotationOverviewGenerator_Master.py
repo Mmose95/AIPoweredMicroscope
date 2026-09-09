@@ -32,14 +32,14 @@ from datetime import datetime
 import pandas as pd
 
 # =============== CONFIG =================
-BASE_DIR = Path(r"D:\PHD\PhdData\CellScanData\Annotation_Backups\Quality Assessment Backups")
+BASE_DIR = Path(r"E:\PHD\PhdData\Patologi afd. - Aalborg\Annotation_Backups_40x")
 
 CSV_BACKUP_OVERVIEW = "Annotated_Frames_Only.csv"
 CSV_ALL_FRAMES = "All_Frames.csv"
 CSV_CLASS_TOTALS = "Class_Totals.csv"
 CSV_SUMMARY = "Summary.csv"
 
-CLASS_COLS = ["Squamous Epithelial Cell", "Leucocyte", "Cylindrical Epithelial Cell"]
+CLASS_COLS = ["Squamous Epithelial Cell", "Leucocyte", "Columnar Epithelial Cell"]
 REVIEW_COLS = ["Reviewed", "Annotator", "Comments"]
 MASTER_COLS = ["Frame"] + CLASS_COLS + ["Total Objects"] + REVIEW_COLS
 

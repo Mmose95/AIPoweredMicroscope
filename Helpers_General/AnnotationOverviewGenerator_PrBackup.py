@@ -8,8 +8,10 @@ import json
 import csv
 from collections import defaultdict, Counter
 from pathlib import Path
-
-src = Path("D:\PHD\PhdData\CellScanData\Annotation_Backups/Quality Assessment Backups/18-06-2026/annotations/instances_default.json")
+src = Path(
+    r"E:\PHD\PhdData\Patologi afd. - Aalborg\Annotation_Backups_40x"
+    r"\01-09-2026_40x\annotations\instances_default.json"
+)
 with open(src, "r", encoding="utf-8") as f:
     coco = json.load(f)
 
@@ -26,7 +28,7 @@ rows_all = []
 for img_id, fname in img_id_to_name.items():
     counts = {cls: per_image_counts.get(img_id, Counter()).get(cls, 0) for cls in class_names}
     total_objs = sum(counts.values())
-    row = {"Frame": fname, **counts, "Total Objects": total_objs, "Reviewed": "", "Annotator": "MM", "Comments": ""}
+    row = {"Frame": fname, **counts, "Total Objects": total_objs, "Expert reviewer": "", "Initial Annotator": "MM", "Comments": ""}
     rows_all.append(row)
 
 # Sort like before
@@ -60,7 +62,7 @@ base = src.parent
 paths = {}
 
 # Annotated Frames Only
-header_overview = ["Frame"] + class_names + ["Total Objects", "Reviewed", "Annotator", "Comments"]
+header_overview = ["Frame"] + class_names + ["Total Objects", "Expert reviewer", "Initial Annotator", "Comments"]
 p1 = base / "Annotated_Frames_Only.csv"
 write_csv(p1, header_overview, rows_annot)
 paths["annotated"] = p1.as_posix()

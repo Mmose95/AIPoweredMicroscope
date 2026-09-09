@@ -663,8 +663,19 @@ def predict_one_image(model: Any, img_pil: Any, score_floor: float) -> tuple[Any
     if np is None or torch is None:
         raise ImportError("numpy and torch are required for RF-DETR prediction.")
 
-    arr = np.array(img_pil.convert("RGB"))
-    ten = torch.from_numpy(arr).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+    # RF-DETR accepts PIL directly. Avoid building an unused float tensor for
+    # every SAHI tile; retain lazy array/tensor fallbacks for other wrappers.
+    arr = ten = None
+
+    def inputs():
+        nonlocal arr, ten
+        yield img_pil
+        if arr is None:
+            arr = np.array(img_pil.convert("RGB"))
+        yield arr
+        if ten is None:
+            ten = torch.from_numpy(arr).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+        yield ten
 
     out = None
     for name in ("predict", "infer", "inference", "forward_inference"):
@@ -674,7 +685,7 @@ def predict_one_image(model: Any, img_pil: Any, score_floor: float) -> tuple[Any
                 supports_threshold = "threshold" in inspect.signature(fn).parameters
             except (TypeError, ValueError):
                 supports_threshold = False
-            for inp in (img_pil, arr, ten):
+            for inp in inputs():
                 try:
                     if supports_threshold:
                         out = fn(inp, threshold=score_floor)
@@ -689,6 +700,9 @@ def predict_one_image(model: Any, img_pil: Any, score_floor: float) -> tuple[Any
     if out is None:
         forward = getattr(model, "forward", None)
         if callable(forward):
+            if ten is None:
+                for _ in inputs():
+                    pass
             out = forward(ten)
         else:
             raise RuntimeError("Model has no predict/infer/forward_inference/forward method.")
@@ -845,8 +859,13 @@ def _read_image_size(image_path: Path) -> tuple[int, int]:
         return 1, 1
 
 
-def build_sample_session(checkpoint_path: Path, sample_dir: Path) -> SampleSession:
-    model_class, model_resolution, class_names, class_score_thresholds = inspect_checkpoint(checkpoint_path)
+def build_sample_session(
+    checkpoint_path: Path, sample_dir: Path,
+    checkpoint_metadata: tuple[str, int | None, list[str], dict[str, float]] | None = None,
+) -> SampleSession:
+    model_class, model_resolution, class_names, class_score_thresholds = (
+        checkpoint_metadata if checkpoint_metadata is not None else inspect_checkpoint(checkpoint_path)
+    )
     image_paths = discover_sample_images(sample_dir)
 
     parsed_rows: list[tuple[int, int, Path, str]] = []
@@ -891,8 +910,8 @@ def build_sample_session(checkpoint_path: Path, sample_dir: Path) -> SampleSessi
         checkpoint_path=checkpoint_path,
         model_class=model_class,
         model_resolution=model_resolution,
-        class_names=class_names,
-        class_score_thresholds=class_score_thresholds,
+        class_names=list(class_names),
+        class_score_thresholds=dict(class_score_thresholds),
         fovs=fovs,
     )
 
@@ -1230,29 +1249,36 @@ def suppress_cross_class_duplicates(
     order = np.argsort(-pred_scores)
     suppressed = 0
 
+    # Match the scalar helpers' float64 area/IOS arithmetic. Keep float32 IoU
+    # below, as in the original implementation, including threshold boundaries.
+    boxes64 = np.asarray(pred_boxes, dtype=np.float64)
+    areas = np.maximum(0.0, boxes64[:, 2] - boxes64[:, 0]) * np.maximum(0.0, boxes64[:, 3] - boxes64[:, 1])
+
     for pos_i, i in enumerate(order):
         if not keep[i]:
             continue
-        for j in order[pos_i + 1:]:
-            if not keep[j]:
-                continue
-            if int(pred_cls[i]) == int(pred_cls[j]):
-                continue
-
-            area_ratio = box_area_ratio(pred_boxes[i], pred_boxes[j])
-            if area_ratio < area_ratio_threshold:
-                continue
-
-            ios = box_ios_xyxy(pred_boxes[i], pred_boxes[j])
-            if ios < ios_threshold:
-                continue
-
-            iou = box_iou_xyxy(pred_boxes[i], pred_boxes[j])
-            if iou < iou_threshold:
-                continue
-
-            keep[j] = False
-            suppressed += 1
+        candidates = order[pos_i + 1:]
+        candidates = candidates[keep[candidates] & (pred_cls[candidates] != pred_cls[i])]
+        if not len(candidates):
+            continue
+        smaller = np.minimum(areas[i], areas[candidates])
+        larger = np.maximum(areas[i], areas[candidates])
+        ratios = np.divide(smaller, larger, out=np.zeros_like(smaller), where=larger > 0)
+        candidates = candidates[ratios >= area_ratio_threshold]
+        if not len(candidates):
+            continue
+        left_top = np.maximum(boxes64[i, :2], boxes64[candidates, :2])
+        right_bottom = np.minimum(boxes64[i, 2:], boxes64[candidates, 2:])
+        wh = np.maximum(0.0, right_bottom - left_top)
+        intersections = wh[:, 0] * wh[:, 1]
+        smaller = np.minimum(areas[i], areas[candidates])
+        ios = np.divide(intersections, smaller, out=np.zeros_like(smaller), where=smaller > 0)
+        candidates = candidates[ios >= ios_threshold]
+        if len(candidates):
+            ious = iou_matrix(pred_boxes[i:i + 1], pred_boxes[candidates])[0]
+            duplicates = candidates[ious >= iou_threshold]
+            keep[duplicates] = False
+            suppressed += len(duplicates)
 
     return pred_boxes[keep], pred_scores[keep], pred_cls[keep], suppressed
 

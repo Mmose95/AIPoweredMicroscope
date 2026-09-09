@@ -7,17 +7,22 @@ from datetime import datetime
 import json, re, random, sys
 
 # ======= USER CONFIG =======
-ALL_COCO_JSON = Path(r"D:/PHD/PhdData/CellScanData/Annotation_Backups/Quality Assessment Backups/26-03-2026/annotations/instances_default.json")
-IMAGES_DIR = Path(r"D:/PHD/PhdData/CellScanData/Zoom10x - Quality Assessment_Cleaned")
-OUT_ROOT = Path(r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\SOLO_Supervised_RFDETR/Stat_Dataset")
-TARGET_CLASSES = ["Leucocyte", "Squamous Epithelial Cell"]       # e.g. ["Leucocyte"] or ["Leucocyte", "Squamous Epithelial Cell"] Type both classes to do two-class
+ALL_COCO_JSON = Path(r"E:\PHD\PhdData\Patologi afd. - Aalborg\Annotation_Backups_40x\01-09-2026_40x\annotations\instances_default.json")
+IMAGES_DIR = Path(r"E:\PHD\PhdData\Patologi afd. - Aalborg\40x Input tiles for CVAT")
+OUT_ROOT = Path(r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\SOLO_Supervised_RFDETR/Stat_Dataset40x")
+# Study 2: retain all three cell types in each generated COCO split.
+TARGET_CLASSES = [
+    "Leucocyte",
+    "Squamous Epithelial Cell",
+    "Columnar Epithelial Cell",
+]
 SPLIT = (0.60, 0.20, 0.20)
 SEED = 42
 VALID_EXTS = {".tif", ".tiff", ".jpg", ".jpeg", ".png"}
 
 # Samples reserved for the test split.
 # Accepts integers (25) or strings ("Sample 25").
-FORCED_TEST_SAMPLES = [12, 13, 14, 15, 16, 17, 18, 25, 33, 52, 53]
+FORCED_TEST_SAMPLES = None #[12, 13, 14, 15, 16, 17, 18, 25, 33, 52, 53]
 SPLIT_SEARCH_TRIALS = 250
 BALANCE_PER_CLASS = True
 
@@ -139,7 +144,9 @@ def normalize_target_class_names(target_classes) -> list[str]:
 def dataset_token_for_target_classes(target_class_names: list[str]) -> str:
     if len(target_class_names) == 1:
         return target_class_names[0].replace(" ", "")
-    return "TwoClass"
+    class_count_names = {2: "Two", 3: "Three"}
+    count_token = class_count_names.get(len(target_class_names), str(len(target_class_names)))
+    return f"{count_token}Class"
 
 
 def split_samples_by_count(target_samples: list[str], split=SPLIT, seed=42):

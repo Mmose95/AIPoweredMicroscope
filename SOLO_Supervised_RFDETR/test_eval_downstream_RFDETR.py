@@ -31,6 +31,27 @@ class DownstreamEvaluationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             downstream.normalized_label("unknown")
 
+    def test_expert_count_bins_and_published_schemes(self) -> None:
+        self.assertEqual(downstream.normalized_count_bin("10 til 25"), "10-25")
+        self.assertEqual(downstream.normalized_count_bin("10"), "10-25")
+        self.assertEqual(downstream.normalized_count_bin("25"), "10-25")
+        self.assertEqual(downstream.normalized_count_bin("26"), "26+")
+        self.assertEqual(downstream.geckler_class("26+", "0-9"), "G1")
+        self.assertEqual(downstream.geckler_class("26+", "10-25"), "G2")
+        self.assertEqual(downstream.geckler_class("26+", "26+"), "G3")
+        self.assertEqual(downstream.geckler_class("10-25", "26+"), "G4")
+        self.assertEqual(downstream.geckler_class("0-9", "26+"), "G5")
+        self.assertEqual(downstream.geckler_class("0-9", "0-9"), "G6")
+        self.assertEqual(downstream.collapsed_geckler_label("G4"), "Acceptable")
+        self.assertEqual(downstream.collapsed_geckler_label("G5"), "Acceptable")
+        self.assertEqual(downstream.collapsed_geckler_label("G6"), "Unknown")
+        self.assertEqual(
+            downstream.murray_washington_label("0-9", "26+"), "Acceptable"
+        )
+        self.assertEqual(
+            downstream.murray_washington_label("10-25", "26+"), "Unacceptable"
+        )
+
     def test_quality_rule_boundaries(self) -> None:
         self.assertEqual(qa.classify_quality_from_counts(9, 0)[0], 3)
         self.assertEqual(qa.classify_quality_from_counts(10, 0)[0], 2)
@@ -70,6 +91,11 @@ class DownstreamEvaluationTests(unittest.TestCase):
                 source_image_name=full_fov.name,
                 manual_label_id=1,
                 manual_label="Qualified",
+                epithelial_count_bin="0-9",
+                leucocyte_count_bin="26+",
+                geckler_class="G5",
+                collapsed_geckler_label="Acceptable",
+                murray_washington_label="Acceptable",
                 annotator="",
                 comment="",
             )

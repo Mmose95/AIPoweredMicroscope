@@ -94,6 +94,15 @@ render_result_overlay = qa_inference.render_result_overlay
 run_inference_on_image = qa_inference.run_inference_on_image
 
 
+def _blend_hex_color(low_color: str, high_color: str, fraction: float) -> str:
+    """Interpolate a heatmap cell colour, including the zero/full-count endpoints."""
+    fraction = max(0.0, min(1.0, float(fraction)))
+    low = tuple(int(low_color[offset:offset + 2], 16) for offset in (1, 3, 5))
+    high = tuple(int(high_color[offset:offset + 2], 16) for offset in (1, 3, 5))
+    channels = (round(a + (b - a) * fraction) for a, b in zip(low, high))
+    return "#" + "".join(f"{channel:02x}" for channel in channels)
+
+
 def make_placeholder_image(size: tuple[int, int], text: str, accent: str) -> Image.Image:
     if Image is None or ImageDraw is None:
         raise ImportError("Pillow is required for the UI.")
@@ -105,6 +114,8 @@ def make_placeholder_image(size: tuple[int, int], text: str, accent: str) -> Ima
 
 
 class QAWorkflowUI:
+    heatmap_footer_height = 0
+
     def __init__(
         self,
         root: tk.Tk,
@@ -126,6 +137,11 @@ class QAWorkflowUI:
         self.worker_thread: threading.Thread | None = None
         self.worker_cancel_event: threading.Event | None = None
         self.worker_pause_event: threading.Event | None = None
+        self._runtime_lock = threading.Lock()
+        self._cached_runtime: InferenceRuntime | None = None
+        self._cached_runtime_key: tuple[Any, ...] | None = None
+        self._progress_dirty = False
+        self._last_progress_draw = 0.0
         self.current_processing_index: int | None = None
         self.is_running = False
         self.is_paused = False
@@ -136,6 +152,8 @@ class QAWorkflowUI:
         self._suppress_ranking_select = False
         self.photo_cache: dict[tuple[str, int, int], ImageTk.PhotoImage] = {}
         self._canvas_images: list[ImageTk.PhotoImage] = []
+        self._slide_drawn_sample: SampleSession | None = None
+        self._slide_border_colors: dict[int, str] = {}
         self.preview_photo: ImageTk.PhotoImage | None = None
 
         self.checkpoint_path = tk.StringVar(value=str(initial_checkpoint or (DEFAULT_CHECKPOINT if DEFAULT_CHECKPOINT.exists() else "")))
@@ -749,8 +767,9 @@ class QAWorkflowUI:
 
         sessions: list[SampleSession] = []
         try:
+            metadata = qa_inference.inspect_checkpoint(checkpoint)
             for sample_dir in sample_dirs:
-                sessions.append(build_sample_session(checkpoint, sample_dir))
+                sessions.append(build_sample_session(checkpoint, sample_dir, checkpoint_metadata=metadata))
         except Exception as exc:
             messagebox.showerror("Load sample", str(exc))
             self._update_status("Sample load failed.")
@@ -861,7 +880,7 @@ class QAWorkflowUI:
             daemon=True,
         )
         self.worker_thread.start()
-        self._update_status(f"Loading model for {len(self.samples)} sample(s)...")
+        self._update_status(f"Preparing inference for {len(self.samples)} sample(s)...")
         self._update_button_states()
 
     def pause_processing(self) -> None:
@@ -895,6 +914,9 @@ class QAWorkflowUI:
             self.worker_cancel_event.set()
         if self.worker_pause_event is not None:
             self.worker_pause_event.clear()
+        # Ignore results from an in-flight FOV after reset/load, even if a new
+        # job has not yet started. GPU work finishes at the next safe boundary.
+        self.current_job_id += 1
         self.is_running = False
         self.is_paused = False
         self.worker_thread = None
@@ -905,7 +927,32 @@ class QAWorkflowUI:
         self._update_sample_nav()
         self._update_button_states()
 
-    def _run_inference_worker(
+    def _runtime_for_session(self, session: SampleSession) -> InferenceRuntime:
+        """Called only while holding the worker lock; keep one model warm."""
+        checkpoint = session.checkpoint_path.resolve()
+        stat = checkpoint.stat()
+        key = (str(checkpoint), stat.st_mtime_ns, stat.st_size, session.model_class,
+               session.model_resolution, tuple(session.class_names),
+               tuple(sorted(session.class_score_thresholds.items())))
+        if self._cached_runtime is None or key != self._cached_runtime_key:
+            self._cached_runtime = None  # Release the previous model before loading another.
+            self._cached_runtime_key = None
+            self._cached_runtime = build_runtime(session)
+            self._cached_runtime_key = key
+        return self._cached_runtime
+
+    def _run_inference_worker(self, job_id, sessions, cancel_event, pause_event) -> None:
+        # SAHI/model state is mutable: never let reset/restart overlap GPU jobs.
+        while not self._runtime_lock.acquire(timeout=0.1):
+            if cancel_event.is_set():
+                return
+        try:
+            if not cancel_event.is_set():
+                self._run_inference_worker_locked(job_id, sessions, cancel_event, pause_event)
+        finally:
+            self._runtime_lock.release()
+
+    def _run_inference_worker_locked(
         self,
         job_id: int,
         sessions: list[SampleSession],
@@ -918,9 +965,11 @@ class QAWorkflowUI:
                 return
 
             runtime_session = sessions[0]
-            self.job_queue.put((job_id, "status", f"Loading model from {runtime_session.checkpoint_path.name}..."))
-            runtime = build_runtime(runtime_session)
+            self.job_queue.put((job_id, "status", f"Preparing model: {runtime_session.checkpoint_path.name}..."))
+            runtime = self._runtime_for_session(runtime_session)
             self.job_queue.put((job_id, "runtime", runtime))
+            if cancel_event.is_set():
+                return
 
             for sample_index, session in enumerate(sessions):
                 self.job_queue.put((job_id, "sample_start", sample_index))
@@ -962,8 +1011,9 @@ class QAWorkflowUI:
             self.job_queue.put((job_id, "fatal_error", (str(exc), tb)))
 
     def _poll_worker_queue(self) -> None:
+        poll_started = time.perf_counter()
         try:
-            while True:
+            while time.perf_counter() - poll_started < 0.015:
                 job_id, event_type, payload = self.job_queue.get_nowait()
                 if job_id != self.current_job_id:
                     continue
@@ -993,7 +1043,7 @@ class QAWorkflowUI:
                     self._update_status(status_text)
                     self._update_sample_nav()
                     if sample_index == self.current_sample_index:
-                        self.refresh_inference_progress_ui()
+                        self._progress_dirty = True
                 elif event_type == "result":
                     sample_index, index, result, elapsed_seconds = payload
                     if 0 <= sample_index < len(self.samples):
@@ -1009,7 +1059,7 @@ class QAWorkflowUI:
                             if sample_index == self.current_sample_index and self.selected_fov is None:
                                 self.selected_fov = fov
                     if sample_index == self.current_sample_index:
-                        self.refresh_inference_progress_ui()
+                        self._progress_dirty = True
                 elif event_type == "image_error":
                     sample_index, index, error_message, elapsed_seconds = payload
                     if 0 <= sample_index < len(self.samples):
@@ -1024,7 +1074,7 @@ class QAWorkflowUI:
                             self.current_processing_index = None
                     self._update_status(error_message)
                     if sample_index == self.current_sample_index:
-                        self.refresh_inference_progress_ui()
+                        self._progress_dirty = True
                 elif event_type == "sample_done":
                     sample_index = int(payload)
                     if sample_index == self.current_sample_index:
@@ -1060,6 +1110,10 @@ class QAWorkflowUI:
         except queue.Empty:
             pass
         finally:
+            if self._progress_dirty and time.perf_counter() - self._last_progress_draw >= 0.2:
+                self.refresh_inference_progress_ui()
+                self._progress_dirty = False
+                self._last_progress_draw = time.perf_counter()
             self._update_button_states()
             self.root.after(100, self._poll_worker_queue)
 
@@ -1095,6 +1149,8 @@ class QAWorkflowUI:
         draw_heatmaps: bool = True,
         update_detail: bool = True,
     ) -> None:
+        self._progress_dirty = False
+        self._last_progress_draw = time.perf_counter()
         self._update_summary()
         self.update_ranking()
         if update_detail:
@@ -1107,7 +1163,7 @@ class QAWorkflowUI:
     def refresh_inference_progress_ui(self) -> None:
         self._update_summary()
         if self.live_slide_updates.get():
-            self.draw_slide()
+            self._update_slide_status()
         if self.live_heatmap_updates.get():
             self.draw_heatmaps()
 
@@ -1455,7 +1511,7 @@ class QAWorkflowUI:
         margin = 12
         header_height = 28
         usable_width = max(width - margin * 2, 40)
-        usable_height = max(height - margin * 2 - header_height, 40)
+        usable_height = max(height - margin * 2 - header_height - self.heatmap_footer_height, 40)
         cell_size = max(4, min(usable_width / grid_width, usable_height / grid_height))
         map_width = grid_width * cell_size
         map_height = grid_height * cell_size
@@ -1702,9 +1758,23 @@ class QAWorkflowUI:
             canvas.bind("<Shift-MouseWheel>", on_shift_mouse_wheel)
         window.after(100, fit_to_window)
 
+    def _update_slide_status(self) -> None:
+        """Update changed QA borders without rebuilding hundreds of image tiles."""
+        if self.sample is not self._slide_drawn_sample:
+            self.draw_slide()
+            return
+        if self.sample is not None:
+            for fov in self.sample.fovs:
+                color = self._fov_border_color(fov)
+                if self._slide_border_colors.get(fov.ingest_index) != color:
+                    self.slide_canvas.itemconfigure(f"qa-border-{fov.ingest_index}", outline=color)
+                    self._slide_border_colors[fov.ingest_index] = color
+
     def draw_slide(self) -> None:
         self.slide_canvas.delete("all")
         self._canvas_images.clear()
+        self._slide_drawn_sample = self.sample
+        self._slide_border_colors.clear()
         width = max(self.slide_canvas.winfo_width(), 100)
         height = max(self.slide_canvas.winfo_height(), 100)
 
@@ -1780,7 +1850,9 @@ class QAWorkflowUI:
                     y1 - 2,
                     outline=self._fov_border_color(fov),
                     width=3,
+                    tags=(f"qa-border-{fov.ingest_index}",),
                 )
+                self._slide_border_colors[fov.ingest_index] = self._fov_border_color(fov)
 
                 if self.selected_fov is fov:
                     self.slide_canvas.create_rectangle(
