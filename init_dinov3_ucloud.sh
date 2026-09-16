@@ -166,9 +166,10 @@ fi
 
 STUDY3_DIR="$PROJECT_DIR/Study3_SelfSupervised"
 FULL_MANIFEST="$STUDY3_DIR/manifests/ssl_pool_40x_9d8cb0d9ec7b.csv"
-# CondaEnv is the persistent project mounted across UCloud jobs in this setup.
-# Keep checkpoints there by default so a stopped job does not discard training.
-OUTPUT_ROOT="${DINOV3_OUTPUT_ROOT:-/work/CondaEnv/DINOv3_Study3_OUTPUT}"
+# Store checkpoints in the persistent Member Files mount by default. When
+# UCloud exposes selected folders directly, USER_BASE_PATH is /work; callers
+# can still override this with DINOV3_OUTPUT_ROOT.
+OUTPUT_ROOT="${DINOV3_OUTPUT_ROOT:-$USER_BASE_PATH/DINOv3_Study3_OUTPUT}"
 mkdir -p "$OUTPUT_ROOT"
 
 export DINOV3_REPO PROJECT_DIR STUDY3_DIR IMAGE_ROOT FULL_MANIFEST OUTPUT_ROOT
