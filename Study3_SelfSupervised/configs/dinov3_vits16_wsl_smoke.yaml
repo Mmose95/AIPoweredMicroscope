@@ -1,0 +1,70 @@
+# Tiny integration recipe for the official DINOv3 SSL objective on one RTX 4080.
+# This is deliberately only five optimizer iterations, not a research run.
+MODEL:
+  META_ARCHITECTURE: SSLMetaArch
+  DEVICE: cuda
+  WEIGHTS: ""
+  DTYPE: float32
+
+compute_precision:
+  param_dtype: bf16
+  reduce_dtype: fp32
+  sharding_strategy: SHARD_GRAD_OP
+
+train:
+  batch_size_per_gpu: 2
+  dataset_path: null
+  output_dir: null
+  num_workers: 2
+  OFFICIAL_EPOCH_LENGTH: 5
+  seed: 0
+  compile: false
+  cache_dataset: false
+
+student:
+  arch: vit_small
+  patch_size: 16
+  drop_path_rate: 0.1
+  pretrained_weights: ""
+  # Match the published DINOv3-S/16 backbone constructor exactly so the SSL,
+  # scratch-detector, and external-reference arms share one architecture.
+  norm_layer: layernormbf16
+  n_storage_tokens: 4
+  mask_k_bias: true
+  pos_embed_rope_rescale_coords: 2.0
+  pos_embed_rope_dtype: fp32
+
+dino:
+  loss_weight: 1.0
+  koleo_loss_weight: 0.1
+  head_n_prototypes: 8192
+
+ibot:
+  loss_weight: 1.0
+  head_n_prototypes: 8192
+  mask_sample_probability: 0.5
+  mask_ratio_min_max: [0.1, 0.5]
+
+crops:
+  global_crops_size: 224
+  global_crops_scale: [0.32, 1.0]
+  local_crops_number: 2
+  local_crops_size: 96
+  local_crops_scale: [0.05, 0.32]
+
+optim:
+  epochs: 1
+  warmup_epochs: 0
+  freeze_last_layer_epochs: 0
+
+teacher:
+  warmup_teacher_temp_epochs: 0
+
+evaluation:
+  # Export the EMA teacher as a normal teacher_checkpoint.pth at the end.
+  eval_period_iterations: 5
+
+checkpointing:
+  period: 5
+  max_to_keep: 1
+  keep_every: 99999999999999999

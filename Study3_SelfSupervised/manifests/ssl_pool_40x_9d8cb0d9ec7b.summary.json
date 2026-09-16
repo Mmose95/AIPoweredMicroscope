@@ -1,0 +1,332 @@
+{
+  "schema_version": 1,
+  "status": "candidate_not_frozen",
+  "created_utc": "2026-09-15T11:13:09.752825+00:00",
+  "source_type": "full_level0_tiles_from_training_specimens",
+  "candidate_manifest": "C:\\Users\\SH37YE\\Desktop\\PhD_Code_github\\AIPoweredMicroscope\\Study3_SelfSupervised\\manifests\\candidate_40x_b4376dda6470.json",
+  "candidate_manifest_sha256": "9d8cb0d9ec7be9484d63c7703dea82c07fa735d449aa399acb6dd278bc599351",
+  "images_root": "E:\\PHD\\PhdData\\Patologi afd. - Aalborg\\40x Input tiles for CVAT",
+  "n_training_specimens": 52,
+  "n_total_ssl_eligible_images": 137443,
+  "n_annotated_training_images": 533,
+  "n_additional_unannotated_images": 136910,
+  "annotated_fraction": 0.0038779712317106,
+  "total_size_bytes": 155606314524,
+  "forbidden_specimens_scanned": 0,
+  "inventory_csv": "C:\\Users\\SH37YE\\Desktop\\PhD_Code_github\\AIPoweredMicroscope\\Study3_SelfSupervised\\manifests\\ssl_pool_40x_9d8cb0d9ec7b.csv",
+  "inventory_csv_sha256": "9b7da8661343bf884187e6783587cecc9e1ff724f61b574d20d721ea1ecb04df",
+  "per_specimen": {
+    "Sample_013 - 2026-08-04 16.19.56": {
+      "total_images": 1443,
+      "annotated_images": 10,
+      "additional_unannotated_images": 1433,
+      "size_bytes": 1536857322
+    },
+    "Sample_015 - 2026-08-04 16.23.02": {
+      "total_images": 2400,
+      "annotated_images": 5,
+      "additional_unannotated_images": 2395,
+      "size_bytes": 2581005392
+    },
+    "Sample_018 - 2026-08-04 16.27.41": {
+      "total_images": 2040,
+      "annotated_images": 15,
+      "additional_unannotated_images": 2025,
+      "size_bytes": 2069589684
+    },
+    "Sample_019 - 2026-08-04 16.29.36": {
+      "total_images": 1554,
+      "annotated_images": 8,
+      "additional_unannotated_images": 1546,
+      "size_bytes": 1918604712
+    },
+    "Sample_021 - 2026-08-04 16.32.19": {
+      "total_images": 1716,
+      "annotated_images": 6,
+      "additional_unannotated_images": 1710,
+      "size_bytes": 1995334132
+    },
+    "Sample_022 - 2026-08-04 16.33.44": {
+      "total_images": 1674,
+      "annotated_images": 16,
+      "additional_unannotated_images": 1658,
+      "size_bytes": 1648915911
+    },
+    "Sample_024 - 2026-08-04 16.36.57": {
+      "total_images": 2809,
+      "annotated_images": 4,
+      "additional_unannotated_images": 2805,
+      "size_bytes": 2977548166
+    },
+    "Sample_026 - 2026-08-04 16.41.55": {
+      "total_images": 4032,
+      "annotated_images": 5,
+      "additional_unannotated_images": 4027,
+      "size_bytes": 4978053143
+    },
+    "Sample_027 - 2026-08-04 16.45.07": {
+      "total_images": 2915,
+      "annotated_images": 11,
+      "additional_unannotated_images": 2904,
+      "size_bytes": 2887030363
+    },
+    "Sample_029 - 2026-08-04 16.50.52": {
+      "total_images": 3696,
+      "annotated_images": 7,
+      "additional_unannotated_images": 3689,
+      "size_bytes": 4128145808
+    },
+    "Sample_030 - 2026-08-04 16.53.54": {
+      "total_images": 1365,
+      "annotated_images": 3,
+      "additional_unannotated_images": 1362,
+      "size_bytes": 1467186341
+    },
+    "Sample_033 - 2026-08-04 16.56.17": {
+      "total_images": 2067,
+      "annotated_images": 4,
+      "additional_unannotated_images": 2063,
+      "size_bytes": 2879681369
+    },
+    "Sample_035 - 2026-08-04 16.58.58": {
+      "total_images": 3685,
+      "annotated_images": 20,
+      "additional_unannotated_images": 3665,
+      "size_bytes": 3729746487
+    },
+    "Sample_037 - 2026-08-04 17.04.54": {
+      "total_images": 3696,
+      "annotated_images": 14,
+      "additional_unannotated_images": 3682,
+      "size_bytes": 3749500427
+    },
+    "Sample_038 - 2026-08-04 17.07.58": {
+      "total_images": 3392,
+      "annotated_images": 8,
+      "additional_unannotated_images": 3384,
+      "size_bytes": 4230328552
+    },
+    "Sample_039 - 2026-08-04 17.10.53": {
+      "total_images": 3618,
+      "annotated_images": 2,
+      "additional_unannotated_images": 3616,
+      "size_bytes": 4696406082
+    },
+    "Sample_043 - 2026-08-04 17.23.15": {
+      "total_images": 3360,
+      "annotated_images": 12,
+      "additional_unannotated_images": 3348,
+      "size_bytes": 3733015340
+    },
+    "Sample_049 - 2026-08-04 17.38.49": {
+      "total_images": 1776,
+      "annotated_images": 34,
+      "additional_unannotated_images": 1742,
+      "size_bytes": 1775718817
+    },
+    "Sample_051 - 2026-08-04 17.41.32": {
+      "total_images": 1353,
+      "annotated_images": 5,
+      "additional_unannotated_images": 1348,
+      "size_bytes": 1332972028
+    },
+    "Sample_053 - 2026-08-04 17.44.06": {
+      "total_images": 1230,
+      "annotated_images": 33,
+      "additional_unannotated_images": 1197,
+      "size_bytes": 1269984327
+    },
+    "Sample_054 - 2026-08-04 17.45.17": {
+      "total_images": 1722,
+      "annotated_images": 16,
+      "additional_unannotated_images": 1706,
+      "size_bytes": 1715390140
+    },
+    "Sample_057 - 2026-08-04 17.50.38": {
+      "total_images": 1680,
+      "annotated_images": 25,
+      "additional_unannotated_images": 1655,
+      "size_bytes": 1883801026
+    },
+    "Sample_058 - 2026-08-04 17.52.24": {
+      "total_images": 1560,
+      "annotated_images": 14,
+      "additional_unannotated_images": 1546,
+      "size_bytes": 1574079061
+    },
+    "Sample_059 - 2026-08-04 17.54.03": {
+      "total_images": 2064,
+      "annotated_images": 13,
+      "additional_unannotated_images": 2051,
+      "size_bytes": 2120644324
+    },
+    "Sample_060 - 2026-08-04 17.55.59": {
+      "total_images": 2806,
+      "annotated_images": 5,
+      "additional_unannotated_images": 2801,
+      "size_bytes": 3169828282
+    },
+    "Sample_062 - 2026-08-04 18.00.21": {
+      "total_images": 2491,
+      "annotated_images": 5,
+      "additional_unannotated_images": 2486,
+      "size_bytes": 2508305369
+    },
+    "Sample_063 - 2026-08-04 18.02.34": {
+      "total_images": 3498,
+      "annotated_images": 3,
+      "additional_unannotated_images": 3495,
+      "size_bytes": 4163880096
+    },
+    "Sample_064 - 2026-08-04 18.05.30": {
+      "total_images": 3498,
+      "annotated_images": 4,
+      "additional_unannotated_images": 3494,
+      "size_bytes": 3868410826
+    },
+    "Sample_067 - 2026-08-04 18.13.25": {
+      "total_images": 3416,
+      "annotated_images": 5,
+      "additional_unannotated_images": 3411,
+      "size_bytes": 4182688791
+    },
+    "Sample_068 - 2026-08-04 18.16.22": {
+      "total_images": 3024,
+      "annotated_images": 1,
+      "additional_unannotated_images": 3023,
+      "size_bytes": 3669886100
+    },
+    "Sample_069 - 2026-08-04 18.18.46": {
+      "total_images": 3024,
+      "annotated_images": 4,
+      "additional_unannotated_images": 3020,
+      "size_bytes": 4814457130
+    },
+    "Sample_070 - 2026-08-04 18.21.14": {
+      "total_images": 1406,
+      "annotated_images": 37,
+      "additional_unannotated_images": 1369,
+      "size_bytes": 1379461985
+    },
+    "Sample_074 - 2026-08-04 18.30.34": {
+      "total_images": 3657,
+      "annotated_images": 4,
+      "additional_unannotated_images": 3653,
+      "size_bytes": 3778066754
+    },
+    "Sample_077 - 2026-08-04 18.37.23": {
+      "total_images": 2961,
+      "annotated_images": 2,
+      "additional_unannotated_images": 2959,
+      "size_bytes": 3449865660
+    },
+    "Sample_078 - 2026-08-04 18.40.05": {
+      "total_images": 3294,
+      "annotated_images": 22,
+      "additional_unannotated_images": 3272,
+      "size_bytes": 3355798842
+    },
+    "Sample_079 - 2026-08-04 18.42.57": {
+      "total_images": 4032,
+      "annotated_images": 3,
+      "additional_unannotated_images": 4029,
+      "size_bytes": 4483976581
+    },
+    "Sample_080 - 2026-08-04 18.45.53": {
+      "total_images": 3078,
+      "annotated_images": 8,
+      "additional_unannotated_images": 3070,
+      "size_bytes": 3885555218
+    },
+    "Sample_081 - 2026-08-04 18.48.38": {
+      "total_images": 3180,
+      "annotated_images": 2,
+      "additional_unannotated_images": 3178,
+      "size_bytes": 4177923768
+    },
+    "Sample_083 - 2026-08-04 18.51.27": {
+      "total_images": 3416,
+      "annotated_images": 5,
+      "additional_unannotated_images": 3411,
+      "size_bytes": 3793072488
+    },
+    "Sample_086 - 2026-08-04 18.56.21": {
+      "total_images": 2900,
+      "annotated_images": 13,
+      "additional_unannotated_images": 2887,
+      "size_bytes": 2951189411
+    },
+    "Sample_088 - 2026-08-04 19.01.08": {
+      "total_images": 2928,
+      "annotated_images": 11,
+      "additional_unannotated_images": 2917,
+      "size_bytes": 3494257420
+    },
+    "Sample_089 - 2026-08-04 19.03.57": {
+      "total_images": 1066,
+      "annotated_images": 8,
+      "additional_unannotated_images": 1058,
+      "size_bytes": 1107910852
+    },
+    "Sample_091 - 2026-08-04 19.07.17": {
+      "total_images": 3233,
+      "annotated_images": 4,
+      "additional_unannotated_images": 3229,
+      "size_bytes": 5040909868
+    },
+    "Sample_093 - 2026-08-04 19.12.55": {
+      "total_images": 3696,
+      "annotated_images": 17,
+      "additional_unannotated_images": 3679,
+      "size_bytes": 3978056844
+    },
+    "Sample_094 - 2026-08-04 19.15.58": {
+      "total_images": 3248,
+      "annotated_images": 9,
+      "additional_unannotated_images": 3239,
+      "size_bytes": 3358659303
+    },
+    "Sample_097 - 2026-08-04 19.22.04": {
+      "total_images": 3432,
+      "annotated_images": 4,
+      "additional_unannotated_images": 3428,
+      "size_bytes": 3639211530
+    },
+    "Sample_103 - 2026-08-04 19.36.36": {
+      "total_images": 2491,
+      "annotated_images": 4,
+      "additional_unannotated_images": 2487,
+      "size_bytes": 2883808382
+    },
+    "Sample_104 - 2026-08-04 19.38.48": {
+      "total_images": 1488,
+      "annotated_images": 21,
+      "additional_unannotated_images": 1467,
+      "size_bytes": 1645818522
+    },
+    "Sample_105 - 2026-08-04 19.40.13": {
+      "total_images": 2295,
+      "annotated_images": 21,
+      "additional_unannotated_images": 2274,
+      "size_bytes": 2525630809
+    },
+    "Sample_106 - 2026-08-04 19.42.15": {
+      "total_images": 2173,
+      "annotated_images": 12,
+      "additional_unannotated_images": 2161,
+      "size_bytes": 2141478712
+    },
+    "Sample_107 - 2026-08-04 19.44.12": {
+      "total_images": 1484,
+      "annotated_images": 4,
+      "additional_unannotated_images": 1480,
+      "size_bytes": 1662302052
+    },
+    "Sample_108 - 2026-08-04 19.45.28": {
+      "total_images": 3381,
+      "annotated_images": 5,
+      "additional_unannotated_images": 3376,
+      "size_bytes": 3616363975
+    }
+  }
+}

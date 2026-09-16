@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "purpose": "local_real_image_ssl_integration_test",
+  "research_training_eligible": false,
+  "selection_method": "even_quantiles_of_white_fraction_within_each_specimen",
+  "uses_biological_annotations_for_selection": false,
+  "source_inventory_summary": "C:\\Users\\SH37YE\\Desktop\\PhD_Code_github\\AIPoweredMicroscope\\Study3_SelfSupervised\\manifests\\ssl_pool_40x_9d8cb0d9ec7b.summary.json",
+  "source_inventory_summary_sha256": "6e908472b9d09b94f403ed0d7fbe0eaa2d24cb27d8abeddbdcac1880a232a8cf",
+  "images_root": "E:\\PHD\\PhdData\\Patologi afd. - Aalborg\\40x Input tiles for CVAT",
+  "n_specimens": 52,
+  "images_per_specimen": 8,
+  "n_images": 416,
+  "subset_csv": "C:\\Users\\SH37YE\\Desktop\\PhD_Code_github\\AIPoweredMicroscope\\Study3_SelfSupervised\\manifests\\local_ssl_subset_n8_6e908472b9d0.csv",
+  "subset_csv_sha256": "5f25972417f957acee42bb49acc2d68de92f013b71129a29ca20b92c362fb409"
+}

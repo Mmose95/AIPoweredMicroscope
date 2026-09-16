@@ -20,6 +20,10 @@
 **/mlruns/
 **/mlartifacts/
 
+# Study 3 local/UCloud run products can contain multi-GB distributed checkpoints.
+/Study3_SelfSupervised/runs/
+/Study3_UCloud_bundle_*.zip
+
 # Keep the finalized threshold-calibration evidence; ignore other local
 # evaluation runs, which can be regenerated and may contain large overlays.
 /EvaluationOutput/*

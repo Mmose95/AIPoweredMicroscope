@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "backbone_family": "dinov3",
+  "arms": {
+    "scratch": {
+      "backbone_initialization": "random",
+      "detector_initialization": "random",
+      "allowed_checkpoint": null
+    },
+    "own_data_ssl": {
+      "backbone_initialization": "own_training_specimens_ssl",
+      "detector_initialization": "random",
+      "allowed_checkpoint": "REQUIRED_OWN_SSL_CHECKPOINT"
+    },
+    "external_pretrained": {
+      "backbone_initialization": "released_external_weights",
+      "detector_initialization": "released_or_random_to_be_prespecified",
+      "allowed_checkpoint": "REQUIRED_EXTERNAL_CHECKPOINT"
+    }
+  },
+  "invariants": [
+    "Validation and test specimens are fixed across all arms.",
+    "SSL pretraining contains no validation or test images.",
+    "Scratch and own-data SSL arms use the same backbone and detector architecture.",
+    "The own-data SSL checkpoint is loaded into the backbone only.",
+    "Every loaded checkpoint is recorded and hashed before training."
+  ]
+}
