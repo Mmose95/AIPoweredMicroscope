@@ -57,12 +57,17 @@ else
   USER_BASE_PATH="$(find /work -maxdepth 1 -type d -name '*#*' -print -quit)"
 fi
 if [[ -z "${USER_BASE_PATH:-}" ]]; then
-  echo "[DINOv3 Init][ERROR] Could not detect AAU/SDU member storage under /work." >&2
-  exit 1
+  # UCloud may mount selected folders directly below /work instead of exposing
+  # the enclosing AAU/SDU member directory.
+  USER_BASE_PATH="/work"
+  USER_BASE_DIR=""
+  echo "[DINOv3 Init] Using direct /work mounts"
+else
+  USER_BASE_DIR="$(basename "$USER_BASE_PATH")"
 fi
-USER_BASE_DIR="$(basename "$USER_BASE_PATH")"
 export USER_BASE_DIR
-echo "[DINOv3 Init] USER_BASE_DIR=$USER_BASE_DIR"
+echo "[DINOv3 Init] USER_BASE_PATH=$USER_BASE_PATH"
+echo "[DINOv3 Init] USER_BASE_DIR=${USER_BASE_DIR:-<direct>}"
 
 mkdir -p "$PROJECT_ROOT"
 if [[ ! -d "$PROJECT_DIR/.git" ]]; then
@@ -130,9 +135,9 @@ if [[ -n "${DINOV3_IMAGE_ROOT:-}" ]]; then
 else
   IMAGE_ROOT=""
   for candidate in \
-    "/work/$USER_BASE_DIR/CellScanData/40x Input tiles for CVAT" \
-    "/work/$USER_BASE_DIR/40x Input tiles for CVAT" \
-    "/work/$USER_BASE_DIR/PHD/PhdData/Patologi afd. - Aalborg/40x Input tiles for CVAT"
+    "$USER_BASE_PATH/CellScanData/40x Input tiles for CVAT" \
+    "$USER_BASE_PATH/40x Input tiles for CVAT" \
+    "$USER_BASE_PATH/PHD/PhdData/Patologi afd. - Aalborg/40x Input tiles for CVAT"
   do
     if [[ -d "$candidate" ]]; then
       IMAGE_ROOT="$candidate"
@@ -140,7 +145,7 @@ else
     fi
   done
   if [[ -z "$IMAGE_ROOT" ]]; then
-    IMAGE_ROOT="$(find "/work/$USER_BASE_DIR" -maxdepth 6 -type d -name '40x Input tiles for CVAT' -print -quit 2>/dev/null || true)"
+    IMAGE_ROOT="$(find "$USER_BASE_PATH" -maxdepth 6 -type d -name '40x Input tiles for CVAT' -print -quit 2>/dev/null || true)"
   fi
 fi
 if [[ -z "$IMAGE_ROOT" || ! -d "$IMAGE_ROOT" ]]; then
@@ -151,7 +156,7 @@ fi
 
 STUDY3_DIR="$PROJECT_DIR/Study3_SelfSupervised"
 FULL_MANIFEST="$STUDY3_DIR/manifests/ssl_pool_40x_9d8cb0d9ec7b.csv"
-OUTPUT_ROOT="${DINOV3_OUTPUT_ROOT:-/work/$USER_BASE_DIR/DINOv3_Study3_OUTPUT}"
+OUTPUT_ROOT="${DINOV3_OUTPUT_ROOT:-$USER_BASE_PATH/DINOv3_Study3_OUTPUT}"
 mkdir -p "$OUTPUT_ROOT"
 
 export DINOV3_REPO PROJECT_DIR STUDY3_DIR IMAGE_ROOT FULL_MANIFEST OUTPUT_ROOT
