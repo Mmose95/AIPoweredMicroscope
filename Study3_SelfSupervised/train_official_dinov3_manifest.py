@@ -6,12 +6,27 @@ memory and then hands control to the official ``dinov3.train.train`` entrypoint.
 
 from __future__ import annotations
 
+import os
+
+import torch
+
 from dinov3.data import loaders
 
 from dinov3_manifest_dataset import MicroscopyManifest
 
 
 _official_parse_dataset_str = loaders._parse_dataset_str
+_official_init_process_group = torch.distributed.init_process_group
+
+
+def _init_process_group_with_explicit_cuda_device(*args, **kwargs):
+    """Avoid an NCCL barrier hang on UCloud MIG by binding rank to its GPU."""
+    backend = kwargs.get("backend", args[0] if args else None)
+    if backend == "nccl" and kwargs.get("device_id") is None:
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        torch.cuda.set_device(local_rank)
+        kwargs["device_id"] = torch.device("cuda", local_rank)
+    return _official_init_process_group(*args, **kwargs)
 
 
 def _parse_dataset_str_with_manifest(dataset_str: str):
@@ -35,6 +50,7 @@ def _parse_dataset_str_with_manifest(dataset_str: str):
 
 def main() -> None:
     loaders._parse_dataset_str = _parse_dataset_str_with_manifest
+    torch.distributed.init_process_group = _init_process_group_with_explicit_cuda_device
     # Import after registration so train.py's make_dataset uses the patched parser.
     from dinov3.train.train import main as official_main
 
@@ -43,4 +59,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
