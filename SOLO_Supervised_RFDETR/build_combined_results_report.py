@@ -198,6 +198,78 @@ def validate_report_inputs(object_summary, confusion, calibration, downstream, r
         raise ValueError("Count-error thresholds differ from the held-out operating point.")
 
 
+def recover_patch_counts(summary: dict[str, Any], annotations: Path, predictions: Path):
+    """Rebuild descriptive counts from the saved, unthresholded test detections.
+
+    Older evaluations did not save count_error_metrics. Reuse their predictions,
+    never downstream FOV counts, and require a complete, identifiable test set.
+    """
+    coco = read_json(annotations)
+    detections = json.loads(predictions.read_text(encoding="utf-8"))
+    image_ids = [image["id"] for image in coco["images"]]
+    if (len(set(image_ids)) != len(image_ids)
+            or len(image_ids) != int(summary["images_processed"])
+            or summary.get("images_missing", 0)):
+        raise ValueError("Cannot reconstruct patch counts for an incomplete test evaluation; rerun the object evaluator.")
+    categories = {c["id"]: c["name"] for c in coco["categories"]}
+    thresholds = summary["operating_point"]["class_score_thresholds"]
+    if set(categories.values()) != set(thresholds):
+        raise ValueError("Test categories differ from calibrated detector classes.")
+    if float(summary["score_floor"]) > min(map(float, thresholds.values())):
+        raise ValueError("Saved prediction score floor exceeds a calibrated threshold.")
+    valid_ids = set(image_ids)
+    annotated, predicted = Counter(), Counter()
+    for item in coco["annotations"]:
+        if int(item.get("iscrowd", 0)) != 0:
+            continue
+        if item["image_id"] not in valid_ids or item["category_id"] not in categories:
+            raise ValueError("Unknown image or category in test annotations.")
+        annotated[item["image_id"], item["category_id"]] += 1
+    for item in detections:
+        if item["image_id"] not in valid_ids or item["category_id"] not in categories:
+            raise ValueError("Saved predictions do not belong to this test set.")
+        score = float(item["score"])
+        if not math.isfinite(score):
+            raise ValueError("Non-finite saved prediction score.")
+        # Match the evaluator's float32 threshold mask.
+        if np.float32(score) >= np.float32(thresholds[categories[item["category_id"]]]):
+            predicted[item["image_id"], item["category_id"]] += 1
+    rows, metrics = [], []
+    for category_id, name in categories.items():
+        errors = []
+        for image_id in image_ids:
+            actual = annotated[image_id, category_id]
+            estimate = predicted[image_id, category_id]
+            error = estimate - actual
+            errors.append(error)
+            rows.append(dict(image_id=image_id, **{"class": name}, annotated_count=actual,
+                             predicted_count=estimate, signed_error=error, absolute_error=abs(error)))
+        metrics.append({"class": name, "n_images": len(errors),
+                        "mean_absolute_error": float(np.mean(np.abs(errors))),
+                        "median_absolute_error": float(np.median(np.abs(errors))),
+                        "mean_signed_error": float(np.mean(errors))})
+    previous = summary.get("count_error_metrics")
+    metadata = summary.get("count_error_analysis", {})
+    if metadata.get("confidence_interval_method") is not None:
+        raise ValueError("This report only supports descriptive count errors; saved confidence intervals require an explicit reporting choice.")
+    if previous:
+        by_class = {row["class"]: row for row in previous}
+        for row in metrics:
+            if row["class"] not in by_class or any(
+                not math.isclose(float(value), float(by_class[row["class"]][key]), abs_tol=1e-9)
+                for key, value in row.items() if key != "class"
+            ):
+                raise ValueError("Saved count metrics disagree with the test predictions.")
+    summary["count_error_metrics"] = metrics
+    summary["count_error_analysis"] = {
+        "unit": "test_patch", "class_score_thresholds": thresholds,
+        "signed_error_definition": "predicted_minus_annotated",
+        "confidence_interval_method": None, "bootstrap_replicates": None,
+        "source": "reconstructed_from_saved_test_predictions",
+    }
+    return rows
+
+
 def artifact_manifest(paths, calibration, object_summary):
     return {
         "schema_version": 2,
@@ -354,6 +426,73 @@ def save_confusion_matrix_figure(analysis: dict[str, Any], scheme: str, path: Pa
     image.save(path, dpi=(240, 240))
 
 
+def save_calibration_figure(sweep_path: Path, calibration: dict[str, Any], path: Path) -> None:
+    """Plot both calibration F1 curves and label their selected maxima."""
+    from PIL import Image, ImageDraw, ImageFont
+    classes = ["Leucocyte", "Squamous Epithelial Cell"]
+    rows = read_csv(sweep_path)
+    if {r["class"] for r in rows} != set(classes):
+        raise ValueError("Calibration sweep must contain the two detector classes.")
+    grouped = {}
+    selected_rows = []
+    for name in classes:
+        unique = {}
+        for row in (r for r in rows if r["class"] == name):
+            threshold = float(row["threshold"])
+            if threshold in unique and row != unique[threshold]:
+                raise ValueError("Conflicting duplicate thresholds in calibration sweep.")
+            unique[threshold] = row
+        points = [unique[key] for key in sorted(unique)]
+        for point in points:
+            if any(not math.isfinite(float(point[k])) or not 0 <= float(point[k]) <= 1
+                   for k in ("threshold", "precision", "recall", "f1")):
+                raise ValueError("Invalid calibration curve values.")
+        chosen = [r for r in points if math.isclose(float(r["threshold"]), float(calibration["selected_thresholds"][name]), abs_tol=1e-6)]
+        if len(chosen) != 1 or not math.isclose(float(chosen[0]["f1"]), max(float(r["f1"]) for r in points), abs_tol=1e-8):
+            raise ValueError("Selected threshold is missing or is not an F1 maximum in the saved sweep.")
+        selected_rows.append(chosen[0])
+        grouped[name] = points
+    if not math.isclose(sum(float(r["f1"]) for r in selected_rows)/2,
+                        float(calibration["selected_joint_metrics"]["macro_f1"]), abs_tol=1e-8):
+        raise ValueError("Selected curve points do not reproduce saved joint macro F1.")
+    font_path = Path("C:/Windows/Fonts/arial.ttf")
+    def font(size):
+        return ImageFont.truetype(str(font_path), size) if font_path.is_file() else ImageFont.load_default(size=size)
+    canvas = Image.new("RGB", (2400, 1600), "white")
+    draw = ImageDraw.Draw(canvas)
+    colors = ["#0072B2", "#D55E00"]
+    left, top, width, height = 190, 330, 2070, 1040
+    xy = lambda x,y: (left+float(x)*width, top+(1-float(y))*height)
+    draw.text((1200,55),"Confidence-threshold selection on the calibration set",anchor="mt",font=font(48),fill="black")
+    for tick in range(11):
+        value=tick/10
+        x,y=xy(value,value)
+        draw.line((left,y,left+width,y),fill="#dddddd",width=2)
+        draw.text((left-25,y),f"{value:.1f}",anchor="rm",font=font(36),fill="black")
+        draw.line((x,top+height,x,top+height+12),fill="black",width=2)
+        draw.text((x,top+height+30),f"{value:.1f}",anchor="mt",font=font(36),fill="black")
+    draw.text((left-75,top-60),"F1 score",font=font(38),fill="black")
+    draw.line((left,top,left,top+height,left+width,top+height),fill="black",width=3)
+    for index,name in enumerate(classes):
+        color=colors[index]
+        draw.line([xy(r["threshold"],r["f1"]) for r in grouped[name]],fill=color,width=8)
+        threshold=float(calibration["selected_thresholds"][name])
+        score=float(selected_rows[index]["f1"])
+        px,py=xy(threshold,score)
+        for y in range(round(py)+16,top+height,26):
+            draw.line((px,y,px,min(y+13,top+height)),fill=color,width=3)
+        draw.ellipse((px-14,py-14,px+14,py+14),fill=color,outline="white",width=3)
+        label_x = 330 if index==0 else 1480
+        title="Leucocytes" if index==0 else "Squamous epithelial cells"
+        draw.text((label_x,150),title,font=font(44),fill=color)
+        draw.text((label_x,211),f"Maximum F1 = {score:.4f} at threshold {threshold:.2f}",font=font(36),fill="black")
+        endpoint_x=label_x+260
+        draw.line((endpoint_x,275,px,py-22),fill=color,width=3)
+    draw.text((left+width/2,1500),"Confidence threshold",anchor="mt",font=font(44),fill="black")
+    path.parent.mkdir(parents=True,exist_ok=True)
+    canvas.save(path,dpi=(400,400))
+
+
 def latest_downstream_output(root: Path) -> Path:
     candidates = sorted(
         (
@@ -410,17 +549,21 @@ def per_class_standard_coco(
         from pycocotools.coco import COCO
         from pycocotools.cocoeval import COCOeval
     except ImportError:
-        saved_rows = read_csv(predictions_path.parent / "per_class_metrics.csv")
-        return [
-            {
-                "class": row["class"],
-                "AP@50:95": float(row["AP_iou_sweep"]),
-                "AP@50": float(row["AP@50"]),
-                "AP@75": float(row["AP@75"]),
-                "AR@100": float(row["AR_iou_sweep"]),
-            }
-            for row in saved_rows
-        ]
+        saved_rows = read_csv(predictions_path.parent / "per_class_iou_sweep.csv")
+        grouped = defaultdict(dict)
+        for row in saved_rows:
+            grouped[row["class"]][round(float(row["iou_threshold"]), 2)] = row
+        grid = [round(0.50 + i * 0.05, 2) for i in range(10)]
+        result = []
+        for name, values in grouped.items():
+            if any(iou not in values for iou in grid):
+                raise ValueError("Saved per-class IoU sweep lacks the standard COCO 0.50–0.95 grid.")
+            result.append({"class": name,
+                           "AP@50:95": float(np.mean([float(values[iou]["AP"]) for iou in grid])),
+                           "AP@50": float(values[0.5]["AP"]),
+                           "AP@75": float(values[0.75]["AP"]),
+                           "AR@100": float(np.mean([float(values[iou]["AR"]) for iou in grid]))})
+        return result
 
     with contextlib.redirect_stdout(io.StringIO()):
         coco = COCO(str(test_coco_path))
@@ -740,6 +883,11 @@ if win32com is None:
                         for run in paragraph.runs:
                             run.font.name = "Aptos"
                             run.font.size = Pt(font_size)
+            if len(rows) <= 12:
+                for row in table.rows[:-1]:
+                    for cell in row.cells:
+                        for paragraph in cell.paragraphs:
+                            paragraph.paragraph_format.keep_with_next = True
             self.document.add_paragraph()
 
         def image(self, path: Path, caption: str, width_inches: float = 6.25) -> None:
@@ -754,14 +902,16 @@ if win32com is None:
 
         def add_contents(self) -> None:
             self.paragraph("Contents", style="Heading 1")
-            paragraph = self.document.add_paragraph()
-            field = OxmlElement("w:fldSimple")
-            field.set(qn("w:instr"), 'TOC \\o "1-3" \\h \\z \\u')
-            paragraph._p.append(field)
+            self._contents_anchor = self.document.add_paragraph()
             self.page_break()
 
         def save(self, path: Path) -> dict[str, int]:
             path.parent.mkdir(parents=True, exist_ok=True)
+            # A Word TOC field has no cached content in python-docx output.
+            # Supply a readable outline without requiring manual field updates.
+            for paragraph in list(self.document.paragraphs):
+                if paragraph.style.name == "Heading 1" and paragraph.text != "Contents":
+                    self._contents_anchor.insert_paragraph_before(paragraph.text)
             self.document.save(path)
             return {
                 "pages": 0,
@@ -795,7 +945,10 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
     input_paths = {
         "object_summary": object_output / "eval_summary.json",
         "object_confusion": object_output / "confusion_matrix.json",
+        "object_predictions": object_output / "predictions_coco.json",
+        "object_per_class_iou": object_output / "per_class_iou_sweep.csv",
         "calibration": calibration_output / "threshold_calibration_summary.json",
+        "calibration_sweep": calibration_output / "per_class_threshold_sweep.csv",
         "downstream_summary": downstream_output / "downstream_evaluation_summary.json",
         "downstream_predictions": downstream_output / "downstream_predictions.csv",
         "expert_counts": args.manual_labels,
@@ -817,8 +970,18 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
     train_kwargs_path = args.train_kwargs or args.hpo_record.parent / "run_meta" / "train_kwargs.json"
     train_kwargs = read_json(train_kwargs_path)
     downstream_rows = read_csv(downstream_output / "downstream_predictions.csv")
+    patch_count_rows = recover_patch_counts(object_summary, args.test_coco, input_paths["object_predictions"])
+    # Independent reconciliation against the saved confusion-matrix margins.
+    matrix = np.asarray(object_confusion["matrix"])
+    for index, name in enumerate(object_confusion["labels"][:-1]):
+        counts = [r for r in patch_count_rows if r["class"] == name]
+        if (sum(r["annotated_count"] for r in counts) != int(matrix[index].sum())
+                or sum(r["predicted_count"] for r in counts) != int(matrix[:, index].sum())):
+            raise ValueError("Recovered patch counts disagree with saved confusion-matrix totals.")
     validate_report_inputs(object_summary, object_confusion, calibration, downstream, downstream_rows)
     expert_references = read_expert_references(args.manual_labels.resolve())
+    if set(expert_references) != {r["source_image_name"].strip().casefold() for r in downstream_rows}:
+        raise ValueError("Eligible expert FOVs differ from saved predictions; rerun downstream inference for the current cohort.")
     for row in downstream_rows:
         key = row["source_image_name"].strip().casefold()
         if key not in expert_references:
@@ -870,6 +1033,36 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
         print("Report inputs validated; no report was written.")
         return report_path, {"checked_only": 1}
     output_dir.mkdir(parents=True, exist_ok=True)
+    calibration_figure = output_dir / "supplementary_threshold_calibration.png"
+    save_calibration_figure(input_paths["calibration_sweep"], calibration, calibration_figure)
+    calibration_caption = (
+        "Independent confidence-threshold calibration. F1 curves are shown "
+        f"for leucocytes and squamous epithelial cells on {calibration['image_count']} calibration patches "
+        f"from {calibration['task_count']} specimens, with within-class prediction-to-annotation matching at IoU {calibration['iou_threshold']:.2f}. "
+        "Dots and labels identify the maximum F1 scores and selected thresholds "
+        f"(leucocytes: F1 {calibration['selected_joint_metrics']['leucocyte_f1']:.4f} at {calibration['selected_thresholds']['Leucocyte']:.2f}; "
+        f"squamous epithelial cells: F1 {calibration['selected_joint_metrics']['epithelial_f1']:.4f} at {calibration['selected_thresholds']['Squamous Epithelial Cell']:.2f}). "
+        "Dashed lines project these thresholds onto the horizontal axis. "
+        "The threshold pair maximized the unweighted mean of the two "
+        "class-specific F1 scores (macro F1). Curves describe the calibration set used "
+        "for threshold selection, not independent test-set performance."
+    )
+    (output_dir / "supplementary_threshold_calibration_caption.txt").write_text(calibration_caption, encoding="utf-8")
+    (output_dir / "patch_count_error_results.json").write_text(
+        json.dumps({"analysis": object_summary["count_error_analysis"],
+                    "metrics": object_summary["count_error_metrics"]}, indent=2), encoding="utf-8")
+    clean_fields = ["source_image_name", "n_leucocyte", "n_squamous_epithelial_cell",
+                    "expert_epithelial_bin", "expert_leucocyte_bin", "expert_geckler_class",
+                    "expert_collapsed_geckler_label", "expert_mw_label", "predicted_geckler_class",
+                    "predicted_collapsed_geckler_label", "predicted_mw_label"]
+    for filename, records, fields in (
+        ("per_image_count_errors.csv", patch_count_rows, list(patch_count_rows[0])),
+        ("count_based_fov_predictions.csv", downstream_rows, clean_fields),
+    ):
+        with (output_dir / filename).open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(records)
     manifest = artifact_manifest(input_paths, calibration, object_summary)
     manifest_path = output_dir / "report_provenance.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -1153,18 +1346,12 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
             ],
         )
         report.image(
-            calibration_output / "leucocyte_threshold_sweep.png",
-            "Figure 2. Leucocyte precision, recall, F1, and Jaccard across "
-            f"confidence thresholds. Selected threshold: {selected['Leucocyte']:.2f}.",
-        )
-        report.image(
-            calibration_output / "squamous_epithelial_cell_threshold_sweep.png",
-            "Figure 3. Squamous epithelial cell calibration curves. The selected "
-            f"threshold was {selected['Squamous Epithelial Cell']:.2f}.",
+            calibration_figure,
+            "Figure 2. " + calibration_caption,
         )
         report.image(
             calibration_output / "joint_macro_f1_heatmap.png",
-            "Figure 4. Joint macro-F1 surface for the two class-specific "
+            "Figure 3. Joint macro-F1 surface for the two class-specific "
             "confidence thresholds.",
         )
         report.paragraph(
@@ -1194,7 +1381,7 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
         )
         report.image(
             object_matrix_path,
-            "Figure 5. Held-out object-detection confusion matrix at the locked "
+            "Figure 4. Held-out object-detection confusion matrix at the locked "
             f"thresholds ({threshold_text(operating['class_score_thresholds'])}) and IoU={object_confusion['iou_threshold']:.2f}. Rows are "
             "ground truth; columns are predictions. Background indicates misses "
             "or unmatched detections.",
@@ -1419,7 +1606,7 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
                 ["Calibration predictions", str((calibration_output / "calibration_predictions.json").resolve())],
                 ["Revised expert count workbook", str(args.manual_labels.resolve())],
                 ["Downstream summary", str((downstream_output / "downstream_evaluation_summary.json").resolve())],
-                ["Per-FOV downstream predictions", str((downstream_output / "downstream_predictions.csv").resolve())],
+                ["Per-FOV count-based results", str((output_dir / "count_based_fov_predictions.csv").resolve())],
                 ["Downstream exclusions", str((downstream_output / "downstream_exclusions.csv").resolve())],
                 ["Downstream overlays", str((downstream_output / "overlays").resolve())],
             ],
@@ -1457,7 +1644,7 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
             "signed adjustment needed to move each model count into its expert bin: "
             "negative means fewer predicted cells are needed, positive means more, "
             "and zero means the count is already in the correct bin. Complete results "
-            f"for all {len(downstream_rows)} FOVs remain available in downstream_predictions.csv."
+            f"for all {len(downstream_rows)} FOVs remain available in count_based_fov_predictions.csv."
         )
         error_schemes = [
             (
@@ -1483,7 +1670,7 @@ def build_report(args: argparse.Namespace) -> tuple[Path, dict[str, int]]:
                 if row[reference_key] != row[predicted_key]
             ]
             heading = f"{heading} ({len(errors)} disagreements)"
-            if heading.startswith(("B.3 ", "B.4 ")):
+            if heading.startswith(("B.2 ", "B.3 ")):
                 report.page_break()
             report.paragraph(heading, style="Heading 2")
             report.table(
@@ -1557,6 +1744,10 @@ def validate_saved_report(path: Path, expected_statistics: dict[str, int]) -> No
             raise RuntimeError(f"Report validation failed; missing text: {missing}")
         if len(document.tables) != expected_statistics["tables"]:
             raise RuntimeError("Table count changed after reopening the report.")
+        if len(document.inline_shapes) != expected_statistics["figures"]:
+            raise RuntimeError("Figure count changed after reopening the report.")
+        if any(term in text.casefold() for term in ("original expert", "partially qualified", "not qualified", "manual_label")):
+            raise RuntimeError("Superseded expert quality comparison found in the report.")
         return
 
     word = win32com.client.DispatchEx("Word.Application")
@@ -1568,6 +1759,8 @@ def validate_saved_report(path: Path, expected_statistics: dict[str, int]) -> No
         document.Repaginate()
         pages = int(document.ComputeStatistics(WD_STATISTIC_PAGES))
         text = document.Content.Text
+        if any(term in text.casefold() for term in ("original expert", "partially qualified", "not qualified", "manual_label")):
+            raise RuntimeError("Superseded expert quality comparison found in the report.")
         missing = [phrase for phrase in required_phrases if phrase not in text]
         if missing:
             raise RuntimeError(f"Report validation failed; missing text: {missing}")

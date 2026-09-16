@@ -9,6 +9,7 @@ common detection metrics:
 - Confusion matrix with background class
 - Threshold sweep (precision/recall/F1 + FP/image)
 - Per-image count errors at the locked class-specific thresholds
+- Count-density strata with per-patch signed-error stems, sample sizes, and MAE
 - PR and ROC-style curves from IoU-matched detections
 - Optional overlay images
 
@@ -1771,6 +1772,15 @@ def run_evaluate_mode(args: argparse.Namespace) -> None:
         count_error_rows,
     )
 
+    # Derive density-stratified errors from this run's thresholded patch counts.
+    # This is descriptive held-out analysis; it does not select any thresholds.
+    from SOLO_Supervised_RFDETR.plot_patch_count_strata import build as build_count_strata
+    count_strata_rows = build_count_strata(
+        cfg.output_dir / "per_image_count_errors.csv",
+        cfg.output_dir,
+        make_plot=not cfg.no_plots,
+    )
+
     pr_rows: List[Dict[str, Any]] = []
     roc_rows: List[Dict[str, Any]] = []
     pr_auc = float("nan")
@@ -1914,6 +1924,12 @@ def run_evaluate_mode(args: argparse.Namespace) -> None:
             "bootstrap_replicates": None,
         },
         "count_error_metrics": count_error_rows,
+        "count_error_strata": {
+            "grouping": "annotated_count_per_class_per_patch",
+            "bins": ["0–9", "10–25", "26–50", ">50"],
+            "purpose": "exploratory_descriptive_density_analysis",
+            "summary": count_strata_rows,
+        },
         "pr_auc": pr_auc,
         "roc_auc": roc_auc,
         "roc_note": roc_note,
@@ -1923,6 +1939,12 @@ def run_evaluate_mode(args: argparse.Namespace) -> None:
             "per_class_metrics": str(cfg.output_dir / "per_class_metrics.csv"),
             "count_error_metrics": str(cfg.output_dir / "count_error_metrics.csv"),
             "per_image_count_errors": str(cfg.output_dir / "per_image_count_errors.csv"),
+            "per_patch_count_strata": str(cfg.output_dir / "per_patch_count_strata.csv"),
+            "count_strata_summary": str(cfg.output_dir / "count_strata_summary.csv"),
+            "count_strata_figure": (
+                str(cfg.output_dir / "supplementary_patch_count_errors.png")
+                if not cfg.no_plots else None
+            ),
             "confusion_matrix_csv": str(cfg.output_dir / "confusion_matrix.csv"),
             "confusion_matrix_json": str(cfg.output_dir / "confusion_matrix.json"),
             "confusion_matrix_figure": str(cfg.output_dir / "confusion_matrix.png"),

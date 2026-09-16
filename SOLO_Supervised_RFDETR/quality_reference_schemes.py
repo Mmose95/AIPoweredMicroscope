@@ -21,8 +21,10 @@ def normalized_count_bin(value: Any) -> str:
     if compact in {"26+", ">25", "26"}:
         return "26+"
     try:
-        number = int(float(compact))
-    except (TypeError, ValueError):
+        number = float(compact)
+        if not number.is_integer() or number < 0:
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
         raise ValueError(f"Unsupported expert count category: {value!r}")
     if number <= 9:
         return "0-9"
@@ -70,5 +72,4 @@ def murray_washington_label(epithelial_bin: str, leucocyte_bin: str) -> str:
         if epithelial_bin == "0-9" and leucocyte_bin == "26+"
         else "Unacceptable"
     )
-
 
