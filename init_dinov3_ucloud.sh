@@ -99,8 +99,18 @@ choose_torch_index() {
 
 CUDA_VERSION=""
 if command -v nvidia-smi >/dev/null 2>&1; then
-  CUDA_VERSION="$(nvidia-smi | grep -o 'CUDA Version: [0-9.]*' | awk '{print $3}' | cut -d. -f1,2 | head -n1 || true)"
+  # Standard drivers print "CUDA Version" while UCloud's newer B200/MIG
+  # stack prints "CUDA UMD Version".
+  CUDA_VERSION="$(
+    nvidia-smi \
+      | grep -oE 'CUDA (UMD )?Version: [0-9.]+' \
+      | grep -oE '[0-9.]+$' \
+      | cut -d. -f1,2 \
+      | head -n1 \
+      || true
+  )"
 fi
+echo "[DINOv3 Init] Detected CUDA version: ${CUDA_VERSION:-unknown}"
 TORCH_INDEX="${DINOV3_TORCH_INDEX_URL:-$(choose_torch_index "$CUDA_VERSION")}"
 if [[ -z "$TORCH_INDEX" ]]; then
   echo "[DINOv3 Init][ERROR] No supported CUDA wheel selected for CUDA '$CUDA_VERSION'." >&2
