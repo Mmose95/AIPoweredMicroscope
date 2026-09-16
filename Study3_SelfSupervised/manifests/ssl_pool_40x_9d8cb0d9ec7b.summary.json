@@ -15,6 +15,7 @@
   "forbidden_specimens_scanned": 0,
   "inventory_csv": "C:\\Users\\SH37YE\\Desktop\\PhD_Code_github\\AIPoweredMicroscope\\Study3_SelfSupervised\\manifests\\ssl_pool_40x_9d8cb0d9ec7b.csv",
   "inventory_csv_sha256": "9b7da8661343bf884187e6783587cecc9e1ff724f61b574d20d721ea1ecb04df",
+  "inventory_csv_canonical_sha256": "a5ea64bbbe8549d835bf723094f18ad8067a5851a29ea00eb9b0c22ac9d2695c",
   "per_specimen": {
     "Sample_013 - 2026-08-04 16.19.56": {
       "total_images": 1443,

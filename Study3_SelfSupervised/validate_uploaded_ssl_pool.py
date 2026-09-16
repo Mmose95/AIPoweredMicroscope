@@ -22,6 +22,13 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def canonical_text_sha256(path: Path) -> str:
+    """Hash UTF-8 text after normalizing CRLF/CR newlines to LF."""
+    text = path.read_text(encoding="utf-8-sig")
+    canonical = text.replace("\r\n", "\n").replace("\r", "\n")
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
@@ -75,6 +82,13 @@ def main() -> int:
 
     expected_hash = source_summary.get("inventory_csv_sha256")
     actual_hash = sha256(manifest)
+    expected_canonical_hash = source_summary.get("inventory_csv_canonical_sha256")
+    actual_canonical_hash = canonical_text_sha256(manifest)
+    manifest_content_matches = (
+        actual_canonical_hash == expected_canonical_hash
+        if expected_canonical_hash
+        else actual_hash == expected_hash
+    )
     expected_rows = int(source_summary["n_total_ssl_eligible_images"])
     expected_specimens = int(source_summary["n_training_specimens"])
     expected_bytes = int(source_summary["total_size_bytes"])
@@ -83,7 +97,7 @@ def main() -> int:
             rows == expected_rows,
             len(specimens) == expected_specimens,
             manifest_bytes == expected_bytes,
-            actual_hash == expected_hash,
+            manifest_content_matches,
             not missing,
             not unsafe,
             not duplicates,
@@ -95,7 +109,9 @@ def main() -> int:
         "status": "passed" if passed else "failed",
         "manifest": str(manifest),
         "manifest_sha256": actual_hash,
-        "manifest_hash_matches_summary": actual_hash == expected_hash,
+        "manifest_raw_hash_matches_summary": actual_hash == expected_hash,
+        "manifest_canonical_sha256": actual_canonical_hash,
+        "manifest_content_matches_summary": manifest_content_matches,
         "image_root": str(image_root),
         "rows": rows,
         "expected_rows": expected_rows,
@@ -120,4 +136,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
