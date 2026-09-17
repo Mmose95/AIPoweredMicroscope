@@ -138,3 +138,39 @@ teacher checkpoint, distillation, and Gram-anchor settings.
 - Add one detector runner with explicit `scratch`, `own_data_ssl`, and
   `external_pretrained` initialization modes.
 - Make every run save hashes and loading reports for all initialized weights.
+# RF-DETR bridge
+
+`rfdetr_dinov3_bridge.py` installs the native DINOv3-S/16 encoder into
+RF-DETR Small. It does not convert the checkpoint into DINOv2 parameters.
+The two main study arms therefore share the same backbone and detector:
+
+- `scratch`: native DINOv3-S/16 with random weights; a checkpoint is forbidden.
+- `own_data_ssl`: the same native DINOv3-S/16 with a strictly loaded official
+  EMA-teacher backbone; a checkpoint is required and its SHA-256 is recorded.
+
+The bridge returns normalized spatial features from transformer blocks
+`[2, 5, 8, 11]`, each with 384 channels. These match the existing RF-DETR
+Small projector. RF-DETR must be instantiated with `pretrain_weights=None`;
+the bridge rejects either main arm if a detector checkpoint is configured.
+
+Local SSL checkpoint smoke test:
+
+```bash
+python Study3_SelfSupervised/smoke_test_rfdetr_dinov3_bridge.py \
+  --initialization own_data_ssl \
+  --checkpoint "/path/to/eval/training_81623/teacher_checkpoint.pth" \
+  --dinov3-repo "/path/to/dinov3" \
+  --device cuda
+```
+
+Add `--test-rfdetr` after installing `rfdetr` to verify replacement inside a
+complete RF-DETR Small object. Run the corresponding control without a
+checkpoint:
+
+```bash
+python Study3_SelfSupervised/smoke_test_rfdetr_dinov3_bridge.py \
+  --initialization scratch \
+  --dinov3-repo "/path/to/dinov3" \
+  --device cuda \
+  --test-rfdetr
+```
