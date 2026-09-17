@@ -8,7 +8,11 @@ from pathlib import Path
 
 import torch
 
-from rfdetr_dinov3_bridge import DinoV3FeatureEncoder, install_dinov3_encoder
+from rfdetr_dinov3_bridge import (
+    DinoV3FeatureEncoder,
+    install_dinov3_encoder,
+    patch_rfdetr_training_rebuild,
+)
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -87,6 +91,28 @@ def main() -> int:
         result["rfdetr_installed"] = True
         result["rfdetr_feature_shapes"] = [list(feature.shape) for feature in installed_features]
         result["same_encoder_object"] = rf_model.model.model.backbone[0].encoder is installed
+
+        # RF-DETR 1.9 creates a fresh detector inside train(). Verify that the
+        # scoped training hook replaces that newly built encoder as well.
+        from rfdetr.training import RFDETRModelModule
+
+        train_config = rf_model.get_train_config(dataset_dir=".", output_dir=".")
+        with patch_rfdetr_training_rebuild(
+            dinov3_repo=args.dinov3_repo,
+            initialization=args.initialization,
+            checkpoint=args.checkpoint,
+        ):
+            training_module = RFDETRModelModule(rf_model.model_config, train_config)
+        rebuilt_encoder = training_module.model.backbone[0].encoder.to(device)
+        rebuilt_features = rebuilt_encoder(images.detach())
+        result["training_rebuild_intercepted"] = isinstance(
+            rebuilt_encoder,
+            DinoV3FeatureEncoder,
+        )
+        result["training_rebuild_initialization"] = rebuilt_encoder.provenance.initialization
+        result["training_rebuild_feature_shapes"] = [
+            list(feature.shape) for feature in rebuilt_features
+        ]
 
     print(json.dumps(result, indent=2))
     return 0

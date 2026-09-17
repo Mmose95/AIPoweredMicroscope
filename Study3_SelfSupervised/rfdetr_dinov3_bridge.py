@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import types
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, Sequence
@@ -217,10 +218,36 @@ def install_dinov3_encoder(
     """
     try:
         detector = rf_model.model.model
-        rf_backbone = detector.backbone[0]
-    except (AttributeError, IndexError, TypeError) as exc:
+    except AttributeError as exc:
         raise TypeError("Unsupported RF-DETR object; expected rf_model.model.model.backbone[0]") from exc
     detector_pretrain = getattr(getattr(rf_model, "model_config", None), "pretrain_weights", None)
+    return install_dinov3_encoder_on_detector(
+        detector,
+        dinov3_repo=dinov3_repo,
+        initialization=initialization,
+        checkpoint=checkpoint,
+        architecture=architecture,
+        feature_layers=feature_layers,
+        detector_pretrain_weights=detector_pretrain,
+    )
+
+
+def install_dinov3_encoder_on_detector(
+    detector: nn.Module,
+    *,
+    dinov3_repo: Path,
+    initialization: Initialization,
+    checkpoint: Path | None = None,
+    architecture: str = "dinov3_vits16",
+    feature_layers: Sequence[int] = DEFAULT_FEATURE_LAYERS,
+    detector_pretrain_weights: object = None,
+) -> DinoV3FeatureEncoder:
+    """Install DINOv3 into an already-built raw RF-DETR detector module."""
+    try:
+        rf_backbone = detector.backbone[0]
+    except (AttributeError, IndexError, TypeError) as exc:
+        raise TypeError("Unsupported RF-DETR detector; expected detector.backbone[0]") from exc
+    detector_pretrain = detector_pretrain_weights
     if detector_pretrain is not None:
         raise RuntimeError(
             "The scratch and own_data_ssl arms require pretrain_weights=None; "
@@ -254,6 +281,82 @@ def install_dinov3_encoder(
     )
     rf_backbone.dinov3_bridge_provenance = encoder.provenance_dict()
     return encoder
+
+
+@contextmanager
+def patch_rfdetr_training_rebuild(
+    *,
+    dinov3_repo: Path,
+    initialization: Initialization,
+    checkpoint: Path | None = None,
+    architecture: str = "dinov3_vits16",
+    feature_layers: Sequence[int] = DEFAULT_FEATURE_LAYERS,
+):
+    """Inject DINOv3 when RF-DETR 1.9 rebuilds its Lightning training model.
+
+    RF-DETR 1.9 deliberately creates a fresh detector inside ``train()``.
+    Replacing only ``rf_model.model.model.backbone`` before calling ``train``
+    would therefore be silently discarded. This scoped patch installs the
+    requested DINOv3 encoder immediately after that fresh detector is built and
+    before Lightning constructs optimizer parameter groups.
+    """
+    from rfdetr.training import RFDETRModelModule
+
+    original_init = RFDETRModelModule.__init__
+
+    def patched_init(module_self, model_config, train_config):
+        original_init(module_self, model_config, train_config)
+        encoder = install_dinov3_encoder_on_detector(
+            module_self.model,
+            dinov3_repo=dinov3_repo,
+            initialization=initialization,
+            checkpoint=checkpoint,
+            architecture=architecture,
+            feature_layers=feature_layers,
+            detector_pretrain_weights=model_config.pretrain_weights,
+        )
+        module_self.dinov3_bridge_provenance = encoder.provenance_dict()
+
+    RFDETRModelModule.__init__ = patched_init
+    try:
+        yield
+    finally:
+        RFDETRModelModule.__init__ = original_init
+
+
+def train_rfdetr_with_dinov3(
+    rf_model,
+    *,
+    dinov3_repo: Path,
+    initialization: Initialization,
+    checkpoint: Path | None = None,
+    architecture: str = "dinov3_vits16",
+    feature_layers: Sequence[int] = DEFAULT_FEATURE_LAYERS,
+    **train_kwargs,
+) -> DinoV3FeatureEncoder:
+    """Run RF-DETR training while preserving native DINOv3 initialization."""
+    configured_pretrain = getattr(getattr(rf_model, "model_config", None), "pretrain_weights", None)
+    if configured_pretrain is not None:
+        raise RuntimeError(
+            "RF-DETR must be constructed with pretrain_weights=None for the main comparison arms"
+        )
+    with patch_rfdetr_training_rebuild(
+        dinov3_repo=dinov3_repo,
+        initialization=initialization,
+        checkpoint=checkpoint,
+        architecture=architecture,
+        feature_layers=feature_layers,
+    ):
+        rf_model.train(**train_kwargs)
+
+    trained_encoder = rf_model.model.model.backbone[0].encoder
+    if not isinstance(trained_encoder, DinoV3FeatureEncoder):
+        raise RuntimeError("RF-DETR training returned without the native DINOv3 encoder")
+    expected = initialization
+    observed = trained_encoder.provenance.initialization
+    if observed != expected:
+        raise RuntimeError(f"DINOv3 initialization changed during training: {observed!r} != {expected!r}")
+    return trained_encoder
 
 
 def write_bridge_provenance(encoder: DinoV3FeatureEncoder, output: Path) -> None:
