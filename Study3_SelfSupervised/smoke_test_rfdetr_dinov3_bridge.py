@@ -13,12 +13,20 @@ from rfdetr_dinov3_bridge import DinoV3FeatureEncoder, install_dinov3_encoder
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_DINOV3_REPO = SCRIPT_DIR.parents[1] / "dinov3"
+DEFAULT_LOCAL_CHECKPOINT = Path(
+    r"E:\PHD\Results\SSL_QA40X\dinov3_vits16_full_seed0"
+    r"\eval\training_81623\teacher_checkpoint.pth"
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dinov3-repo", type=Path, default=DEFAULT_DINOV3_REPO)
-    parser.add_argument("--initialization", choices=("scratch", "own_data_ssl"), required=True)
+    parser.add_argument(
+        "--initialization",
+        choices=("scratch", "own_data_ssl"),
+        default="own_data_ssl",
+    )
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--image-size", type=int, default=224)
@@ -33,6 +41,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.initialization == "own_data_ssl" and args.checkpoint is None:
+        args.checkpoint = DEFAULT_LOCAL_CHECKPOINT
     if args.initialization == "scratch" and args.checkpoint is not None:
         raise ValueError("--checkpoint is forbidden for scratch initialization")
     if args.initialization == "own_data_ssl" and args.checkpoint is None:
@@ -84,4 +94,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
