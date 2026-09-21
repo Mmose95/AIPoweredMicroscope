@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "experiment_name": "study3_dinov3_rfdetr_preliminary_40x",
+  "arms": ["scratch", "own_data_ssl"],
+  "seeds": [0],
+  "annotation_budgets": [1.0],
+  "model": {
+    "architecture": "dinov3_vits16",
+    "feature_layers": [2, 5, 8, 11],
+    "resolution": 512,
+    "patch_size": 16,
+    "num_queries": 200,
+    "class_names": [
+      "Leucocyte",
+      "Squamous Epithelial Cell",
+      "Columnar Epithelial Cell"
+    ]
+  },
+  "training": {
+    "epochs": 50,
+    "batch_size": 4,
+    "grad_accum_steps": 1,
+    "lr": 5e-05,
+    "weight_decay": 0.0007,
+    "num_workers": 8,
+    "checkpoint_interval": 5,
+    "amp": true,
+    "gradient_checkpointing": true
+  },
+  "selection": {
+    "split": "valid",
+    "test_during_training": false,
+    "early_stopping": false
+  }
+}
