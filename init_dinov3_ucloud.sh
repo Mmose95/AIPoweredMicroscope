@@ -135,6 +135,9 @@ fi
 echo "[DINOv3 Init] Installing official DINOv3 dependencies"
 python -m pip install -r "$DINOV3_REPO/requirements.txt"
 python -m pip install -e "$DINOV3_REPO"
+# RF-DETR is the downstream detector used by Study 3. Pin this version because
+# the DINOv3 bridge is tested against its model/training interfaces.
+python -m pip install --upgrade "rfdetr[train,augment]==1.9.1"
 python -m pip install --upgrade ipykernel
 python -m ipykernel install --user \
   --name "$ENV_NAME" --display-name "Python ($ENV_NAME)" || true

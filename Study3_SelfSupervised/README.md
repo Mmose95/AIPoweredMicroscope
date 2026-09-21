@@ -18,6 +18,48 @@ and test specimens. Annotation budgets alter only the supervised portion of the
 training set. The SSL pool may contain additional unannotated images from the
 same training specimens, but no images from validation or test specimens.
 
+## Paired detection pilot
+
+`run_detection_experiments.py` is the clean launcher for the two causal
+comparison arms: random DINOv3-S/16 plus random detector (`scratch`) and the
+own-data SSL DINOv3-S/16 backbone plus the same random detector
+(`own_data_ssl`). Settings shared by both arms live in
+`detection_experiment_config.json`.
+
+The launcher is directly runnable in PyCharm: open
+`run_detection_experiments.py` and press **Run**. It launches both configured
+pilot arms with no parameters. Use `--no-train` when you only want an audit;
+this resolves the 40x images, creates metadata-only COCO datasets, hashes the
+source annotations and SSL checkpoint, and writes both run plans without
+starting GPU training. The effective dataset contains train and validation
+metadata only. Test metadata is deliberately excluded and RF-DETR receives
+`run_test=False`.
+
+For command-line use, `--no-train` runs an audit, and `--arms scratch` or
+`--arms own_data_ssl` runs one arm. Environment variables `DINOV3_REPO`,
+`STUDY3_DETECTION_DATASET`, `IMAGE_ROOT`, `STUDY3_SSL_CHECKPOINT`, and
+`STUDY3_DETECTION_OUTPUT` override path defaults. On UCloud, the output default
+is the detected Member Files directory.
+
+### UCloud preliminary run
+
+`detection_preliminary_ucloud_config.json` defines the 50-epoch, one-GPU 40x
+preliminary experiment. It uses the full current annotation budget and runs
+the scratch and own-data SSL arms sequentially. The companion
+`run_detection_preliminary_ucloud.sh` sources the generated UCloud environment,
+checks every required input, and writes outputs below
+`$OUTPUT_ROOT/DetectionRFDETR` in Member Files. It excludes the test split.
+
+After the standard Study 3 initialization job has completed, run:
+
+```bash
+bash "$STUDY3_DIR/run_detection_preliminary_ucloud.sh"
+```
+
+If the teacher checkpoint is not located at the default persistent-output
+path, set `STUDY3_SSL_CHECKPOINT` to its exact UCloud path before running the
+command.
+
 ## Development workflow
 
 `train_ssl_dinov3.py` is intentionally a small, auditable launcher for Meta's
