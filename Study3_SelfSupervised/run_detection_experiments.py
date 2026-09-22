@@ -127,6 +127,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ssl-checkpoint", type=Path, default=defaults["ssl_checkpoint"])
     parser.add_argument("--public-ssl-weights", type=Path, default=defaults["public_ssl_weights"])
     parser.add_argument("--output-root", type=Path, default=defaults["output_root"])
+    parser.add_argument(
+        "--resume",
+        type=Path,
+        default=None,
+        help=(
+            "Resume one interrupted RF-DETR run from its own last.ckpt. The checkpoint "
+            "must be located directly inside the computed run directory."
+        ),
+    )
     parser.add_argument("--train", dest="train", action="store_true", default=RUN_TRAINING)
     parser.add_argument("--no-train", dest="train", action="store_false")
     parser.add_argument("--overwrite-plan", action="store_true", default=False)
@@ -293,7 +302,17 @@ def _run_one(
         / f"seed_{seed}"
         / budget_label
     )
-    if run_dir.exists() and any(run_dir.iterdir()) and not args.overwrite_plan:
+    resume_checkpoint = args.resume.expanduser().resolve() if args.resume else None
+    is_resume = resume_checkpoint is not None
+    if is_resume:
+        if not resume_checkpoint.is_file():
+            raise FileNotFoundError(f"Resume checkpoint not found: {resume_checkpoint}")
+        if resume_checkpoint.parent != run_dir.resolve():
+            raise ValueError(
+                "--resume must point to last.ckpt inside this arm's computed run directory. "
+                f"Expected parent: {run_dir.resolve()}, received: {resume_checkpoint.parent}"
+            )
+    if run_dir.exists() and any(run_dir.iterdir()) and not args.overwrite_plan and not is_resume:
         raise FileExistsError(
             f"Run directory is not empty: {run_dir}. Use --overwrite-plan only to replace an audit-only plan."
         )
@@ -358,6 +377,16 @@ def _run_one(
         "test_policy": "Test split is not materialized and run_test=False.",
     }
     record_path = run_dir / "run_record.json"
+    if is_resume:
+        if not record_path.is_file():
+            raise FileNotFoundError(f"Cannot resume without existing run record: {record_path}")
+        run_record = json.loads(record_path.read_text(encoding="utf-8"))
+        if run_record.get("status") == "completed":
+            raise RuntimeError("Refusing to resume a run already marked completed")
+        run_record["status"] = "resuming"
+        run_record.setdefault("resumes", []).append(
+            {"utc": _utc_now(), "checkpoint": str(resume_checkpoint)}
+        )
     _json_write(record_path, run_record)
     print(json.dumps(run_record, indent=2))
     if not args.train:
@@ -394,6 +423,7 @@ def _run_one(
             weight_decay=float(training["weight_decay"]),
             num_workers=int(training["num_workers"]),
             checkpoint_interval=int(training["checkpoint_interval"]),
+            resume=str(resume_checkpoint) if resume_checkpoint else None,
             seed=seed,
             early_stopping=False,
             run_test=False,
