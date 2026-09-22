@@ -21,7 +21,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 
-Initialization = Literal["scratch", "public_ssl", "own_data_ssl"]
+Initialization = Literal["scratch", "public_ssl", "own_data_ssl", "public_domain_ssl"]
 DEFAULT_FEATURE_LAYERS = (2, 5, 8, 11)
 
 
@@ -103,13 +103,13 @@ class DinoV3FeatureEncoder(nn.Module):
         feature_layers: Sequence[int] = DEFAULT_FEATURE_LAYERS,
     ) -> None:
         super().__init__()
-        if initialization not in ("scratch", "public_ssl", "own_data_ssl"):
+        if initialization not in ("scratch", "public_ssl", "own_data_ssl", "public_domain_ssl"):
             raise ValueError(f"Unsupported initialization: {initialization!r}")
         if initialization in ("scratch", "public_ssl") and checkpoint is not None:
             raise ValueError(f"The {initialization} arm forbids an own-data teacher checkpoint")
-        if initialization == "own_data_ssl" and checkpoint is None:
-            raise ValueError("The own_data_ssl arm requires a checkpoint")
-        if initialization == "public_ssl" and public_weights is None:
+        if initialization in ("own_data_ssl", "public_domain_ssl") and checkpoint is None:
+            raise ValueError(f"The {initialization} arm requires a teacher checkpoint")
+        if initialization in ("public_ssl", "public_domain_ssl") and public_weights is None:
             raise ValueError(
                 "The public_ssl arm requires the approved official DINOv3 weights file. "
                 "Pass public_weights after downloading it from Meta."
@@ -142,7 +142,7 @@ class DinoV3FeatureEncoder(nn.Module):
         strict_load = False
         public_weight_source: str | None = None
         public_weight_hash: str | None = None
-        if initialization == "public_ssl":
+        if initialization in ("public_ssl", "public_domain_ssl"):
             # The official hub loader loads the released LVD-1689M DINOv3-S/16
             # backbone. Record a tensor fingerprint for reproducibility.
             public_weight_path = public_weights.expanduser().resolve()
@@ -174,7 +174,7 @@ class DinoV3FeatureEncoder(nn.Module):
             strict_checkpoint_load=strict_load,
             public_pretrained_weight_source=public_weight_source,
             public_pretrained_weight_sha256=public_weight_hash,
-            external_pretrained_backbone_allowed=(initialization == "public_ssl"),
+            external_pretrained_backbone_allowed=(initialization in ("public_ssl", "public_domain_ssl")),
         )
 
     def forward(self, images: Tensor) -> list[Tensor]:

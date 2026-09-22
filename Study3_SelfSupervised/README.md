@@ -12,8 +12,11 @@ legacy/reference implementations.
 3. `own_data_ssl`: the same architecture, with the backbone initialized from
    DINOv3 self-supervised training on eligible images from training specimens.
    The detection components remain randomly initialized.
+4. `public_domain_ssl`: Meta's released DINOv3-S/16 backbone is adapted with
+   SSL on the same eligible microscopy tiles before the random RF-DETR Small
+   detector is trained.
 
-The SSL checkpoint is used only by arm 2. All arms use the same fixed validation
+The SSL teacher checkpoint is used by arms 3 and 4. All arms use the same fixed validation
 and test specimens. Annotation budgets alter only the supervised portion of the
 training set. The SSL pool may contain additional unannotated images from the
 same training specimens, but no images from validation or test specimens.
@@ -22,8 +25,8 @@ same training specimens, but no images from validation or test specimens.
 
 `run_detection_experiments.py` is the clean launcher for matched comparison
 arms. It always uses a random RF-DETR Small detector and differs only in
-DINOv3-S/16 backbone initialization: `scratch`, `public_ssl`, or
-`own_data_ssl`. Settings shared by the arms live in
+DINOv3-S/16 backbone initialization: `scratch`, `public_ssl`, `own_data_ssl`,
+or `public_domain_ssl`. Settings shared by the arms live in
 `detection_experiment_config.json`.
 
 The launcher is directly runnable in PyCharm: open
@@ -80,6 +83,25 @@ bash "$STUDY3_DIR/run_detection_public_ssl_ucloud.sh"
 
 The launcher records the weights path and SHA-256. Set
 `STUDY3_PUBLIC_SSL_WEIGHTS` if you store the file elsewhere.
+
+### UCloud arms 2 and 4
+
+`run_public_and_domain_adaptation_ucloud.sh` runs only the two pending arms:
+
+1. Arm 2: released public DINOv3-S/16 + random RF-DETR Small.
+2. Arm 4: released public DINOv3-S/16, then ten epochs of low-rate SSL
+   adaptation using only training-specimen tiles, then random RF-DETR Small.
+
+The adaptation starts with both student and EMA teacher backbones strictly
+loaded from the public file. The DINO/iBOT SSL heads are newly initialized.
+It records this in `public_backbone_initialization.json`, exports the latest
+EMA teacher, then launches the detector arm with the same 50-epoch settings as
+the other preliminary detector arms. Scratch and own-data-SSL outputs are not
+read or changed.
+
+```bash
+bash "$STUDY3_DIR/run_public_and_domain_adaptation_ucloud.sh"
+```
 
 ## Development workflow
 

@@ -31,7 +31,7 @@ REPO_ROOT = SCRIPT_DIR.parent
 # PyCharm controls. Pressing Run launches this configured paired pilot.
 # Command-line --no-train performs the same audit without starting training.
 RUN_TRAINING = True
-DEFAULT_ARMS = ("scratch", "public_ssl", "own_data_ssl")
+DEFAULT_ARMS = ("scratch", "public_ssl", "own_data_ssl", "public_domain_ssl")
 DEFAULT_CONFIG = SCRIPT_DIR / "detection_experiment_config.json"
 DEFAULT_DINOV3_REPO = REPO_ROOT.parent / "dinov3"
 DEFAULT_DATASET_DIR = (
@@ -312,11 +312,11 @@ def _run_one(
     dataset_report = _materialize_dataset(
         args.dataset_dir.resolve(), dataset_dir, args.image_root.resolve(), budget, seed
     )
-    checkpoint = args.ssl_checkpoint.resolve() if arm == "own_data_ssl" else None
-    public_weights = args.public_ssl_weights.resolve() if arm == "public_ssl" else None
-    if arm == "own_data_ssl" and not checkpoint.is_file():
-        raise FileNotFoundError(f"Own-data SSL checkpoint not found: {checkpoint}")
-    if arm == "public_ssl" and not public_weights.is_file():
+    checkpoint = args.ssl_checkpoint.resolve() if arm in ("own_data_ssl", "public_domain_ssl") else None
+    public_weights = args.public_ssl_weights.resolve() if arm in ("public_ssl", "public_domain_ssl") else None
+    if arm in ("own_data_ssl", "public_domain_ssl") and not checkpoint.is_file():
+        raise FileNotFoundError(f"SSL teacher checkpoint not found: {checkpoint}")
+    if arm in ("public_ssl", "public_domain_ssl") and not public_weights.is_file():
         raise FileNotFoundError(
             "Official public DINOv3 weights not found. Request Meta access, download "
             "dinov3_vits16_pretrain_lvd1689m-08c60483.pth, then pass --public-ssl-weights. "
@@ -345,9 +345,10 @@ def _run_one(
                 "scratch": "random",
                 "public_ssl": "official_dinov3_vits16_lvd1689m",
                 "own_data_ssl": "own_data_ssl_ema_teacher",
+                "public_domain_ssl": "official_dinov3_then_domain_ssl_ema_teacher",
             }[arm],
             "detector": "random",
-            "external_pretrained_weights": arm == "public_ssl",
+            "external_pretrained_weights": arm in ("public_ssl", "public_domain_ssl"),
             "checkpoint": str(checkpoint) if checkpoint else None,
             "checkpoint_sha256": _sha256(checkpoint) if checkpoint else None,
             "public_weights": str(public_weights) if public_weights else None,

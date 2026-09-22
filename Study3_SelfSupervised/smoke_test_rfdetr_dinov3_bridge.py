@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dinov3-repo", type=Path, default=DEFAULT_DINOV3_REPO)
     parser.add_argument(
         "--initialization",
-        choices=("scratch", "public_ssl", "own_data_ssl"),
+        choices=("scratch", "public_ssl", "own_data_ssl", "public_domain_ssl"),
         default="own_data_ssl",
     )
     parser.add_argument("--checkpoint", type=Path)
@@ -46,14 +46,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    if args.initialization == "own_data_ssl" and args.checkpoint is None:
+    if args.initialization in ("own_data_ssl", "public_domain_ssl") and args.checkpoint is None:
         args.checkpoint = DEFAULT_LOCAL_CHECKPOINT
     if args.initialization in ("scratch", "public_ssl") and args.checkpoint is not None:
         raise ValueError("--checkpoint is forbidden for scratch or public_ssl initialization")
-    if args.initialization == "own_data_ssl" and args.checkpoint is None:
-        raise ValueError("--checkpoint is required for own_data_ssl initialization")
-    if args.initialization == "public_ssl" and args.public_ssl_weights is None:
-        raise ValueError("--public-ssl-weights is required for public_ssl initialization")
+    if args.initialization in ("own_data_ssl", "public_domain_ssl") and args.checkpoint is None:
+        raise ValueError("--checkpoint is required for own_data_ssl or public_domain_ssl")
+    if args.initialization in ("public_ssl", "public_domain_ssl") and args.public_ssl_weights is None:
+        raise ValueError("--public-ssl-weights is required for public_ssl or public_domain_ssl")
     device = "cuda" if args.device == "auto" and torch.cuda.is_available() else args.device
     if device == "auto":
         device = "cpu"
