@@ -1,4 +1,4 @@
-"""Run paired RF-DETR experiments with scratch or own-data SSL DINOv3.
+"""Run matched RF-DETR experiments with scratch, public, or own-data SSL DINOv3.
 
 Open this file in PyCharm and press Run. It launches the configured paired
 pilot without command-line arguments. Use ``--no-train`` only when you want to
@@ -31,7 +31,7 @@ REPO_ROOT = SCRIPT_DIR.parent
 # PyCharm controls. Pressing Run launches this configured paired pilot.
 # Command-line --no-train performs the same audit without starting training.
 RUN_TRAINING = True
-DEFAULT_ARMS = ("scratch", "own_data_ssl")
+DEFAULT_ARMS = ("scratch", "public_ssl", "own_data_ssl")
 DEFAULT_CONFIG = SCRIPT_DIR / "detection_experiment_config.json"
 DEFAULT_DINOV3_REPO = REPO_ROOT.parent / "dinov3"
 DEFAULT_DATASET_DIR = (
@@ -111,6 +111,7 @@ def _defaults() -> dict[str, Path]:
         "dataset_dir": _path_from_env("STUDY3_DETECTION_DATASET", DEFAULT_DATASET_DIR),
         "image_root": _path_from_env("IMAGE_ROOT", image_fallback),
         "ssl_checkpoint": _path_from_env("STUDY3_SSL_CHECKPOINT", checkpoint_fallback),
+        "public_ssl_weights": _path_from_env("STUDY3_PUBLIC_SSL_WEIGHTS", Path()),
         "output_root": _path_from_env("STUDY3_DETECTION_OUTPUT", output_fallback),
     }
 
@@ -124,10 +125,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-dir", type=Path, default=defaults["dataset_dir"])
     parser.add_argument("--image-root", type=Path, default=defaults["image_root"])
     parser.add_argument("--ssl-checkpoint", type=Path, default=defaults["ssl_checkpoint"])
+    parser.add_argument("--public-ssl-weights", type=Path, default=defaults["public_ssl_weights"])
     parser.add_argument("--output-root", type=Path, default=defaults["output_root"])
     parser.add_argument("--train", dest="train", action="store_true", default=RUN_TRAINING)
     parser.add_argument("--no-train", dest="train", action="store_false")
-    parser.add_argument("--overwrite-plan", action="store_true", default="--overwrite-plan") #<---- hackjob of a way to call --overwrite-plan when initing from pycharm.
+    parser.add_argument("--overwrite-plan", action="store_true", default=False)
     return parser.parse_args()
 
 
@@ -258,9 +260,10 @@ def _seed_everything(seed: int) -> None:
 
 
 def _validate_config(config: dict) -> None:
-    expected_arms = {"scratch", "own_data_ssl"}
-    if set(config.get("arms", [])) != expected_arms:
-        raise ValueError(f"Config must contain exactly the paired arms {sorted(expected_arms)}")
+    supported_arms = set(DEFAULT_ARMS)
+    configured_arms = set(config.get("arms", []))
+    if not configured_arms or not configured_arms <= supported_arms:
+        raise ValueError(f"Config arms must be a non-empty subset of {sorted(supported_arms)}")
     if config.get("selection", {}).get("split") != "valid":
         raise ValueError("Checkpoint selection must use the validation split")
     if config.get("selection", {}).get("test_during_training") is not False:
@@ -310,8 +313,15 @@ def _run_one(
         args.dataset_dir.resolve(), dataset_dir, args.image_root.resolve(), budget, seed
     )
     checkpoint = args.ssl_checkpoint.resolve() if arm == "own_data_ssl" else None
+    public_weights = args.public_ssl_weights.resolve() if arm == "public_ssl" else None
     if arm == "own_data_ssl" and not checkpoint.is_file():
         raise FileNotFoundError(f"Own-data SSL checkpoint not found: {checkpoint}")
+    if arm == "public_ssl" and not public_weights.is_file():
+        raise FileNotFoundError(
+            "Official public DINOv3 weights not found. Request Meta access, download "
+            "dinov3_vits16_pretrain_lvd1689m-08c60483.pth, then pass --public-ssl-weights. "
+            f"Received: {public_weights}"
+        )
     if arm == "scratch" and checkpoint is not None:
         raise AssertionError("Scratch arm unexpectedly received a checkpoint")
 
@@ -331,11 +341,17 @@ def _run_one(
             "output": str(run_dir.resolve()),
         },
         "initialization": {
-            "backbone": "random" if arm == "scratch" else "own_data_ssl_ema_teacher",
+            "backbone": {
+                "scratch": "random",
+                "public_ssl": "official_dinov3_vits16_lvd1689m",
+                "own_data_ssl": "own_data_ssl_ema_teacher",
+            }[arm],
             "detector": "random",
-            "external_pretrained_weights": False,
+            "external_pretrained_weights": arm == "public_ssl",
             "checkpoint": str(checkpoint) if checkpoint else None,
             "checkpoint_sha256": _sha256(checkpoint) if checkpoint else None,
+            "public_weights": str(public_weights) if public_weights else None,
+            "public_weights_sha256": _sha256(public_weights) if public_weights else None,
         },
         "dataset": dataset_report,
         "test_policy": "Test split is not materialized and run_test=False.",
@@ -364,6 +380,7 @@ def _run_one(
             dinov3_repo=args.dinov3_repo.resolve(),
             initialization=arm,
             checkpoint=checkpoint,
+            public_weights=public_weights,
             architecture=model_config["architecture"],
             feature_layers=tuple(model_config["feature_layers"]),
             dataset_dir=str(dataset_dir.resolve()),
@@ -381,6 +398,7 @@ def _run_one(
             run_test=False,
         )
         write_bridge_provenance(encoder, run_dir / "backbone_provenance.json")
+        run_record["backbone_provenance"] = encoder.provenance_dict()
         run_record["status"] = "completed"
         run_record["completed_utc"] = _utc_now()
     except BaseException as exc:

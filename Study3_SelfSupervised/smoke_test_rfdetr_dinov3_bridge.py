@@ -28,10 +28,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dinov3-repo", type=Path, default=DEFAULT_DINOV3_REPO)
     parser.add_argument(
         "--initialization",
-        choices=("scratch", "own_data_ssl"),
+        choices=("scratch", "public_ssl", "own_data_ssl"),
         default="own_data_ssl",
     )
     parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument("--public-ssl-weights", type=Path)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--image-size", type=int, default=224)
     parser.add_argument("--batch-size", type=int, default=2)
@@ -47,10 +48,12 @@ def main() -> int:
     args = parse_args()
     if args.initialization == "own_data_ssl" and args.checkpoint is None:
         args.checkpoint = DEFAULT_LOCAL_CHECKPOINT
-    if args.initialization == "scratch" and args.checkpoint is not None:
-        raise ValueError("--checkpoint is forbidden for scratch initialization")
+    if args.initialization in ("scratch", "public_ssl") and args.checkpoint is not None:
+        raise ValueError("--checkpoint is forbidden for scratch or public_ssl initialization")
     if args.initialization == "own_data_ssl" and args.checkpoint is None:
         raise ValueError("--checkpoint is required for own_data_ssl initialization")
+    if args.initialization == "public_ssl" and args.public_ssl_weights is None:
+        raise ValueError("--public-ssl-weights is required for public_ssl initialization")
     device = "cuda" if args.device == "auto" and torch.cuda.is_available() else args.device
     if device == "auto":
         device = "cpu"
@@ -59,6 +62,7 @@ def main() -> int:
         dinov3_repo=args.dinov3_repo,
         initialization=args.initialization,
         checkpoint=args.checkpoint,
+        public_weights=args.public_ssl_weights,
     ).to(device)
     images = torch.randn(args.batch_size, 3, args.image_size, args.image_size, device=device)
     features = encoder(images)
@@ -86,6 +90,7 @@ def main() -> int:
             dinov3_repo=args.dinov3_repo,
             initialization=args.initialization,
             checkpoint=args.checkpoint,
+            public_weights=args.public_ssl_weights,
         ).to(device)
         installed_features = installed(images.detach())
         result["rfdetr_installed"] = True
@@ -101,6 +106,7 @@ def main() -> int:
             dinov3_repo=args.dinov3_repo,
             initialization=args.initialization,
             checkpoint=args.checkpoint,
+            public_weights=args.public_ssl_weights,
         ):
             training_module = RFDETRModelModule(rf_model.model_config, train_config)
         rebuilt_encoder = training_module.model.backbone[0].encoder.to(device)

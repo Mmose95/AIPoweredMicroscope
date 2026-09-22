@@ -21,7 +21,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 
-Initialization = Literal["scratch", "own_data_ssl"]
+Initialization = Literal["scratch", "public_ssl", "own_data_ssl"]
 DEFAULT_FEATURE_LAYERS = (2, 5, 8, 11)
 
 
@@ -35,6 +35,8 @@ class BridgeProvenance:
     checkpoint: str | None
     checkpoint_sha256: str | None
     strict_checkpoint_load: bool
+    public_pretrained_weight_source: str | None = None
+    public_pretrained_weight_sha256: str | None = None
     external_pretrained_backbone_allowed: bool = False
 
 
@@ -64,16 +66,26 @@ def extract_teacher_backbone_state(payload: object) -> dict[str, Tensor]:
     return state
 
 
-def _load_dinov3_model(dinov3_repo: Path, architecture: str) -> nn.Module:
+def _load_dinov3_model(
+    dinov3_repo: Path,
+    architecture: str,
+    *,
+    pretrained: bool = False,
+    weights: Path | None = None,
+) -> nn.Module:
     repo = dinov3_repo.expanduser().resolve()
     if not (repo / "hubconf.py").is_file():
         raise FileNotFoundError(f"Invalid DINOv3 repository (hubconf.py missing): {repo}")
+    kwargs = {}
+    if weights is not None:
+        kwargs["weights"] = str(weights.expanduser().resolve())
     return torch.hub.load(
         str(repo),
         architecture,
         source="local",
-        pretrained=False,
+        pretrained=pretrained,
         trust_repo=True,
+        **kwargs,
     )
 
 
@@ -86,22 +98,35 @@ class DinoV3FeatureEncoder(nn.Module):
         dinov3_repo: Path,
         initialization: Initialization,
         checkpoint: Path | None = None,
+        public_weights: Path | None = None,
         architecture: str = "dinov3_vits16",
         feature_layers: Sequence[int] = DEFAULT_FEATURE_LAYERS,
     ) -> None:
         super().__init__()
-        if initialization not in ("scratch", "own_data_ssl"):
+        if initialization not in ("scratch", "public_ssl", "own_data_ssl"):
             raise ValueError(f"Unsupported initialization: {initialization!r}")
-        if initialization == "scratch" and checkpoint is not None:
-            raise ValueError("The scratch arm forbids a checkpoint")
+        if initialization in ("scratch", "public_ssl") and checkpoint is not None:
+            raise ValueError(f"The {initialization} arm forbids an own-data teacher checkpoint")
         if initialization == "own_data_ssl" and checkpoint is None:
             raise ValueError("The own_data_ssl arm requires a checkpoint")
+        if initialization == "public_ssl" and public_weights is None:
+            raise ValueError(
+                "The public_ssl arm requires the approved official DINOv3 weights file. "
+                "Pass public_weights after downloading it from Meta."
+            )
 
         layers = tuple(int(index) for index in feature_layers)
         if not layers or sorted(set(layers)) != list(layers):
             raise ValueError("feature_layers must be unique and strictly increasing")
 
-        self.backbone = _load_dinov3_model(dinov3_repo, architecture)
+        if public_weights is not None and not public_weights.expanduser().is_file():
+            raise FileNotFoundError(f"Official DINOv3 weights not found: {public_weights}")
+        self.backbone = _load_dinov3_model(
+            dinov3_repo,
+            architecture,
+            pretrained=(initialization == "public_ssl"),
+            weights=public_weights,
+        )
         depth = len(self.backbone.blocks)
         if layers[0] < 0 or layers[-1] >= depth:
             raise ValueError(f"feature_layers {layers} fall outside DINOv3 depth {depth}")
@@ -115,6 +140,14 @@ class DinoV3FeatureEncoder(nn.Module):
         checkpoint_path: Path | None = None
         checkpoint_hash: str | None = None
         strict_load = False
+        public_weight_source: str | None = None
+        public_weight_hash: str | None = None
+        if initialization == "public_ssl":
+            # The official hub loader loads the released LVD-1689M DINOv3-S/16
+            # backbone. Record a tensor fingerprint for reproducibility.
+            public_weight_path = public_weights.expanduser().resolve()
+            public_weight_source = str(public_weight_path)
+            public_weight_hash = sha256_file(public_weight_path)
         if checkpoint is not None:
             checkpoint_path = checkpoint.expanduser().resolve()
             if not checkpoint_path.is_file():
@@ -139,6 +172,9 @@ class DinoV3FeatureEncoder(nn.Module):
             checkpoint=str(checkpoint_path) if checkpoint_path else None,
             checkpoint_sha256=checkpoint_hash,
             strict_checkpoint_load=strict_load,
+            public_pretrained_weight_source=public_weight_source,
+            public_pretrained_weight_sha256=public_weight_hash,
+            external_pretrained_backbone_allowed=(initialization == "public_ssl"),
         )
 
     def forward(self, images: Tensor) -> list[Tensor]:
@@ -208,6 +244,7 @@ def install_dinov3_encoder(
     dinov3_repo: Path,
     initialization: Initialization,
     checkpoint: Path | None = None,
+    public_weights: Path | None = None,
     architecture: str = "dinov3_vits16",
     feature_layers: Sequence[int] = DEFAULT_FEATURE_LAYERS,
 ) -> DinoV3FeatureEncoder:
@@ -226,6 +263,7 @@ def install_dinov3_encoder(
         dinov3_repo=dinov3_repo,
         initialization=initialization,
         checkpoint=checkpoint,
+        public_weights=public_weights,
         architecture=architecture,
         feature_layers=feature_layers,
         detector_pretrain_weights=detector_pretrain,
@@ -238,6 +276,7 @@ def install_dinov3_encoder_on_detector(
     dinov3_repo: Path,
     initialization: Initialization,
     checkpoint: Path | None = None,
+    public_weights: Path | None = None,
     architecture: str = "dinov3_vits16",
     feature_layers: Sequence[int] = DEFAULT_FEATURE_LAYERS,
     detector_pretrain_weights: object = None,
@@ -250,7 +289,7 @@ def install_dinov3_encoder_on_detector(
     detector_pretrain = detector_pretrain_weights
     if detector_pretrain is not None:
         raise RuntimeError(
-            "The scratch and own_data_ssl arms require pretrain_weights=None; "
+            "All comparison arms require pretrain_weights=None; "
             f"RF-DETR reports {detector_pretrain!r}"
         )
 
@@ -258,6 +297,7 @@ def install_dinov3_encoder_on_detector(
         dinov3_repo=dinov3_repo,
         initialization=initialization,
         checkpoint=checkpoint,
+        public_weights=public_weights,
         architecture=architecture,
         feature_layers=feature_layers,
     )
@@ -289,6 +329,7 @@ def patch_rfdetr_training_rebuild(
     dinov3_repo: Path,
     initialization: Initialization,
     checkpoint: Path | None = None,
+    public_weights: Path | None = None,
     architecture: str = "dinov3_vits16",
     feature_layers: Sequence[int] = DEFAULT_FEATURE_LAYERS,
 ):
@@ -311,6 +352,7 @@ def patch_rfdetr_training_rebuild(
             dinov3_repo=dinov3_repo,
             initialization=initialization,
             checkpoint=checkpoint,
+            public_weights=public_weights,
             architecture=architecture,
             feature_layers=feature_layers,
             detector_pretrain_weights=model_config.pretrain_weights,
@@ -330,6 +372,7 @@ def train_rfdetr_with_dinov3(
     dinov3_repo: Path,
     initialization: Initialization,
     checkpoint: Path | None = None,
+    public_weights: Path | None = None,
     architecture: str = "dinov3_vits16",
     feature_layers: Sequence[int] = DEFAULT_FEATURE_LAYERS,
     **train_kwargs,
@@ -344,6 +387,7 @@ def train_rfdetr_with_dinov3(
         dinov3_repo=dinov3_repo,
         initialization=initialization,
         checkpoint=checkpoint,
+        public_weights=public_weights,
         architecture=architecture,
         feature_layers=feature_layers,
     ):

@@ -7,11 +7,11 @@ legacy/reference implementations.
 ## Experimental arms
 
 1. `scratch`: DINOv3 backbone and detection transformer initialized randomly.
-2. `own_data_ssl`: the same architecture, with the backbone initialized from
+2. `public_ssl`: the same DINOv3-S/16 backbone initialized from Meta's
+   released LVD-1689M weights; the RF-DETR Small detector remains random.
+3. `own_data_ssl`: the same architecture, with the backbone initialized from
    DINOv3 self-supervised training on eligible images from training specimens.
    The detection components remain randomly initialized.
-3. `external_pretrained`: a released pretrained detector/backbone used as the
-   practical reference.
 
 The SSL checkpoint is used only by arm 2. All arms use the same fixed validation
 and test specimens. Annotation budgets alter only the supervised portion of the
@@ -20,10 +20,10 @@ same training specimens, but no images from validation or test specimens.
 
 ## Paired detection pilot
 
-`run_detection_experiments.py` is the clean launcher for the two causal
-comparison arms: random DINOv3-S/16 plus random detector (`scratch`) and the
-own-data SSL DINOv3-S/16 backbone plus the same random detector
-(`own_data_ssl`). Settings shared by both arms live in
+`run_detection_experiments.py` is the clean launcher for matched comparison
+arms. It always uses a random RF-DETR Small detector and differs only in
+DINOv3-S/16 backbone initialization: `scratch`, `public_ssl`, or
+`own_data_ssl`. Settings shared by the arms live in
 `detection_experiment_config.json`.
 
 The launcher is directly runnable in PyCharm: open
@@ -36,9 +36,9 @@ metadata only. Test metadata is deliberately excluded and RF-DETR receives
 `run_test=False`.
 
 For command-line use, `--no-train` runs an audit, and `--arms scratch` or
-`--arms own_data_ssl` runs one arm. Environment variables `DINOV3_REPO`,
+`--arms own_data_ssl` or `--arms public_ssl` runs one arm. Environment variables `DINOV3_REPO`,
 `STUDY3_DETECTION_DATASET`, `IMAGE_ROOT`, `STUDY3_SSL_CHECKPOINT`, and
-`STUDY3_DETECTION_OUTPUT` override path defaults. On UCloud, the output default
+`STUDY3_PUBLIC_SSL_WEIGHTS`, and `STUDY3_DETECTION_OUTPUT` override path defaults. On UCloud, the output default
 is the detected Member Files directory.
 
 ### UCloud preliminary run
@@ -59,6 +59,27 @@ bash "$STUDY3_DIR/run_detection_preliminary_ucloud.sh"
 If the teacher checkpoint is not located at the default persistent-output
 path, set `STUDY3_SSL_CHECKPOINT` to its exact UCloud path before running the
 command.
+
+### UCloud public-pretrained arm
+
+`detection_public_ssl_ucloud_config.json` runs only arm 2 with the same
+50-epoch settings, seed, annotation budget, DINOv3-S/16 backbone, and RF-DETR
+Small head as the preliminary comparison. Meta requires approved access to the
+released DINOv3 weights. After approval, download
+`dinov3_vits16_pretrain_lvd1689m-08c60483.pth` and upload it to:
+
+```text
+$OUTPUT_ROOT/public_weights/dinov3_vits16_pretrain_lvd1689m-08c60483.pth
+```
+
+Then run:
+
+```bash
+bash "$STUDY3_DIR/run_detection_public_ssl_ucloud.sh"
+```
+
+The launcher records the weights path and SHA-256. Set
+`STUDY3_PUBLIC_SSL_WEIGHTS` if you store the file elsewhere.
 
 ## Development workflow
 
@@ -177,16 +198,17 @@ teacher checkpoint, distillation, and Gram-anchor settings.
   validation, and test data.
 - Select a feasible DINOv3 architecture/configuration after checking available
   GPUs and the number of unique training images.
-- Add one detector runner with explicit `scratch`, `own_data_ssl`, and
-  `external_pretrained` initialization modes.
+- Run the three matched detection arms across planned annotation fractions.
 - Make every run save hashes and loading reports for all initialized weights.
 # RF-DETR bridge
 
 `rfdetr_dinov3_bridge.py` installs the native DINOv3-S/16 encoder into
 RF-DETR Small. It does not convert the checkpoint into DINOv2 parameters.
-The two main study arms therefore share the same backbone and detector:
+The three study arms share the same backbone architecture and detector:
 
 - `scratch`: native DINOv3-S/16 with random weights; a checkpoint is forbidden.
+- `public_ssl`: native DINOv3-S/16 loaded from Meta's approved released weight
+  file; the RF-DETR detector remains random.
 - `own_data_ssl`: the same native DINOv3-S/16 with a strictly loaded official
   EMA-teacher backbone; a checkpoint is required and its SHA-256 is recorded.
 
