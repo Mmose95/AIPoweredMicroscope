@@ -328,9 +328,21 @@ def _run_one(
             )
     run_dir.mkdir(parents=True, exist_ok=True)
     dataset_dir = run_dir / "effective_dataset"
-    dataset_report = _materialize_dataset(
-        args.dataset_dir.resolve(), dataset_dir, args.image_root.resolve(), budget, seed
-    )
+    record_path = run_dir / "run_record.json"
+    existing_run_record: dict[str, Any] | None = None
+    if is_resume:
+        if not record_path.is_file():
+            raise FileNotFoundError(f"Cannot resume without existing run record: {record_path}")
+        if not dataset_dir.is_dir():
+            raise FileNotFoundError(f"Cannot resume without the original effective dataset: {dataset_dir}")
+        existing_run_record = json.loads(record_path.read_text(encoding="utf-8"))
+        if existing_run_record.get("configuration_fingerprint") != config_fingerprint:
+            raise RuntimeError("Resume configuration does not match the original run configuration")
+        dataset_report = existing_run_record["dataset"]
+    else:
+        dataset_report = _materialize_dataset(
+            args.dataset_dir.resolve(), dataset_dir, args.image_root.resolve(), budget, seed
+        )
     checkpoint = args.ssl_checkpoint.resolve() if arm in ("own_data_ssl", "public_domain_ssl") else None
     public_weights = args.public_ssl_weights.resolve() if arm in ("public_ssl", "public_domain_ssl") else None
     if arm in ("own_data_ssl", "public_domain_ssl") and not checkpoint.is_file():
@@ -376,11 +388,9 @@ def _run_one(
         "dataset": dataset_report,
         "test_policy": "Test split is not materialized and run_test=False.",
     }
-    record_path = run_dir / "run_record.json"
     if is_resume:
-        if not record_path.is_file():
-            raise FileNotFoundError(f"Cannot resume without existing run record: {record_path}")
-        run_record = json.loads(record_path.read_text(encoding="utf-8"))
+        assert existing_run_record is not None
+        run_record = existing_run_record
         if run_record.get("status") == "completed":
             raise RuntimeError("Refusing to resume a run already marked completed")
         run_record["status"] = "resuming"
