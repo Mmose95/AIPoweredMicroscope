@@ -24,6 +24,7 @@ resolve_public_weights() {
     "${OUTPUT_ROOT:-/work/DINOv3_Study3_OUTPUT}/public_weights/$WEIGHTS_FILENAME"
     /work/Member\ Files:*/Checkpoints/Pretrained_Models/"$WEIGHTS_FILENAME"
     /work/Checkpoints/Pretrained_Models/"$WEIGHTS_FILENAME"
+    /work/Pretrained_Models/"$WEIGHTS_FILENAME"
   )
   shopt -u nullglob
   local candidate
