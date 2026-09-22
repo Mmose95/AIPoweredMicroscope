@@ -12,7 +12,35 @@ IMAGE_ROOT="${IMAGE_ROOT:-/work/40x Input tiles for CVAT}"
 MANIFEST="${FULL_MANIFEST:-$STUDY3_DIR/manifests/ssl_pool_40x_9d8cb0d9ec7b.csv}"
 DATASET_DIR="${STUDY3_DETECTION_DATASET:-$PROJECT_DIR/SOLO_Supervised_RFDETR/Stat_Dataset40x/QA_40x-_20260901-135953}"
 RUN_OUTPUT_ROOT="${STUDY3_DETECTION_OUTPUT:-${OUTPUT_ROOT:-/work/DINOv3_Study3_OUTPUT}/DetectionRFDETR}"
-PUBLIC_WEIGHTS="${STUDY3_PUBLIC_SSL_WEIGHTS:-${OUTPUT_ROOT:-/work/DINOv3_Study3_OUTPUT}/public_weights/dinov3_vits16_pretrain_lvd1689m-08c60483.pth}"
+WEIGHTS_FILENAME="dinov3_vits16_pretrain_lvd1689m-08c60483.pth"
+
+resolve_public_weights() {
+  if [[ -n "${STUDY3_PUBLIC_SSL_WEIGHTS:-}" ]]; then
+    printf '%s\n' "$STUDY3_PUBLIC_SSL_WEIGHTS"
+    return 0
+  fi
+  shopt -s nullglob
+  local candidates=(
+    "${OUTPUT_ROOT:-/work/DINOv3_Study3_OUTPUT}/public_weights/$WEIGHTS_FILENAME"
+    /work/Member\ Files:*/Checkpoints/Pretrained_Models/"$WEIGHTS_FILENAME"
+    /work/Checkpoints/Pretrained_Models/"$WEIGHTS_FILENAME"
+  )
+  shopt -u nullglob
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [[ -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if ! PUBLIC_WEIGHTS="$(resolve_public_weights)"; then
+  echo "[Study3 arms 2+4][ERROR] Could not locate $WEIGHTS_FILENAME." >&2
+  echo "Attach the Pretrained_Models folder when starting the job, or set STUDY3_PUBLIC_SSL_WEIGHTS." >&2
+  exit 1
+fi
 ADAPTATION_OUTPUT="${STUDY3_PUBLIC_ADAPTATION_OUTPUT:-${OUTPUT_ROOT:-/work/DINOv3_Study3_OUTPUT}/dinov3_vits16_public_domain_adaptation_seed0}"
 ADAPTATION_CONFIG="${STUDY3_PUBLIC_ADAPTATION_CONFIG:-$STUDY3_DIR/configs/dinov3_vits16_public_domain_adaptation_1gpu.yaml}"
 GPUS="${STUDY3_PUBLIC_ADAPTATION_GPUS:-1}"
