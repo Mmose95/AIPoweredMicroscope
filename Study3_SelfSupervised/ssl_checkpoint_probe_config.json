@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "experiment_name": "study3_own_ssl_checkpoint_probe_40x",
+  "arms": ["own_data_ssl"],
+  "seeds": [0],
+  "annotation_budgets": [1.0],
+  "model": {
+    "architecture": "dinov3_vits16",
+    "feature_layers": [2, 5, 8, 11],
+    "resolution": 512,
+    "patch_size": 16,
+    "num_queries": 200,
+    "freeze_encoder": true,
+    "class_names": [
+      "Leucocyte",
+      "Squamous Epithelial Cell",
+      "Columnar Epithelial Cell"
+    ]
+  },
+  "training": {
+    "epochs": 10,
+    "batch_size": 4,
+    "grad_accum_steps": 1,
+    "lr": 0.0001,
+    "weight_decay": 0.0007,
+    "num_workers": 8,
+    "checkpoint_interval": 10,
+    "amp": true,
+    "gradient_checkpointing": false
+  },
+  "selection": {
+    "split": "valid",
+    "metric": "val/ema_mAP_50_95",
+    "test_during_training": false,
+    "early_stopping": false
+  },
+  "probe": {
+    "type": "frozen_backbone_detection_probe",
+    "checkpoint_stride_ssl_epochs": 5,
+    "include_first_checkpoint": true,
+    "include_final_checkpoint": true,
+    "primary_metric": "val/ema_mAP_50_95",
+    "tie_break_metric": "val/ema_mAP_50"
+  }
+}

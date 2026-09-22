@@ -414,6 +414,7 @@ def _run_one(
             patch_size=int(model_config["patch_size"]),
             num_queries=int(model_config["num_queries"]),
             gradient_checkpointing=bool(training["gradient_checkpointing"]),
+            freeze_encoder=bool(model_config.get("freeze_encoder", False)),
         )
         encoder = train_rfdetr_with_dinov3(
             rf_model,
@@ -440,6 +441,22 @@ def _run_one(
         )
         write_bridge_provenance(encoder, run_dir / "backbone_provenance.json")
         run_record["backbone_provenance"] = encoder.provenance_dict()
+        trainable_encoder_parameters = sum(
+            parameter.numel() for parameter in encoder.parameters() if parameter.requires_grad
+        )
+        run_record["training_audit"] = {
+            "freeze_encoder_requested": bool(model_config.get("freeze_encoder", False)),
+            "trainable_encoder_parameters_after_training": trainable_encoder_parameters,
+            "encoder_frozen_verified": (
+                trainable_encoder_parameters == 0
+                if bool(model_config.get("freeze_encoder", False))
+                else None
+            ),
+        }
+        if bool(model_config.get("freeze_encoder", False)) and trainable_encoder_parameters != 0:
+            raise RuntimeError(
+                "Frozen-backbone run completed with trainable DINOv3 encoder parameters"
+            )
         run_record["status"] = "completed"
         run_record["completed_utc"] = _utc_now()
     except BaseException as exc:

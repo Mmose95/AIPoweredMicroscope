@@ -41,6 +41,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Also instantiate RF-DETR Small and replace its complete encoder.",
     )
+    parser.add_argument(
+        "--freeze-encoder",
+        action="store_true",
+        help="Verify that the bridged DINOv3 encoder remains frozen during RF-DETR rebuild.",
+    )
     return parser.parse_args()
 
 
@@ -84,18 +89,27 @@ def main() -> int:
 
         # RF-DETR does not load a detector checkpoint when pretrain_weights=None.
         # Its temporary encoder is replaced in full immediately below.
-        rf_model = RFDETRSmall(pretrain_weights=None, resolution=args.image_size, patch_size=16)
+        rf_model = RFDETRSmall(
+            pretrain_weights=None,
+            resolution=args.image_size,
+            patch_size=16,
+            freeze_encoder=args.freeze_encoder,
+        )
         installed = install_dinov3_encoder(
             rf_model,
             dinov3_repo=args.dinov3_repo,
             initialization=args.initialization,
             checkpoint=args.checkpoint,
             public_weights=args.public_ssl_weights,
+            freeze_encoder=args.freeze_encoder,
         ).to(device)
         installed_features = installed(images.detach())
         result["rfdetr_installed"] = True
         result["rfdetr_feature_shapes"] = [list(feature.shape) for feature in installed_features]
         result["same_encoder_object"] = rf_model.model.model.backbone[0].encoder is installed
+        result["installed_trainable_encoder_parameters"] = sum(
+            parameter.numel() for parameter in installed.parameters() if parameter.requires_grad
+        )
 
         # RF-DETR 1.9 creates a fresh detector inside train(). Verify that the
         # scoped training hook replaces that newly built encoder as well.
@@ -116,9 +130,17 @@ def main() -> int:
             DinoV3FeatureEncoder,
         )
         result["training_rebuild_initialization"] = rebuilt_encoder.provenance.initialization
+        result["training_rebuild_trainable_encoder_parameters"] = sum(
+            parameter.numel() for parameter in rebuilt_encoder.parameters() if parameter.requires_grad
+        )
         result["training_rebuild_feature_shapes"] = [
             list(feature.shape) for feature in rebuilt_features
         ]
+        if args.freeze_encoder and (
+            result["installed_trainable_encoder_parameters"] != 0
+            or result["training_rebuild_trainable_encoder_parameters"] != 0
+        ):
+            raise RuntimeError("RF-DETR rebuild did not preserve the frozen DINOv3 encoder")
 
     print(json.dumps(result, indent=2))
     return 0

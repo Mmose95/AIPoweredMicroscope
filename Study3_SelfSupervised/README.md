@@ -260,3 +260,39 @@ python Study3_SelfSupervised/smoke_test_rfdetr_dinov3_bridge.py \
   --device cuda \
   --test-rfdetr
 ```
+
+## Frozen-backbone SSL checkpoint probe
+
+`run_ssl_checkpoint_probe.py` ranks saved DINOv3 EMA-teacher checkpoints by
+their usefulness for the downstream detection task. Each checkpoint receives
+an independently initialized RF-DETR Small detector with the DINOv3 encoder
+strictly frozen. The probe uses the same annotated training and validation
+splits for every checkpoint, ranks checkpoints by validation EMA mAP@50:95,
+and never materializes the test split.
+
+The default coarse-to-fine schedule probes SSL epochs 1, 5, 10, ..., 75 and
+the final available epoch 76. It then probes the two neighboring checkpoints
+on either side of the best coarse result. Every detector probe uses seed 0 and
+ten detector-training epochs. Completed probes are retained and skipped when
+the launcher is restarted; interrupted probes resume from `last.ckpt` when
+available.
+
+Open the script in PyCharm and press Run to audit the planned checkpoints.
+The direct-run default does not start the many detector probes. Set
+`RUN_PROBES = True` for a local execution, or use this UCloud command after the
+job initialization has activated the environment:
+
+```bash
+python "$STUDY3_DIR/run_ssl_checkpoint_probe.py" --run
+```
+
+Outputs are written beneath `$OUTPUT_ROOT/SSL_Checkpoint_Probe` on UCloud.
+`probe_summary.csv` contains the full trajectory and `probe_summary.json`
+records the ranked results and selected checkpoint. This checkpoint selection
+is a development-stage use of the fixed validation set; the held-out test set
+remains untouched.
+
+Columnar Epithelial Cell stays in the dataset and model outputs. Its current
+zero AP is documented as a limitation caused by insufficient representation
+in the present training and validation data; the probe does not add special
+handling or discard the class.

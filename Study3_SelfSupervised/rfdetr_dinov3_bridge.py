@@ -247,6 +247,7 @@ def install_dinov3_encoder(
     public_weights: Path | None = None,
     architecture: str = "dinov3_vits16",
     feature_layers: Sequence[int] = DEFAULT_FEATURE_LAYERS,
+    freeze_encoder: bool | None = None,
 ) -> DinoV3FeatureEncoder:
     """Replace an instantiated RF-DETR encoder with a native DINOv3 encoder.
 
@@ -258,6 +259,10 @@ def install_dinov3_encoder(
     except AttributeError as exc:
         raise TypeError("Unsupported RF-DETR object; expected rf_model.model.model.backbone[0]") from exc
     detector_pretrain = getattr(getattr(rf_model, "model_config", None), "pretrain_weights", None)
+    if freeze_encoder is None:
+        freeze_encoder = bool(
+            getattr(getattr(rf_model, "model_config", None), "freeze_encoder", False)
+        )
     return install_dinov3_encoder_on_detector(
         detector,
         dinov3_repo=dinov3_repo,
@@ -267,6 +272,7 @@ def install_dinov3_encoder(
         architecture=architecture,
         feature_layers=feature_layers,
         detector_pretrain_weights=detector_pretrain,
+        freeze_encoder=freeze_encoder,
     )
 
 
@@ -280,6 +286,7 @@ def install_dinov3_encoder_on_detector(
     architecture: str = "dinov3_vits16",
     feature_layers: Sequence[int] = DEFAULT_FEATURE_LAYERS,
     detector_pretrain_weights: object = None,
+    freeze_encoder: bool = False,
 ) -> DinoV3FeatureEncoder:
     """Install DINOv3 into an already-built raw RF-DETR detector module."""
     try:
@@ -315,6 +322,9 @@ def install_dinov3_encoder_on_detector(
     if reference_parameter is not None:
         encoder.to(device=reference_parameter.device)
     rf_backbone.encoder = encoder
+    if freeze_encoder:
+        for parameter in encoder.parameters():
+            parameter.requires_grad = False
     rf_backbone.get_named_param_lr_pairs = types.MethodType(
         _get_named_param_lr_pairs_dinov3,
         rf_backbone,
@@ -356,6 +366,7 @@ def patch_rfdetr_training_rebuild(
             architecture=architecture,
             feature_layers=feature_layers,
             detector_pretrain_weights=model_config.pretrain_weights,
+            freeze_encoder=bool(model_config.freeze_encoder),
         )
         module_self.dinov3_bridge_provenance = encoder.provenance_dict()
 
