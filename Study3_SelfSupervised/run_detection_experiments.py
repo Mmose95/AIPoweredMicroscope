@@ -59,6 +59,17 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _newline_sha256_variants(path: Path) -> dict[str, str]:
+    """Hash text with canonical LF and CRLF endings for cross-platform audits."""
+    content = path.read_bytes()
+    lf = content.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    crlf = lf.replace(b"\n", b"\r\n")
+    return {
+        "source_sha256_lf": hashlib.sha256(lf).hexdigest(),
+        "source_sha256_crlf": hashlib.sha256(crlf).hexdigest(),
+    }
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -251,6 +262,7 @@ def _materialize_dataset(
         }
         report["splits"][split] = {
             "source_sha256": _sha256(source_json),
+            **_newline_sha256_variants(source_json),
             "materialized_sha256": _sha256(output_json),
             "source_images": len(original_images),
             "images": len(images),
@@ -271,7 +283,19 @@ def _seed_everything(seed: int) -> None:
 def _assert_same_dataset_identity(previous: dict, current: dict) -> None:
     """Reject a cross-host resume if the underlying split identity changed."""
     for split in ("train", "valid"):
-        for field in ("source_sha256", "images", "annotations", "specimens"):
+        previous_source_hash = previous["splits"][split]["source_sha256"]
+        accepted_source_hashes = {
+            current["splits"][split]["source_sha256"],
+            current["splits"][split]["source_sha256_lf"],
+            current["splits"][split]["source_sha256_crlf"],
+        }
+        if previous_source_hash not in accepted_source_hashes:
+            raise RuntimeError(
+                "Resume source dataset changed beyond LF/CRLF line endings for "
+                f"{split}: previous={previous_source_hash!r}, "
+                f"accepted_current_hashes={sorted(accepted_source_hashes)!r}"
+            )
+        for field in ("images", "annotations", "specimens"):
             before = previous["splits"][split][field]
             after = current["splits"][split][field]
             if before != after:
