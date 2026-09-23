@@ -11,7 +11,7 @@ from omegaconf import OmegaConf
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_BASE = SCRIPT_DIR / "configs" / "dinov3_vits16_wsl_pilot.yaml"
+DEFAULT_BASE = SCRIPT_DIR / "configs" / "dinov3_vitb16_ucloud_base.yaml"
 DEFAULT_MANIFEST = SCRIPT_DIR / "manifests" / "ssl_pool_40x_9d8cb0d9ec7b.csv"
 
 
@@ -29,6 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, required=True)
     parser.add_argument("--warmup-epochs", type=int, required=True)
     parser.add_argument("--num-workers", type=int, default=8)
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--base-config", type=Path, default=DEFAULT_BASE)
     return parser.parse_args()
 
@@ -40,14 +41,22 @@ def main() -> int:
             raise ValueError(f"--{name.replace('_', '-')} must be positive")
     if not 0 <= args.warmup_epochs <= args.epochs:
         raise ValueError("--warmup-epochs must be between zero and --epochs")
+    if args.seed < 0:
+        raise ValueError("--seed must be non-negative")
 
     image_count = count_images(args.manifest)
     global_batch = args.gpus * args.batch_size_per_gpu
     iterations_per_epoch = math.ceil(image_count / global_batch)
     cfg = OmegaConf.load(args.base_config)
+    if str(cfg.student.arch) != "vit_base" or int(cfg.student.patch_size) != 16:
+        raise ValueError(
+            "Study 3 full SSL generation requires DINOv3-B/16 "
+            "(student.arch=vit_base, student.patch_size=16)"
+        )
     cfg.train.batch_size_per_gpu = args.batch_size_per_gpu
     cfg.train.num_workers = args.num_workers
     cfg.train.OFFICIAL_EPOCH_LENGTH = iterations_per_epoch
+    cfg.train.seed = args.seed
     cfg.optim.epochs = args.epochs
     cfg.optim.warmup_epochs = args.warmup_epochs
     cfg.optim.freeze_last_layer_epochs = min(1, args.warmup_epochs)
@@ -63,8 +72,10 @@ def main() -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     OmegaConf.save(cfg, output)
     print(f"Saved: {output}")
+    print("Architecture: DINOv3-B/16 (vit_base, patch 16)")
     print(f"Images: {image_count:,}")
     print(f"Global batch: {global_batch:,}")
+    print(f"Seed: {args.seed}")
     print(f"Iterations per nominal epoch: {iterations_per_epoch:,}")
     print(f"Total planned iterations: {iterations_per_epoch * args.epochs:,}")
     return 0
@@ -72,4 +83,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

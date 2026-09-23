@@ -183,15 +183,36 @@ The official Linux trainer is connected through three project-local files:
 
 - `dinov3_manifest_dataset.py` reads unlabeled image paths from a portable CSV manifest.
 - `train_official_dinov3_manifest.py` registers that dataset and delegates to Meta's trainer.
-- `configs/dinov3_vits16_wsl_smoke.yaml` runs the official DINO, iBOT, and KoLeo loss stack for five iterations.
+- `configs/dinov3_vits16_wsl_smoke.yaml` preserves the completed S/16 pilot path.
+- `configs/dinov3_vitb16_wsl_smoke.yaml` runs the official DINO, iBOT, and KoLeo loss stack with B/16 for five iterations.
+- `configs/dinov3_vitb16_ucloud_base.yaml` is the reviewed template for the definitive B/16 UCloud run.
 
 The upstream sibling `dinov3` repository is not modified. The dataset string supplies a
 Linux-specific image root, so the same manifest can later be used on UCloud.
 
 `run_official_dinov3_linux.sh` is the portable WSL/UCloud entry point. It validates
 the repository, configuration, manifest, image root, and GPU count before invoking
-`torchrun`. Full-study hyperparameters remain separate from this infrastructure and
-will be fixed only after the UCloud GPU allocation and batch size are known.
+`torchrun`.
+
+### DINOv3-B/16 full SSL run
+
+The definitive SSL architecture is DINOv3-B/16 (`vit_base`, patch size 16,
+768 feature channels). The earlier DINOv3-S/16 run remains an immutable pilot;
+new B/16 checkpoints are written to `dinov3_vitb16_full_seed0` and never
+overwrite it. After starting a UCloud job with `init_dinov3_ucloud.sh`, launch:
+
+```bash
+cd /work/projects/myproj
+source ./dinov3_ucloud_env.sh
+bash "$STUDY3_DIR/run_vitb16_ssl_ucloud.sh"
+```
+
+The launcher derives the nominal epoch length from the immutable full manifest,
+visible GPU count, and per-GPU batch. Defaults are batch 32 per GPU, 100 nominal
+epochs, and 10 warmup epochs. Override these with `STUDY3_SSL_GPUS`,
+`STUDY3_SSL_BATCH_PER_GPU`, `STUDY3_SSL_EPOCHS`, and
+`STUDY3_SSL_WARMUP_EPOCHS`. It refuses a non-empty run directory unless
+`STUDY3_SSL_RESUME=1` is explicitly set.
 
 ## DINOv3 SSL launcher
 
