@@ -121,6 +121,11 @@ class DinoV3FeatureEncoder(nn.Module):
 
         if public_weights is not None and not public_weights.expanduser().is_file():
             raise FileNotFoundError(f"Official DINOv3 weights not found: {public_weights}")
+        print(
+            f"[DINOv3 bridge] Building {architecture} backbone "
+            f"(initialization={initialization})",
+            flush=True,
+        )
         self.backbone = _load_dinov3_model(
             dinov3_repo,
             architecture,
@@ -152,6 +157,10 @@ class DinoV3FeatureEncoder(nn.Module):
             checkpoint_path = checkpoint.expanduser().resolve()
             if not checkpoint_path.is_file():
                 raise FileNotFoundError(f"DINOv3 teacher checkpoint not found: {checkpoint_path}")
+            print(
+                f"[DINOv3 bridge] Loading teacher backbone checkpoint: {checkpoint_path}",
+                flush=True,
+            )
             payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
             state = extract_teacher_backbone_state(payload)
             result = self.backbone.load_state_dict(state, strict=True)
@@ -162,6 +171,11 @@ class DinoV3FeatureEncoder(nn.Module):
                 )
             checkpoint_hash = sha256_file(checkpoint_path)
             strict_load = True
+            print(
+                f"[DINOv3 bridge] Strict checkpoint load passed "
+                f"({len(state):,} backbone tensors)",
+                flush=True,
+            )
 
         self.provenance = BridgeProvenance(
             initialization=initialization,
@@ -357,6 +371,10 @@ def patch_rfdetr_training_rebuild(
 
     def patched_init(module_self, model_config, train_config):
         original_init(module_self, model_config, train_config)
+        print(
+            "[DINOv3 bridge] RF-DETR training model constructed; installing native DINOv3 encoder",
+            flush=True,
+        )
         encoder = install_dinov3_encoder_on_detector(
             module_self.model,
             dinov3_repo=dinov3_repo,
@@ -369,6 +387,13 @@ def patch_rfdetr_training_rebuild(
             freeze_encoder=bool(model_config.freeze_encoder),
         )
         module_self.dinov3_bridge_provenance = encoder.provenance_dict()
+        trainable = sum(parameter.numel() for parameter in encoder.parameters() if parameter.requires_grad)
+        total = sum(parameter.numel() for parameter in encoder.parameters())
+        print(
+            f"[DINOv3 bridge] Encoder installed: trainable={trainable:,}, total={total:,}, "
+            f"frozen={trainable == 0}",
+            flush=True,
+        )
 
     RFDETRModelModule.__init__ = patched_init
     try:
@@ -402,7 +427,9 @@ def train_rfdetr_with_dinov3(
         architecture=architecture,
         feature_layers=feature_layers,
     ):
+        print("[RF-DETR] Entering detector training", flush=True)
         rf_model.train(**train_kwargs)
+        print("[RF-DETR] Detector training returned successfully", flush=True)
 
     trained_encoder = rf_model.model.model.backbone[0].encoder
     if not isinstance(trained_encoder, DinoV3FeatureEncoder):

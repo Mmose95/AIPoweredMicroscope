@@ -512,16 +512,23 @@ def _run_one(
             )
         run_record.setdefault("resumes", []).append(resume_event)
     _json_write(record_path, run_record)
-    print(json.dumps(run_record, indent=2))
+    print(json.dumps(run_record, indent=2), flush=True)
     if not args.train:
         return run_dir
 
     try:
+        print("[Detector run] Importing RF-DETR", flush=True)
         from rfdetr import RFDETRSmall
 
         _seed_everything(seed)
         model_config = config["model"]
         training = config["training"]
+        print(
+            "[Detector run] Constructing RF-DETR Small "
+            f"(epochs={training['epochs']}, batch_size={training['batch_size']}, "
+            f"frozen_backbone={bool(model_config.get('freeze_encoder', False))})",
+            flush=True,
+        )
         rf_model = RFDETRSmall(
             pretrain_weights=None,
             resolution=int(model_config["resolution"]),
@@ -529,6 +536,10 @@ def _run_one(
             num_queries=int(model_config["num_queries"]),
             gradient_checkpointing=bool(training["gradient_checkpointing"]),
             freeze_encoder=bool(model_config.get("freeze_encoder", False)),
+        )
+        print(
+            "[Detector run] Launching training; RF-DETR will print validation metrics each epoch",
+            flush=True,
         )
         encoder = train_rfdetr_with_dinov3(
             rf_model,
@@ -573,6 +584,7 @@ def _run_one(
             )
         run_record["status"] = "completed"
         run_record["completed_utc"] = _utc_now()
+        print("[Detector run] Completed and verified", flush=True)
     except BaseException as exc:
         run_record["status"] = "failed"
         run_record["failed_utc"] = _utc_now()

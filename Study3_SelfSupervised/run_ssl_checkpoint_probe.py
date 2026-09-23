@@ -186,7 +186,7 @@ def _launch_probe(
     run_dir = _expected_run_dir(checkpoint_output, config)
     status = _run_status(run_dir)
     if status == "completed":
-        print(f"[Probe] iteration {iteration}: already completed")
+        print(f"[Probe] iteration {iteration}: already completed", flush=True)
         return run_dir
 
     command = [
@@ -204,13 +204,13 @@ def _launch_probe(
     last_checkpoint = run_dir / "last.ckpt"
     if status in {"starting", "resuming", "failed"} and last_checkpoint.is_file():
         command.extend(["--resume", str(last_checkpoint.resolve())])
-        print(f"[Probe] iteration {iteration}: resuming interrupted detector probe")
+        print(f"[Probe] iteration {iteration}: resuming interrupted detector probe", flush=True)
     elif status is not None:
         raise RuntimeError(
             f"Probe iteration {iteration} has status {status!r} but no resumable last.ckpt: {run_dir}"
         )
     else:
-        print(f"[Probe] iteration {iteration}: starting frozen-backbone detector probe")
+        print(f"[Probe] iteration {iteration}: starting frozen-backbone detector probe", flush=True)
     subprocess.run(command, check=True)
     if _run_status(run_dir) != "completed":
         raise RuntimeError(f"Probe did not complete cleanly: {run_dir}")
