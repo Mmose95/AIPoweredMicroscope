@@ -16,7 +16,7 @@ import shutil
 import sys
 import traceback
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import numpy as np
@@ -183,16 +183,42 @@ def _resolve_image(
     direct = image_root / normalized
     if direct.is_file():
         return direct.resolve()
+    # A COCO file created on Windows may contain an absolute drive path. On
+    # Linux, pathlib treats ``E:/...`` as a relative path. The uploaded 40x
+    # pool has the stable layout ``image_root/specimen/filename``, so try that
+    # portable suffix before building an expensive full-tree index.
+    normalized_parts = PurePosixPath(normalized).parts
+    for depth in (2, 3):
+        if len(normalized_parts) >= depth:
+            suffix_candidate = image_root.joinpath(*normalized_parts[-depth:])
+            if suffix_candidate.is_file():
+                return suffix_candidate.resolve()
     indexed = by_relative.get(normalized)
     if indexed:
         return indexed
-    matches = by_name.get(candidate.name, [])
+    portable_name = PurePosixPath(normalized).name
+    matches = by_name.get(portable_name, [])
     if len(matches) == 1:
         return matches[0]
     raise FileNotFoundError(
         f"Could not uniquely resolve image {file_name!r} under {image_root}; "
         f"basename matches={len(matches)}"
     )
+
+
+def _materialized_paths_are_current(dataset_dir: Path) -> bool:
+    """Return whether every materialized train/valid image path exists."""
+    for split in ("train", "valid"):
+        annotation_path = dataset_dir / split / "_annotations.coco.json"
+        if not annotation_path.is_file():
+            return False
+        coco = _load_coco(annotation_path)
+        for image in coco.get("images", []):
+            raw_path = Path(str(image.get("file_name", "")))
+            candidate = raw_path if raw_path.is_absolute() else annotation_path.parent / raw_path
+            if not candidate.is_file():
+                return False
+    return True
 
 
 def _rank(image: dict, seed: int) -> str:
@@ -241,8 +267,19 @@ def _materialize_dataset(
         for image in images:
             raw_name = str(image["file_name"])
             raw_path = Path(raw_name)
-            direct_path = image_root / raw_name.replace("\\", "/").lstrip("./")
-            if not (raw_path.is_absolute() and raw_path.is_file()) and not direct_path.is_file():
+            normalized_name = raw_name.replace("\\", "/").lstrip("./")
+            direct_path = image_root / normalized_name
+            normalized_parts = PurePosixPath(normalized_name).parts
+            suffix_exists = any(
+                len(normalized_parts) >= depth
+                and image_root.joinpath(*normalized_parts[-depth:]).is_file()
+                for depth in (2, 3)
+            )
+            if (
+                not (raw_path.is_absolute() and raw_path.is_file())
+                and not direct_path.is_file()
+                and not suffix_exists
+            ):
                 if not fallback_index_built:
                     by_relative, by_name = _image_index(image_root)
                     fallback_index_built = True
@@ -378,11 +415,19 @@ def _run_one(
         previous_dataset_report = existing_run_record["dataset"]
         previous_image_root = str(existing_run_record.get("paths", {}).get("image_root", ""))
         current_image_root = str(args.image_root.resolve())
-        if previous_image_root != current_image_root:
+        rematerialize_paths = (
+            previous_image_root != current_image_root
+            or not _materialized_paths_are_current(dataset_dir)
+        )
+        if rematerialize_paths:
             dataset_report = _materialize_dataset(
                 args.dataset_dir.resolve(), dataset_dir, args.image_root.resolve(), budget, seed
             )
             _assert_same_dataset_identity(previous_dataset_report, dataset_report)
+            if not _materialized_paths_are_current(dataset_dir):
+                raise RuntimeError(
+                    "Materialized dataset still contains unavailable image paths after rebuild"
+                )
         else:
             dataset_report = previous_dataset_report
     else:
@@ -443,7 +488,8 @@ def _run_one(
         resume_event = {"utc": _utc_now(), "checkpoint": str(resume_checkpoint)}
         previous_image_root = str(run_record.get("paths", {}).get("image_root", ""))
         current_image_root = str(args.image_root.resolve())
-        if previous_image_root != current_image_root:
+        paths_were_rematerialized = dataset_report is not previous_dataset_report
+        if paths_were_rematerialized:
             resume_event["dataset_paths_rematerialized"] = True
             resume_event["previous_image_root"] = previous_image_root
             resume_event["current_image_root"] = current_image_root
