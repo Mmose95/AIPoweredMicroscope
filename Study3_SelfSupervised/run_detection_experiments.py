@@ -484,6 +484,13 @@ def _run_one(
         run_record = existing_run_record
         if run_record.get("status") == "completed":
             raise RuntimeError("Refusing to resume a run already marked completed")
+        if run_record.get("failed_utc") is not None or run_record.get("error") is not None:
+            run_record.setdefault("failure_history", []).append(
+                {
+                    "failed_utc": run_record.pop("failed_utc", None),
+                    "error": run_record.pop("error", None),
+                }
+            )
         run_record["status"] = "resuming"
         resume_event = {"utc": _utc_now(), "checkpoint": str(resume_checkpoint)}
         previous_image_root = str(run_record.get("paths", {}).get("image_root", ""))
