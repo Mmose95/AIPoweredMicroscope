@@ -268,6 +268,19 @@ def _seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def _assert_same_dataset_identity(previous: dict, current: dict) -> None:
+    """Reject a cross-host resume if the underlying split identity changed."""
+    for split in ("train", "valid"):
+        for field in ("source_sha256", "images", "annotations", "specimens"):
+            before = previous["splits"][split][field]
+            after = current["splits"][split][field]
+            if before != after:
+                raise RuntimeError(
+                    "Resume dataset identity changed for "
+                    f"{split}.{field}: previous={before!r}, current={after!r}"
+                )
+
+
 def _validate_config(config: dict) -> None:
     supported_arms = set(DEFAULT_ARMS)
     configured_arms = set(config.get("arms", []))
@@ -338,7 +351,16 @@ def _run_one(
         existing_run_record = json.loads(record_path.read_text(encoding="utf-8"))
         if existing_run_record.get("configuration_fingerprint") != config_fingerprint:
             raise RuntimeError("Resume configuration does not match the original run configuration")
-        dataset_report = existing_run_record["dataset"]
+        previous_dataset_report = existing_run_record["dataset"]
+        previous_image_root = str(existing_run_record.get("paths", {}).get("image_root", ""))
+        current_image_root = str(args.image_root.resolve())
+        if previous_image_root != current_image_root:
+            dataset_report = _materialize_dataset(
+                args.dataset_dir.resolve(), dataset_dir, args.image_root.resolve(), budget, seed
+            )
+            _assert_same_dataset_identity(previous_dataset_report, dataset_report)
+        else:
+            dataset_report = previous_dataset_report
     else:
         dataset_report = _materialize_dataset(
             args.dataset_dir.resolve(), dataset_dir, args.image_root.resolve(), budget, seed
@@ -394,9 +416,24 @@ def _run_one(
         if run_record.get("status") == "completed":
             raise RuntimeError("Refusing to resume a run already marked completed")
         run_record["status"] = "resuming"
-        run_record.setdefault("resumes", []).append(
-            {"utc": _utc_now(), "checkpoint": str(resume_checkpoint)}
-        )
+        resume_event = {"utc": _utc_now(), "checkpoint": str(resume_checkpoint)}
+        previous_image_root = str(run_record.get("paths", {}).get("image_root", ""))
+        current_image_root = str(args.image_root.resolve())
+        if previous_image_root != current_image_root:
+            resume_event["dataset_paths_rematerialized"] = True
+            resume_event["previous_image_root"] = previous_image_root
+            resume_event["current_image_root"] = current_image_root
+            run_record["dataset"] = dataset_report
+            run_record["paths"].update(
+                {
+                    "source_dataset": str(args.dataset_dir.resolve()),
+                    "effective_dataset": str(dataset_dir.resolve()),
+                    "image_root": current_image_root,
+                    "dinov3_repo": str(args.dinov3_repo.resolve()),
+                    "output": str(run_dir.resolve()),
+                }
+            )
+        run_record.setdefault("resumes", []).append(resume_event)
     _json_write(record_path, run_record)
     print(json.dumps(run_record, indent=2))
     if not args.train:
