@@ -214,6 +214,14 @@ epochs, and 10 warmup epochs. Override these with `STUDY3_SSL_GPUS`,
 `STUDY3_SSL_WARMUP_EPOCHS`. It refuses a non-empty run directory unless
 `STUDY3_SSL_RESUME=1` is explicitly set.
 
+For an unattended queued UCloud job, attach
+`init_dinov3_vitb16_autorun_ucloud.sh` as the job initialization file. It runs
+the ordinary environment setup, requires four visible non-MIG GPUs, and starts
+the full B/16 training process under `nohup`. Training output is written to
+`$OUTPUT_ROOT/logs/dinov3_vitb16_full_seed0.log`, so no manual terminal command
+is required when the queued allocation starts. The Jupyter application may
+still be used later to monitor the process.
+
 ## DINOv3 SSL launcher
 
 `train_ssl_dinov3.py` launches either a local compatibility test or the later
