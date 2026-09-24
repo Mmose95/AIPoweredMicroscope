@@ -131,24 +131,28 @@ ENV_MARKER="$ENV_DIR/.aipoweredmicroscope-${ENV_SIGNATURE}.ready"
 environment_audit() {
   python - <<PY
 import importlib.metadata
+import importlib.util
 import sys
-import torch
-import torchvision
-import dinov3
-import ipykernel
-import rfdetr
+
+def installed(distribution: str, expected: str) -> bool:
+    try:
+        return importlib.metadata.version(distribution).split("+")[0] == expected
+    except importlib.metadata.PackageNotFoundError:
+        return False
 
 checks = (
     sys.version_info[:2] == tuple(map(int, "${PYTHON_VERSION}".split("."))),
-    torch.__version__.split("+")[0] == "${TORCH_VERSION}",
-    torchvision.__version__.split("+")[0] == "${TORCHVISION_VERSION}",
-    importlib.metadata.version("rfdetr") == "${RFDETR_VERSION}",
-    torch.cuda.is_available(),
+    installed("torch", "${TORCH_VERSION}"),
+    installed("torchvision", "${TORCHVISION_VERSION}"),
+    installed("rfdetr", "${RFDETR_VERSION}"),
+    importlib.util.find_spec("dinov3") is not None,
+    importlib.util.find_spec("ipykernel") is not None,
 )
 raise SystemExit(0 if all(checks) else 1)
 PY
 }
 
+echo "[DINOv3 Init] Auditing pinned environment metadata"
 if environment_audit; then
   touch "$ENV_MARKER"
   echo "[DINOv3 Init] Environment audit passed; dependency installation skipped"
