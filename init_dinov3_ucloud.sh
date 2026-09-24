@@ -15,6 +15,7 @@ DINOV3_REPO_URL="${DINOV3_REPO_URL:-https://github.com/facebookresearch/dinov3.g
 DINOV3_COMMIT="${DINOV3_COMMIT:-6876159a11b4df116f30f667f8c9888617df0751}"
 TORCH_VERSION="${DINOV3_TORCH_VERSION:-2.7.1}"
 TORCHVISION_VERSION="${DINOV3_TORCHVISION_VERSION:-0.22.1}"
+RFDETR_VERSION="${DINOV3_RFDETR_VERSION:-1.9.1}"
 PYTHON_VERSION="${DINOV3_PYTHON_VERSION:-3.11}"
 
 echo "[DINOv3 Init] Starting"
@@ -38,15 +39,22 @@ if [[ -z "$CONDA_BIN" || ! -x "$CONDA_BIN" ]]; then
   exit 1
 fi
 echo "[DINOv3 Init] Conda: $CONDA_BIN"
-eval "$("$CONDA_BIN" shell.bash hook)"
 
 if [[ ! -x "$ENV_DIR/bin/python" ]]; then
   echo "[DINOv3 Init] Creating isolated environment: $ENV_DIR"
+  # Conda's shell hook reads many files from the shared persistent mount. Use
+  # it only for first-time environment creation; existing jobs take the fast
+  # path below and invoke the environment directly.
+  eval "$("$CONDA_BIN" shell.bash hook)"
   mkdir -p "$(dirname "$ENV_DIR")"
   conda create -y -p "$ENV_DIR" -c conda-forge --override-channels "python=$PYTHON_VERSION" pip
 fi
-conda activate "$ENV_DIR"
-python -m pip install --upgrade pip setuptools wheel
+
+export PATH="$ENV_DIR/bin:$PATH"
+export CONDA_PREFIX="$ENV_DIR"
+export CONDA_DEFAULT_ENV="$ENV_NAME"
+hash -r
+echo "[DINOv3 Init] Reusing environment directly (Conda hook skipped)"
 echo "[DINOv3 Init] Python: $(command -v python)"
 python --version
 
@@ -118,27 +126,80 @@ if [[ -z "$TORCH_INDEX" ]]; then
   exit 1
 fi
 
-if ! python - <<PY
+ENV_SIGNATURE="v2-py${PYTHON_VERSION}-torch${TORCH_VERSION}-tv${TORCHVISION_VERSION}-rfdetr${RFDETR_VERSION}-dinov3-${DINOV3_COMMIT}"
+ENV_MARKER="$ENV_DIR/.aipoweredmicroscope-${ENV_SIGNATURE}.ready"
+environment_audit() {
+  python - <<PY
+import importlib.metadata
+import sys
+import torch
+import torchvision
+import dinov3
+import ipykernel
+import rfdetr
+
+checks = (
+    sys.version_info[:2] == tuple(map(int, "${PYTHON_VERSION}".split("."))),
+    torch.__version__.split("+")[0] == "${TORCH_VERSION}",
+    torchvision.__version__.split("+")[0] == "${TORCHVISION_VERSION}",
+    importlib.metadata.version("rfdetr") == "${RFDETR_VERSION}",
+    torch.cuda.is_available(),
+)
+raise SystemExit(0 if all(checks) else 1)
+PY
+}
+
+if environment_audit; then
+  touch "$ENV_MARKER"
+  echo "[DINOv3 Init] Environment audit passed; dependency installation skipped"
+else
+  lock_dir="${DINOV3_ENV_LOCK_DIR:-/work/CondaEnv/.locks}"
+  mkdir -p "$lock_dir"
+  exec 9>"$lock_dir/phd-dinov3-install.lock"
+  if command -v flock >/dev/null 2>&1; then
+    echo "[DINOv3 Init] Waiting for the shared environment installation lock"
+    flock 9
+  fi
+
+  # Another job may have repaired the shared environment while this job was
+  # waiting for the lock. Audit again before performing any writes.
+  if environment_audit; then
+    echo "[DINOv3 Init] Environment was prepared by another job; installation skipped"
+  else
+    echo "[DINOv3 Init] Environment audit failed; installing pinned dependencies"
+    python -m pip install --upgrade pip setuptools wheel
+    if ! python - <<PY
 import torch
 expected = "${TORCH_VERSION}"
 raise SystemExit(0 if torch.__version__.split("+")[0] == expected and torch.cuda.is_available() else 1)
 PY
-then
-  echo "[DINOv3 Init] Installing torch $TORCH_VERSION from $TORCH_INDEX"
-  python -m pip install --upgrade \
-    "torch==$TORCH_VERSION" "torchvision==$TORCHVISION_VERSION" \
-    --index-url "$TORCH_INDEX"
-else
-  echo "[DINOv3 Init] Requested CUDA-enabled PyTorch is already installed"
+    then
+      echo "[DINOv3 Init] Installing torch $TORCH_VERSION from $TORCH_INDEX"
+      python -m pip install --upgrade \
+        "torch==$TORCH_VERSION" "torchvision==$TORCHVISION_VERSION" \
+        --index-url "$TORCH_INDEX"
+    else
+      echo "[DINOv3 Init] Requested CUDA-enabled PyTorch is already installed"
+    fi
+
+    echo "[DINOv3 Init] Installing official DINOv3 dependencies"
+    python -m pip install -r "$DINOV3_REPO/requirements.txt"
+    python -m pip install -e "$DINOV3_REPO"
+    # RF-DETR is the downstream detector used by Study 3. Pin this version because
+    # the DINOv3 bridge is tested against its model/training interfaces.
+    python -m pip install --upgrade "rfdetr[train,augment]==${RFDETR_VERSION}"
+    python -m pip install --upgrade ipykernel
+  fi
+
+  if ! environment_audit; then
+    echo "[DINOv3 Init][ERROR] Environment audit still fails after installation." >&2
+    exit 1
+  fi
+  touch "$ENV_MARKER"
 fi
 
-echo "[DINOv3 Init] Installing official DINOv3 dependencies"
-python -m pip install -r "$DINOV3_REPO/requirements.txt"
-python -m pip install -e "$DINOV3_REPO"
-# RF-DETR is the downstream detector used by Study 3. Pin this version because
-# the DINOv3 bridge is tested against its model/training interfaces.
-python -m pip install --upgrade "rfdetr[train,augment]==1.9.1"
-python -m pip install --upgrade ipykernel
+# The home directory is job-local, so register the persistent environment's
+# kernel on every job even when package installation is skipped.
 python -m ipykernel install --user \
   --name "$ENV_NAME" --display-name "Python ($ENV_NAME)" || true
 
@@ -178,12 +239,14 @@ mkdir -p "$OUTPUT_ROOT"
 export DINOV3_REPO PROJECT_DIR STUDY3_DIR IMAGE_ROOT FULL_MANIFEST OUTPUT_ROOT
 cat > "$PROJECT_DIR/dinov3_ucloud_env.sh" <<EOF
 # Generated by init_dinov3_ucloud.sh. Safe to source repeatedly.
-DINOV3_CONDA_BIN=$(printf '%q' "$CONDA_BIN")
 export DINOV3_ENV_DIR=$(printf '%q' "$ENV_DIR")
-if [[ -x "\$DINOV3_CONDA_BIN" ]]; then
-  eval "\$("\$DINOV3_CONDA_BIN" shell.bash hook)"
-  conda activate "\$DINOV3_ENV_DIR"
-fi
+case ":\$PATH:" in
+  *":\$DINOV3_ENV_DIR/bin:"*) ;;
+  *) export PATH="\$DINOV3_ENV_DIR/bin:\$PATH" ;;
+esac
+export CONDA_PREFIX="\$DINOV3_ENV_DIR"
+export CONDA_DEFAULT_ENV=$(printf '%q' "$ENV_NAME")
+hash -r
 export USER_BASE_DIR=$(printf '%q' "$USER_BASE_DIR")
 export DINOV3_REPO=$(printf '%q' "$DINOV3_REPO")
 export PROJECT_DIR=$(printf '%q' "$PROJECT_DIR")
