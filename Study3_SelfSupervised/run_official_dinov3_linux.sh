@@ -22,6 +22,14 @@ shift 6
 [[ -d "$image_root" ]] || { echo "Missing image root: $image_root" >&2; exit 2; }
 [[ "$gpus" =~ ^[1-9][0-9]*$ ]] || { echo "GPUS must be a positive integer" >&2; exit 2; }
 
+visible_gpus="$(python -c 'import torch; print(torch.cuda.device_count())')"
+if (( gpus > visible_gpus )); then
+  echo "Requested $gpus torchrun processes, but PyTorch sees only $visible_gpus CUDA devices." >&2
+  echo "Use a GPUS value no greater than torch.cuda.device_count()." >&2
+  exit 2
+fi
+echo "[DINOv3 launcher] Using $gpus of $visible_gpus visible CUDA devices"
+
 mkdir -p "$output_dir"
 export PYTHONPATH="$dinov3_repo${PYTHONPATH:+:$PYTHONPATH}"
 
