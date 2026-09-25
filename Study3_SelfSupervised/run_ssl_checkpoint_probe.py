@@ -1,11 +1,11 @@
 """Rank DINOv3 SSL teacher checkpoints with a frozen-backbone detection probe.
 
-Open this file in PyCharm and press Run to print the planned checkpoints without
-starting training. Set ``RUN_PROBES = True`` below, or pass ``--run`` on UCloud,
-to train identical RF-DETR Small heads while keeping every DINOv3 backbone
-strictly frozen.
+Open this file in PyCharm and press Run to execute the configured probes. Use
+``--plan-only`` to inspect the plan without training. The current defaults rank
+DINOv3-B/16 checkpoints with identical RF-DETR Large heads while keeping every
+DINOv3 backbone strictly frozen.
 
-The default strategy probes SSL epoch 1, every fifth SSL epoch, and the final
+The default strategy probes SSL epoch 1, every tenth SSL epoch, and the final
 available checkpoint. It then probes the two neighboring SSL epochs on either
 side of the best coarse checkpoint. Checkpoint ranking uses validation EMA
 mAP@50:95; the test split is never materialized.
@@ -29,7 +29,7 @@ import yaml
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
-DEFAULT_CONFIG = SCRIPT_DIR / "ssl_checkpoint_probe_config.json"
+DEFAULT_CONFIG = SCRIPT_DIR / "ssl_checkpoint_probe_vitb16_large_config.json"
 DEFAULT_DINOV3_REPO = PROJECT_DIR.parent / "dinov3"
 DEFAULT_DATASET_DIR = (
     PROJECT_DIR
@@ -38,8 +38,8 @@ DEFAULT_DATASET_DIR = (
     / "QA_40x-_20260901-135953"
 )
 DEFAULT_IMAGE_ROOT = Path(r"E:\PHD\PhdData\Patologi afd. - Aalborg\40x Input tiles for CVAT")
-DEFAULT_SSL_RUN_DIR = Path(r"E:\PHD\Results\SSL_QA40X\dinov3_vits16_full_seed0")
-DEFAULT_OUTPUT_ROOT = Path(r"E:\PHD\Results\SSL_QA40X\SSL_Checkpoint_Probe")
+DEFAULT_SSL_RUN_DIR = Path(r"E:\PHD\Results\SSL_QA40X\dinov3_vitb16_full_seed0")
+DEFAULT_OUTPUT_ROOT = Path(r"E:\PHD\Results\SSL_QA40X\SSL_Checkpoint_Probe_ViTB16_RFDETRLarge")
 
 # PyCharm control. Keep False for a quick plan; set True to launch local probes.
 RUN_PROBES = False
@@ -76,8 +76,8 @@ def _defaults() -> dict[str, Path]:
         "dinov3_repo": _env_path("DINOV3_REPO", Path("/work/projects/dinov3") if ucloud else DEFAULT_DINOV3_REPO),
         "dataset_dir": _env_path("STUDY3_DETECTION_DATASET", Path("/work/projects/myproj/SOLO_Supervised_RFDETR/Stat_Dataset40x/QA_40x-_20260901-135953") if ucloud else DEFAULT_DATASET_DIR),
         "image_root": _env_path("IMAGE_ROOT", Path("/work/40x Input tiles for CVAT") if ucloud else DEFAULT_IMAGE_ROOT),
-        "ssl_run_dir": _env_path("STUDY3_SSL_RUN_DIR", output_base / "dinov3_vits16_full_seed0" if ucloud else DEFAULT_SSL_RUN_DIR),
-        "output_root": _env_path("STUDY3_SSL_PROBE_OUTPUT", output_base / "SSL_Checkpoint_Probe" if ucloud else DEFAULT_OUTPUT_ROOT),
+        "ssl_run_dir": _env_path("STUDY3_SSL_RUN_DIR", output_base / "dinov3_vitb16_full_seed0" if ucloud else DEFAULT_SSL_RUN_DIR),
+        "output_root": _env_path("STUDY3_SSL_PROBE_OUTPUT", output_base / "SSL_Checkpoint_Probe_ViTB16_RFDETRLarge" if ucloud else DEFAULT_OUTPUT_ROOT),
     }
 
 
@@ -90,7 +90,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-root", type=Path, default=defaults["image_root"])
     parser.add_argument("--ssl-run-dir", type=Path, default=defaults["ssl_run_dir"])
     parser.add_argument("--output-root", type=Path, default=defaults["output_root"])
-    parser.add_argument("--stride-epochs", type=int, default=5)
+    parser.add_argument("--stride-epochs", type=int, default=10)
     parser.add_argument("--fine-radius-epochs", type=int, default=2)
     parser.add_argument(
         "--iterations",

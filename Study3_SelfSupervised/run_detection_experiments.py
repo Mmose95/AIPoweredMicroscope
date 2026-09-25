@@ -352,8 +352,12 @@ def _validate_config(config: dict) -> None:
     if config.get("selection", {}).get("test_during_training") is not False:
         raise ValueError("test_during_training must be false")
     model = config.get("model", {})
-    if model.get("architecture") != "dinov3_vits16" or int(model.get("patch_size", 0)) != 16:
-        raise ValueError("This paired experiment requires dinov3_vits16 with patch_size=16")
+    if model.get("architecture") not in ("dinov3_vits16", "dinov3_vitb16"):
+        raise ValueError("Supported DINOv3 architectures are dinov3_vits16 and dinov3_vitb16")
+    if int(model.get("patch_size", 0)) != 16:
+        raise ValueError("This paired experiment requires patch_size=16")
+    if model.get("detector_variant", "small") not in ("small", "large"):
+        raise ValueError("model.detector_variant must be 'small' or 'large'")
 
 
 def _run_one(
@@ -518,18 +522,20 @@ def _run_one(
 
     try:
         print("[Detector run] Importing RF-DETR", flush=True)
-        from rfdetr import RFDETRSmall
+        from rfdetr import RFDETRLarge, RFDETRSmall
 
         _seed_everything(seed)
         model_config = config["model"]
         training = config["training"]
+        detector_variant = model_config.get("detector_variant", "small")
+        detector_class = {"small": RFDETRSmall, "large": RFDETRLarge}[detector_variant]
         print(
-            "[Detector run] Constructing RF-DETR Small "
+            f"[Detector run] Constructing RF-DETR {detector_variant.title()} "
             f"(epochs={training['epochs']}, batch_size={training['batch_size']}, "
             f"frozen_backbone={bool(model_config.get('freeze_encoder', False))})",
             flush=True,
         )
-        rf_model = RFDETRSmall(
+        rf_model = detector_class(
             pretrain_weights=None,
             resolution=int(model_config["resolution"]),
             patch_size=int(model_config["patch_size"]),

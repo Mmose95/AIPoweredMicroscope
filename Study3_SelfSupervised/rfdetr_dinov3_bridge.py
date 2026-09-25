@@ -35,6 +35,10 @@ class BridgeProvenance:
     checkpoint: str | None
     checkpoint_sha256: str | None
     strict_checkpoint_load: bool
+    detector_variant: str | None = None
+    projector_rebuilt: bool = False
+    projector_input_channels_before: tuple[int, ...] | None = None
+    projector_input_channels_after: tuple[int, ...] | None = None
     public_pretrained_weight_source: str | None = None
     public_pretrained_weight_sha256: str | None = None
     external_pretrained_backbone_allowed: bool = False
@@ -141,6 +145,10 @@ class DinoV3FeatureEncoder(nn.Module):
         self.embedding_dimension = int(self.backbone.embed_dim)
         self._out_feature_channels = [self.embedding_dimension] * len(layers)
         self._export = False
+        self.detector_variant: str | None = None
+        self.projector_rebuilt = False
+        self.projector_input_channels_before: tuple[int, ...] | None = None
+        self.projector_input_channels_after: tuple[int, ...] | None = None
 
         checkpoint_path: Path | None = None
         checkpoint_hash: str | None = None
@@ -211,7 +219,47 @@ class DinoV3FeatureEncoder(nn.Module):
         self._export = True
 
     def provenance_dict(self) -> dict:
-        return asdict(self.provenance)
+        result = asdict(self.provenance)
+        result.update(
+            {
+                "detector_variant": self.detector_variant,
+                "projector_rebuilt": self.projector_rebuilt,
+                "projector_input_channels_before": self.projector_input_channels_before,
+                "projector_input_channels_after": self.projector_input_channels_after,
+            }
+        )
+        return result
+
+
+def _rebuild_rfdetr_projectors(rf_backbone, encoder: DinoV3FeatureEncoder, model_config) -> None:
+    """Rebuild RF-DETR projectors when the replacement encoder width changes."""
+    from rfdetr.models.backbone.projector import MultiScaleProjector
+
+    scale_factors_by_level = {"P3": 2.0, "P4": 1.0, "P5": 0.5, "P6": 0.25}
+    projector_scale = list(getattr(model_config, "projector_scale"))
+    try:
+        scale_factors = [scale_factors_by_level[level] for level in projector_scale]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported RF-DETR projector level: {exc.args[0]}") from exc
+
+    reference = next(rf_backbone.projector.parameters(), None)
+    device = reference.device if reference is not None else torch.device("cpu")
+    dtype = reference.dtype if reference is not None else torch.float32
+    kwargs = {
+        "in_channels": encoder._out_feature_channels,
+        "out_channels": int(getattr(model_config, "hidden_dim")),
+        "scale_factors": scale_factors,
+        "layer_norm": bool(getattr(model_config, "layer_norm", False)),
+        "rms_norm": bool(getattr(model_config, "rms_norm", False)),
+    }
+    projector = MultiScaleProjector(**kwargs).to(device=device, dtype=dtype)
+    projector.train(rf_backbone.projector.training)
+    rf_backbone.projector = projector
+
+    if rf_backbone.cross_attn_projector is not None:
+        cross_attn_projector = MultiScaleProjector(**kwargs).to(device=device, dtype=dtype)
+        cross_attn_projector.train(rf_backbone.cross_attn_projector.training)
+        rf_backbone.cross_attn_projector = cross_attn_projector
 
 
 def _dinov3_layer_id(parameter_name: str, number_of_layers: int) -> int:
@@ -287,6 +335,7 @@ def install_dinov3_encoder(
         feature_layers=feature_layers,
         detector_pretrain_weights=detector_pretrain,
         freeze_encoder=freeze_encoder,
+        model_config=getattr(rf_model, "model_config", None),
     )
 
 
@@ -301,6 +350,7 @@ def install_dinov3_encoder_on_detector(
     feature_layers: Sequence[int] = DEFAULT_FEATURE_LAYERS,
     detector_pretrain_weights: object = None,
     freeze_encoder: bool = False,
+    model_config: object | None = None,
 ) -> DinoV3FeatureEncoder:
     """Install DINOv3 into an already-built raw RF-DETR detector module."""
     try:
@@ -325,17 +375,30 @@ def install_dinov3_encoder_on_detector(
     expected_channels = getattr(rf_backbone.encoder, "_out_feature_channels", None)
     if expected_channels is None:
         raise RuntimeError("Existing RF-DETR encoder does not declare _out_feature_channels")
-    if list(expected_channels) != encoder._out_feature_channels:
-        raise RuntimeError(
-            "RF-DETR projector channel mismatch: "
-            f"projector expects {list(expected_channels)}, DINOv3 provides {encoder._out_feature_channels}. "
-            "Use RF-DETR Small with dinov3_vits16 or rebuild the projector explicitly."
+    before_channels = tuple(int(channel) for channel in expected_channels)
+    after_channels = tuple(encoder._out_feature_channels)
+    projector_rebuilt = before_channels != after_channels
+    if projector_rebuilt:
+        if model_config is None:
+            raise RuntimeError(
+                "RF-DETR projector channel mismatch and no model configuration was supplied: "
+                f"projector expects {list(before_channels)}, DINOv3 provides {list(after_channels)}"
+            )
+        _rebuild_rfdetr_projectors(rf_backbone, encoder, model_config)
+        print(
+            "[DINOv3 bridge] Rebuilt RF-DETR projector input channels "
+            f"{list(before_channels)} -> {list(after_channels)}",
+            flush=True,
         )
 
     reference_parameter = next(rf_backbone.projector.parameters(), None)
     if reference_parameter is not None:
         encoder.to(device=reference_parameter.device)
     rf_backbone.encoder = encoder
+    encoder.detector_variant = type(model_config).__name__ if model_config is not None else None
+    encoder.projector_rebuilt = projector_rebuilt
+    encoder.projector_input_channels_before = before_channels
+    encoder.projector_input_channels_after = after_channels
     if freeze_encoder:
         for parameter in encoder.parameters():
             parameter.requires_grad = False
@@ -385,6 +448,7 @@ def patch_rfdetr_training_rebuild(
             feature_layers=feature_layers,
             detector_pretrain_weights=model_config.pretrain_weights,
             freeze_encoder=bool(model_config.freeze_encoder),
+            model_config=model_config,
         )
         module_self.dinov3_bridge_provenance = encoder.provenance_dict()
         trainable = sum(parameter.numel() for parameter in encoder.parameters() if parameter.requires_grad)

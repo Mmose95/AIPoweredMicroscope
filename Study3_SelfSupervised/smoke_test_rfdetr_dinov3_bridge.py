@@ -18,8 +18,8 @@ from rfdetr_dinov3_bridge import (
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_DINOV3_REPO = SCRIPT_DIR.parents[1] / "dinov3"
 DEFAULT_LOCAL_CHECKPOINT = Path(
-    r"E:\PHD\Results\SSL_QA40X\dinov3_vits16_full_seed0"
-    r"\eval\training_81623\teacher_checkpoint.pth"
+    r"E:\PHD\Results\SSL_QA40X\dinov3_vitb16_full_seed0"
+    r"\eval\training_107399\teacher_checkpoint.pth"
 )
 
 
@@ -36,10 +36,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--image-size", type=int, default=224)
     parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--architecture", default="dinov3_vitb16")
+    parser.add_argument(
+        "--rfdetr-size",
+        choices=("small", "large"),
+        default="large",
+        help="RF-DETR detector variant used for the integration smoke test.",
+    )
     parser.add_argument(
         "--test-rfdetr",
         action="store_true",
-        help="Also instantiate RF-DETR Small and replace its complete encoder.",
+        help="Also instantiate RF-DETR and replace its complete encoder.",
     )
     parser.add_argument(
         "--freeze-encoder",
@@ -68,6 +75,7 @@ def main() -> int:
         initialization=args.initialization,
         checkpoint=args.checkpoint,
         public_weights=args.public_ssl_weights,
+        architecture=args.architecture,
     ).to(device)
     images = torch.randn(args.batch_size, 3, args.image_size, args.image_size, device=device)
     features = encoder(images)
@@ -85,11 +93,13 @@ def main() -> int:
     }
 
     if args.test_rfdetr:
-        from rfdetr import RFDETRSmall
+        from rfdetr import RFDETRLarge, RFDETRSmall
+
+        detector_class = {"small": RFDETRSmall, "large": RFDETRLarge}[args.rfdetr_size]
 
         # RF-DETR does not load a detector checkpoint when pretrain_weights=None.
         # Its temporary encoder is replaced in full immediately below.
-        rf_model = RFDETRSmall(
+        rf_model = detector_class(
             pretrain_weights=None,
             resolution=args.image_size,
             patch_size=16,
@@ -101,15 +111,34 @@ def main() -> int:
             initialization=args.initialization,
             checkpoint=args.checkpoint,
             public_weights=args.public_ssl_weights,
+            architecture=args.architecture,
             freeze_encoder=args.freeze_encoder,
         ).to(device)
         installed_features = installed(images.detach())
         result["rfdetr_installed"] = True
         result["rfdetr_feature_shapes"] = [list(feature.shape) for feature in installed_features]
         result["same_encoder_object"] = rf_model.model.model.backbone[0].encoder is installed
+        result["rfdetr_size"] = args.rfdetr_size
+        result["projector_rebuilt"] = installed.projector_rebuilt
+        result["installed_provenance"] = installed.provenance_dict()
         result["installed_trainable_encoder_parameters"] = sum(
             parameter.numel() for parameter in installed.parameters() if parameter.requires_grad
         )
+        from rfdetr.utilities.tensors import NestedTensor
+
+        mask = torch.zeros(
+            (args.batch_size, args.image_size, args.image_size),
+            dtype=torch.bool,
+            device=device,
+        )
+        bridged_backbone = rf_model.model.model.backbone[0].to(device)
+        projected, cross_attn_projected = bridged_backbone(
+            NestedTensor(images.detach(), mask)
+        )
+        result["rfdetr_projected_feature_shapes"] = [
+            list(feature.tensors.shape) for feature in projected
+        ]
+        result["rfdetr_cross_attention_projector_present"] = cross_attn_projected is not None
 
         # RF-DETR 1.9 creates a fresh detector inside train(). Verify that the
         # scoped training hook replaces that newly built encoder as well.
@@ -121,6 +150,7 @@ def main() -> int:
             initialization=args.initialization,
             checkpoint=args.checkpoint,
             public_weights=args.public_ssl_weights,
+            architecture=args.architecture,
         ):
             training_module = RFDETRModelModule(rf_model.model_config, train_config)
         rebuilt_encoder = training_module.model.backbone[0].encoder.to(device)
