@@ -42,7 +42,7 @@ DEFAULT_SSL_RUN_DIR = Path(r"E:\PHD\Results\SSL_QA40X\dinov3_vitb16_full_seed0")
 DEFAULT_OUTPUT_ROOT = Path(r"E:\PHD\Results\SSL_QA40X\SSL_Checkpoint_Probe_ViTB16_RFDETRLarge")
 
 # PyCharm control. Keep False for a quick plan; set True to launch local probes.
-RUN_PROBES = False
+RUN_PROBES = True
 
 
 def _utc_now() -> str:
