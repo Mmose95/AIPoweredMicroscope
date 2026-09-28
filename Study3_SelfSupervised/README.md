@@ -207,6 +207,22 @@ source ./dinov3_ucloud_env.sh
 bash "$STUDY3_DIR/run_vitb16_ssl_ucloud.sh"
 ```
 
+After the completed 100-epoch B/16 run has been checkpoint-probed, continue
+that exact run to epoch 200 with a conservative low-learning-rate phase:
+
+```bash
+cd /work/projects/myproj
+source ./dinov3_ucloud_env.sh
+bash "$STUDY3_DIR/run_vitb16_ssl_continuation_ucloud.sh"
+```
+
+The continuation launcher requires the original two-GPU, batch-64-per-GPU
+configuration and requires checkpoint iteration `107399` or a later
+continuation checkpoint. It resumes the student, EMA teacher, SSL heads, and
+optimizer in `dinov3_vitb16_full_seed0`, including after an interrupted UCloud
+job. The continued checkpoints remain directly available to the existing
+frozen-backbone checkpoint probe.
+
 The launcher derives the nominal epoch length from the immutable full manifest,
 visible GPU count, and per-GPU batch. Defaults are batch 32 per GPU, 100 nominal
 epochs, and 10 warmup epochs. Override these with `STUDY3_SSL_GPUS`,
