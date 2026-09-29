@@ -223,6 +223,20 @@ optimizer in `dinov3_vitb16_full_seed0`, including after an interrupted UCloud
 job. The continued checkpoints remain directly available to the existing
 frozen-backbone checkpoint probe.
 
+The selected B/16 checkpoint from that probe is SSL epoch 150, iteration
+`161099`. Fully fine-tune it with an unfrozen DINOv3-B/16 backbone and RF-DETR
+Large for 100 detector epochs using:
+
+```bash
+cd /work/projects/myproj
+source ./dinov3_ucloud_env.sh
+bash "$STUDY3_DIR/run_vitb16_large_epoch150_full_ucloud.sh"
+```
+
+The launcher verifies the checkpoint SHA-256 before training, uses the full
+annotated training budget, selects checkpoints on validation EMA mAP@50:95,
+and does not materialize or evaluate the test split.
+
 The launcher derives the nominal epoch length from the immutable full manifest,
 visible GPU count, and per-GPU batch. Defaults are batch 32 per GPU, 100 nominal
 epochs, and 10 warmup epochs. Override these with `STUDY3_SSL_GPUS`,
