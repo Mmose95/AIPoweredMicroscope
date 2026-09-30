@@ -368,6 +368,7 @@ def _run_one(
     args: argparse.Namespace,
     config: dict,
 ) -> Path:
+    model_config = config["model"]
     budget_label = f"budget_{budget:.3f}".replace(".", "p")
     config_fingerprint = hashlib.sha256(
         json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -445,7 +446,7 @@ def _run_one(
     if arm in ("public_ssl", "public_domain_ssl") and not public_weights.is_file():
         raise FileNotFoundError(
             "Official public DINOv3 weights not found. Request Meta access, download "
-            f"the checkpoint matching {model['architecture']}, then pass --public-ssl-weights. "
+            f"the checkpoint matching {model_config['architecture']}, then pass --public-ssl-weights. "
             f"Received: {public_weights}"
         )
     if arm == "scratch" and checkpoint is not None:
@@ -469,9 +470,9 @@ def _run_one(
         "initialization": {
             "backbone": {
                 "scratch": "random",
-                "public_ssl": f"official_{model['architecture']}_lvd1689m",
+                "public_ssl": f"official_{model_config['architecture']}_lvd1689m",
                 "own_data_ssl": "own_data_ssl_ema_teacher",
-                "public_domain_ssl": f"official_{model['architecture']}_then_domain_ssl_ema_teacher",
+                "public_domain_ssl": f"official_{model_config['architecture']}_then_domain_ssl_ema_teacher",
             }[arm],
             "detector": "random",
             "external_pretrained_weights": arm in ("public_ssl", "public_domain_ssl"),
@@ -525,7 +526,6 @@ def _run_one(
         from rfdetr import RFDETRLarge, RFDETRSmall
 
         _seed_everything(seed)
-        model_config = config["model"]
         training = config["training"]
         detector_variant = model_config.get("detector_variant", "small")
         detector_class = {"small": RFDETRSmall, "large": RFDETRLarge}[detector_variant]
