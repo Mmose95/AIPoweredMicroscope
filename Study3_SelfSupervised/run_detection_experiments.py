@@ -445,7 +445,7 @@ def _run_one(
     if arm in ("public_ssl", "public_domain_ssl") and not public_weights.is_file():
         raise FileNotFoundError(
             "Official public DINOv3 weights not found. Request Meta access, download "
-            "dinov3_vits16_pretrain_lvd1689m-08c60483.pth, then pass --public-ssl-weights. "
+            f"the checkpoint matching {model['architecture']}, then pass --public-ssl-weights. "
             f"Received: {public_weights}"
         )
     if arm == "scratch" and checkpoint is not None:
@@ -469,9 +469,9 @@ def _run_one(
         "initialization": {
             "backbone": {
                 "scratch": "random",
-                "public_ssl": "official_dinov3_vits16_lvd1689m",
+                "public_ssl": f"official_{model['architecture']}_lvd1689m",
                 "own_data_ssl": "own_data_ssl_ema_teacher",
-                "public_domain_ssl": "official_dinov3_then_domain_ssl_ema_teacher",
+                "public_domain_ssl": f"official_{model['architecture']}_then_domain_ssl_ema_teacher",
             }[arm],
             "detector": "random",
             "external_pretrained_weights": arm in ("public_ssl", "public_domain_ssl"),

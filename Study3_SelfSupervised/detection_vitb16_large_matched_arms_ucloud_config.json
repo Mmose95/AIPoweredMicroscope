@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "experiment_name": "study3_vitb16_rfdetr_large_matched_40x",
+  "arms": ["scratch", "public_ssl", "own_data_ssl"],
+  "seeds": [0],
+  "annotation_budgets": [1.0],
+  "model": {
+    "architecture": "dinov3_vitb16",
+    "detector_variant": "large",
+    "feature_layers": [2, 5, 8, 11],
+    "resolution": 512,
+    "patch_size": 16,
+    "num_queries": 300,
+    "freeze_encoder": false,
+    "class_names": [
+      "Leucocyte",
+      "Squamous Epithelial Cell",
+      "Columnar Epithelial Cell"
+    ]
+  },
+  "training": {
+    "epochs": 100,
+    "batch_size": 2,
+    "grad_accum_steps": 8,
+    "lr": 0.00005,
+    "weight_decay": 0.0007,
+    "num_workers": 4,
+    "checkpoint_interval": 5,
+    "amp": true,
+    "gradient_checkpointing": true
+  },
+  "selection": {
+    "split": "valid",
+    "metric": "val/ema_mAP_50_95",
+    "test_during_training": false,
+    "early_stopping": false
+  }
+}

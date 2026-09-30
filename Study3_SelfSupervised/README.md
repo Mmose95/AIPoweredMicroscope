@@ -233,6 +233,25 @@ source ./dinov3_ucloud_env.sh
 bash "$STUDY3_DIR/run_vitb16_large_epoch150_full_ucloud.sh"
 ```
 
+### Matched B/16 + RF-DETR Large comparison
+
+`detection_vitb16_large_matched_arms_ucloud_config.json` fixes the downstream
+protocol for the paper comparison: DINOv3-B/16, RF-DETR Large, seed 0, the full
+annotation budget, and 100 detector epochs. The selected own-data SSL epoch-150
+run already uses these settings. Run the two missing initialization arms on
+separate one-GPU jobs (the current RF-DETR runner uses one GPU):
+
+```bash
+bash "$STUDY3_DIR/run_vitb16_large_matched_arm_ucloud.sh" scratch
+bash "$STUDY3_DIR/run_vitb16_large_matched_arm_ucloud.sh" public_ssl
+```
+
+The public arm requires the official DINOv3-B/16 checkpoint. Attach its folder
+to the job; the launcher searches `/work` for
+`dinov3_vitb16_pretrain*.pth`. Alternatively, set
+`STUDY3_PUBLIC_SSL_WEIGHTS` to its mounted path. A DINOv3-S/16 checkpoint is
+rejected by the exact B/16 model load and is not a valid matched comparator.
+
 The launcher verifies the checkpoint SHA-256 before training, uses the full
 annotated training budget, selects checkpoints on validation EMA mAP@50:95,
 and does not materialize or evaluate the test split.
