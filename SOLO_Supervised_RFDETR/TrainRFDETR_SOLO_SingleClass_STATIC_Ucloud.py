@@ -1701,6 +1701,7 @@ def train_one_run(target_name: str,
                   lr: float,
                   lr_encoder: float | None,
                   warmup_epochs: float | None,
+                  lr_scheduler: str | None,
                   freeze_encoder: bool | None,
                   batch_size: int,
                   grad_accum_steps: int,
@@ -1907,6 +1908,8 @@ def train_one_run(target_name: str,
         kwargs["lr_encoder"] = float(lr_encoder)
     if warmup_epochs is not None:
         kwargs["warmup_epochs"] = float(warmup_epochs)
+    if lr_scheduler is not None:
+        kwargs["lr_scheduler"] = str(lr_scheduler)
     if freeze_encoder is not None:
         kwargs["freeze_encoder"] = bool(freeze_encoder)
     # resizing behaviour: IMPORTANT
@@ -2917,15 +2920,111 @@ def _build_final_b200_cfgs_for_target(target_key: str, matrix_cfg: dict) -> list
     return cfgs
 
 
+def _focused_float_list(name: str, default: str) -> list[float]:
+    raw = os.getenv(name, default)
+    values = [float(x.strip()) for x in raw.split(",") if x.strip()]
+    if not values or any(x <= 0 for x in values):
+        raise ValueError(f"{name} must contain positive comma-separated values, got {raw!r}")
+    return values
+
+
+def _focused_required_float(name: str) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        raise ValueError(f"{name} is required for this focused-HPO stage.")
+    value = float(raw)
+    if value <= 0:
+        raise ValueError(f"{name} must be > 0, got {value}")
+    return value
+
+
+def _build_focused_hpo_cfgs_for_target(target_key: str) -> list[dict]:
+    """Build the staged, single-model HPO agreed for the two-class study."""
+    if target_key != "two_class":
+        raise ValueError("focused_hpo is only defined for RFDETR_HPO_TARGET=two-class.")
+
+    stage = os.getenv("RFDETR_FOCUSED_STAGE", "lr").strip().lower()
+    if stage not in ("lr", "wd", "final"):
+        raise ValueError("RFDETR_FOCUSED_STAGE must be one of: lr, wd, final.")
+
+    shared = {
+        "MODEL_CLS": "RFDETRLarge",
+        "INIT_MODE": "default",
+        "SSL_CKPT": "",
+        "RESOLUTION": 704,
+        "EPOCHS": int(os.getenv("RFDETR_FOCUSED_EPOCHS", "120")),
+        "WARMUP_EPOCHS": float(os.getenv("RFDETR_FOCUSED_WARMUP_EPOCHS", "3")),
+        "LR_SCHEDULER": os.getenv("RFDETR_FOCUSED_LR_SCHEDULER", "cosine").strip().lower(),
+        "FREEZE_ENCODER": False,
+        "GRAD_ACCUM_STEPS": int(os.getenv("RFDETR_FOCUSED_GRAD_ACCUM_STEPS", "4")),
+        "BATCH": int(os.getenv("RFDETR_FOCUSED_BATCH", "4")),
+        "DROPOUT": float(os.getenv("RFDETR_FOCUSED_DROPOUT", "0.15")),
+        "MULTI_SCALE": True,
+        "EXPANDED_SCALES": False,
+        "NUM_QUERIES": 400,
+        "AUG_COPIES": 0,
+        "EARLY_STOPPING": True,
+        "EARLY_STOPPING_PATIENCE": int(os.getenv("RFDETR_FOCUSED_PATIENCE", "20")),
+        "EARLY_STOPPING_MIN_DELTA": float(os.getenv("RFDETR_FOCUSED_MIN_DELTA", "0.001")),
+        "EARLY_STOPPING_USE_EMA": True,
+        "EARLY_STOPPING_METRIC": "map5095",
+        "TRAIN_FRACTION": 1.0,
+        "FRACTION_SEED": int(os.getenv("RFDETR_FOCUSED_SEED", "42")),
+        "SEED": int(os.getenv("RFDETR_FOCUSED_SEED", "42")),
+    }
+
+    cfgs: list[dict] = []
+    if stage == "lr":
+        main_lrs = _focused_float_list("RFDETR_FOCUSED_MAIN_LRS", "5e-5,8e-5,1e-4")
+        encoder_lrs = _focused_float_list("RFDETR_FOCUSED_ENCODER_LRS", "5e-6,1.5e-5,3e-5")
+        fixed_wd = float(os.getenv("RFDETR_FOCUSED_STAGE1_WEIGHT_DECAY", "7e-4"))
+        for lr in main_lrs:
+            for lr_encoder in encoder_lrs:
+                cfg = dict(shared)
+                cfg.update({
+                    "RUN_VARIANT": f"focused_lr_lr{lr:g}_enc{lr_encoder:g}",
+                    "LR": lr,
+                    "LR_ENCODER": lr_encoder,
+                    "WEIGHT_DECAY": fixed_wd,
+                })
+                cfgs.append(cfg)
+    elif stage == "wd":
+        selected_lr = _focused_required_float("RFDETR_FOCUSED_SELECTED_LR")
+        selected_encoder_lr = _focused_required_float("RFDETR_FOCUSED_SELECTED_LR_ENCODER")
+        for weight_decay in _focused_float_list(
+            "RFDETR_FOCUSED_WEIGHT_DECAYS", "1e-4,3e-4,7e-4,1e-3"
+        ):
+            cfg = dict(shared)
+            cfg.update({
+                "RUN_VARIANT": f"focused_wd_wd{weight_decay:g}",
+                "LR": selected_lr,
+                "LR_ENCODER": selected_encoder_lr,
+                "WEIGHT_DECAY": weight_decay,
+            })
+            cfgs.append(cfg)
+    else:
+        cfg = dict(shared)
+        cfg.update({
+            "RUN_VARIANT": "focused_final_isolated",
+            "LR": _focused_required_float("RFDETR_FOCUSED_SELECTED_LR"),
+            "LR_ENCODER": _focused_required_float("RFDETR_FOCUSED_SELECTED_LR_ENCODER"),
+            "WEIGHT_DECAY": _focused_required_float("RFDETR_FOCUSED_SELECTED_WEIGHT_DECAY"),
+        })
+        cfgs.append(cfg)
+
+    return cfgs
+
+
 # One-click experiment modes with env flags.
 EXPERIMENT_MODE = os.getenv("RFDETR_EXPERIMENT_MODE", "matrix").strip().lower()
-if EXPERIMENT_MODE not in ("matrix", "ssl_triage", "final_b200"):
+if EXPERIMENT_MODE not in ("matrix", "ssl_triage", "final_b200", "focused_hpo"):
     raise ValueError(
-        "RFDETR_EXPERIMENT_MODE must be one of: matrix, ssl_triage, final_b200."
+        "RFDETR_EXPERIMENT_MODE must be one of: matrix, ssl_triage, final_b200, focused_hpo."
     )
+FOCUSED_STAGE = os.getenv("RFDETR_FOCUSED_STAGE", "lr").strip().lower()
 RUN_TEST_DURING_TRAIN = _env_bool(
     "RFDETR_RUN_TEST",
-    "0" if EXPERIMENT_MODE == "final_b200" else "1",
+    "0" if EXPERIMENT_MODE in ("final_b200", "focused_hpo") and FOCUSED_STAGE != "final" else "1",
 )
 PLAN_ONLY = _env_bool("RFDETR_PLAN_ONLY", "0")
 
@@ -2955,7 +3054,7 @@ elif EXPERIMENT_MODE == "ssl_triage":
         f"fraction_seeds={','.join(str(x) for x in MATRIX_CFG['fraction_seeds'])} "
         f"seeds={','.join(str(x) for x in MATRIX_CFG['seeds'])}"
     )
-else:
+elif EXPERIMENT_MODE == "final_b200":
     if not need_two_class:
         raise ValueError("RFDETR_EXPERIMENT_MODE=final_b200 requires RFDETR_HPO_TARGET=two-class.")
     SEARCH_LEUCO = {}
@@ -2964,6 +3063,17 @@ else:
     _main_print(
         f"[EXPERIMENT] mode=final_b200 configs={len(SEARCH_TWO_CLASS)} "
         f"run_test_during_train={RUN_TEST_DURING_TRAIN} "
+        f"plan_only={PLAN_ONLY}"
+    )
+else:
+    if not need_two_class:
+        raise ValueError("RFDETR_EXPERIMENT_MODE=focused_hpo requires RFDETR_HPO_TARGET=two-class.")
+    SEARCH_LEUCO = {}
+    SEARCH_EPI = {}
+    SEARCH_TWO_CLASS = _build_focused_hpo_cfgs_for_target("two_class")
+    _main_print(
+        f"[EXPERIMENT] mode=focused_hpo stage={FOCUSED_STAGE} "
+        f"configs={len(SEARCH_TWO_CLASS)} run_test_during_train={RUN_TEST_DURING_TRAIN} "
         f"plan_only={PLAN_ONLY}"
     )
 
@@ -3010,6 +3120,7 @@ def _build_training_plan_rows(jobs: list[dict]) -> list[dict]:
             "lr": cfg.get("LR"),
             "lr_encoder": cfg.get("LR_ENCODER"),
             "warmup_epochs": cfg.get("WARMUP_EPOCHS"),
+            "lr_scheduler": cfg.get("LR_SCHEDULER"),
             "freeze_encoder": cfg.get("FREEZE_ENCODER"),
             "batch": cfg.get("BATCH"),
             "grad_accum_steps": cfg.get("GRAD_ACCUM_STEPS"),
@@ -3050,7 +3161,7 @@ def _print_and_save_training_plan(plan_rows: list[dict], session_root: Path):
 
     concise_cols = [
         "run_idx", "target", "model", "run_variant", "init_mode", "train_fraction", "fraction_seed", "seed", "epochs", "lr",
-        "lr_encoder", "warmup_epochs", "freeze_encoder",
+        "lr_encoder", "warmup_epochs", "lr_scheduler", "freeze_encoder",
         "batch", "grad_accum_steps", "resolution", "multi_scale", "expanded_scales", "num_queries", "weight_decay", "dropout",
         "early_stopping", "early_stopping_patience", "early_stopping_min_delta",
         "early_stopping_use_ema", "early_stopping_metric", "run_test_during_train", "ssl_ckpt_name",
@@ -3195,6 +3306,7 @@ def _worker_entry(cfg: dict, gpu_id: int, run_idx: int, target_name: str,
                     lr=try_cfg["LR"],
                     lr_encoder=try_cfg.get("LR_ENCODER"),
                     warmup_epochs=try_cfg.get("WARMUP_EPOCHS"),
+                    lr_scheduler=try_cfg.get("LR_SCHEDULER"),
                     freeze_encoder=try_cfg.get("FREEZE_ENCODER"),
                     batch_size=try_cfg["BATCH"],
                     grad_accum_steps=try_cfg["GRAD_ACCUM_STEPS"],
@@ -3468,6 +3580,8 @@ def run_hpo_all_classes(session_root: Path) -> dict:
 
         def sort_key(r):
             a = r["val_AP50"]; b = r["val_mAP5095"]
+            if EXPERIMENT_MODE == "focused_hpo":
+                return (-(b if b is not None else -1), -(a if a is not None else -1))
             return (-(a if a is not None else -1), -(b if b is not None else -1))
 
         rows.sort(key=sort_key)
@@ -3537,6 +3651,7 @@ def main():
         "session_id": HPO_SESSION_ID,
         "work_root": str(WORK_ROOT),
         "experiment_mode": EXPERIMENT_MODE,
+        "focused_stage": FOCUSED_STAGE if EXPERIMENT_MODE == "focused_hpo" else None,
         "input_mode": INPUT_MODE,
         "use_patch_224": USE_PATCH_224,
         "patch_size": PATCH_SIZE if USE_PATCH_224 else None,
@@ -3545,7 +3660,20 @@ def main():
         "plan_only": PLAN_ONLY,
     }
 
-    final["matrix_config"] = MATRIX_CFG
+    if EXPERIMENT_MODE == "focused_hpo":
+        final["focused_config"] = {
+            "model": "RFDETRLarge",
+            "resolution": 704,
+            "num_queries": 400,
+            "seed": int(os.getenv("RFDETR_FOCUSED_SEED", "42")),
+            "epochs": int(os.getenv("RFDETR_FOCUSED_EPOCHS", "120")),
+            "batch": int(os.getenv("RFDETR_FOCUSED_BATCH", "4")),
+            "grad_accum_steps": int(os.getenv("RFDETR_FOCUSED_GRAD_ACCUM_STEPS", "4")),
+            "lr_scheduler": os.getenv("RFDETR_FOCUSED_LR_SCHEDULER", "cosine"),
+            "warmup_epochs": float(os.getenv("RFDETR_FOCUSED_WARMUP_EPOCHS", "3")),
+        }
+    else:
+        final["matrix_config"] = MATRIX_CFG
 
     if "Leucocyte" in res_all:
         final["leucocyte"] = {
