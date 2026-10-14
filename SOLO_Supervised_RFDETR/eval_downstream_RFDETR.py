@@ -53,7 +53,7 @@ DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "DownstreamOutput_Downstream"
 DEFAULT_CALIBRATION_SUMMARY = (
     PROJECT_ROOT
     / "EvaluationOutput"
-    / "RFDETR_ThresholdCalibration_20260701-140419"
+    / "RFDETR_ThresholdCalibration_HPO009"
     / "threshold_calibration_summary.json"
 )
 
@@ -68,11 +68,11 @@ EXPECTED_EXCLUSION_COUNTS = {
     "not_in_cvat_project": 1,
     "too_difficult_for_clinical_review": 3,
 }
-EXPECTED_MODEL_CLASS = "RFDETR2XLarge"
-EXPECTED_MODEL_RESOLUTION = 880
+EXPECTED_MODEL_CLASS = "RFDETRLarge"
+EXPECTED_MODEL_RESOLUTION = 704
 EXPECTED_THRESHOLDS = {
-    "Leucocyte": 0.36,
-    "Squamous Epithelial Cell": 0.35,
+    "Leucocyte": 0.35,
+    "Squamous Epithelial Cell": 0.24,
 }
 EXPECTED_SLICE_SIZE = 640
 

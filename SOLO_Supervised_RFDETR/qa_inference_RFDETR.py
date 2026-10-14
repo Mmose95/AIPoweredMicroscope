@@ -59,8 +59,9 @@ DEFAULT_CLASS_NAMES = [
     "Squamous Epithelial Cell",
 ]
 CLASS_SCORE_THRESHOLDS: Dict[str, float] = {
-    "Leucocyte": 0.36,
-    "Squamous Epithelial Cell": 0.35,
+    # Fixed by the independent threshold-calibration run used for deployment.
+    "Leucocyte": 0.35,
+    "Squamous Epithelial Cell": 0.24,
 }
 DOWNSTREAM_LABELS = {
     1: "Qualified",
@@ -71,8 +72,9 @@ DOWNSTREAM_PRESETS = {
     "two_class": {
         "target_name": "Downstream",
         "checkpoint": (
-            r"E:\PHD\Results\Quality Assessment\FINAL_B200"
-            r"\session_20260618_113853\TwoClass\HPO_Config_009\checkpoint_best_ema.pth"
+            r"E:\PHD\Results\Quality Assessment\Final Results V2"
+            r"\FOCUSED_LARGE_HPO\FOCUSED_LARGE_HPO\LR\session_20261008_154321"
+            r"\TwoClass\HPO_Config_009\checkpoint_best_ema.pth"
         ),
         "images_root": DEFAULT_IMAGES_ROOT,
         "model_class": "auto",
