@@ -54,19 +54,19 @@ from rfdetr_model_registry import (
 PYCHARM_USE_TOP_LEVEL_CONFIG = True
 
 DEFAULT_CLASS_SCORE_THRESHOLDS: Dict[str, float] = {
-    "Leucocyte": 0.36,
-    "Squamous Epithelial Cell": 0.35,
+    "Leucocyte": 0.35,
+    "Squamous Epithelial Cell": 0.24,
 }
 DEFAULT_CLASS_SCORE_THRESHOLDS_TEXT = ";".join(
     f"{name}={threshold}" for name, threshold in DEFAULT_CLASS_SCORE_THRESHOLDS.items()
 )
 
 PYCHARM_EVALUATE = {
-    "run_dir": r"E:\PHD\Results\Quality Assessment\FINAL_B200\session_20260618_113853\TwoClass\HPO_Config_009",
-    "checkpoint": r"E:\PHD\Results\Quality Assessment\FINAL_B200\session_20260618_113853\TwoClass\HPO_Config_009\checkpoint_best_ema.pth",
-    "test_json": r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\SOLO_Supervised_RFDETR\Stat_Dataset\QA-2025v1_TwoClass_OVR_V2_20260618-101346\test\_annotations.coco.json",
-    "output_dir": r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\EvaluationOutput\TwoClass_HPO009_EMA_TestEval",
-    "model_class": "auto",
+    "run_dir": r"E:\PHD\Results\Quality Assessment\Final Results V2\FOCUSED_LARGE_HPO\FOCUSED_LARGE_HPO\LR\session_20261008_154321\TwoClass\HPO_Config_009",
+    "checkpoint": r"E:\PHD\Results\Quality Assessment\Final Results V2\FOCUSED_LARGE_HPO\FOCUSED_LARGE_HPO\LR\session_20261008_154321\TwoClass\HPO_Config_009\checkpoint_best_ema.pth",
+    "test_json": r"E:\PHD\Results\Quality Assessment\Final Results V2\FOCUSED_LARGE_HPO\FOCUSED_LARGE_HPO\LR\QA-2025v1_TwoClass_OVR_V2_20260618-101346_RESOLVED\test\_annotations.coco.json",
+    "output_dir": r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\EvaluationOutput\TwoClass_HPO009_Large_EMA_TestEval",
+    "model_class": "RFDETRLarge",
     "score_floor": 0.001,
     "score_threshold": 0.001,
     "class_score_thresholds": DEFAULT_CLASS_SCORE_THRESHOLDS_TEXT,
@@ -81,7 +81,7 @@ PYCHARM_EVALUATE = {
 
     "image_max_side": 1600,
     "seed": 42,
-    "path_rewrite": "",
+    "path_rewrite": r"/work/Zoom10x - Quality Assessment_Cleaned=E:/PHD/PhdData/CellScanData/Zoom10x - Quality Assessment_Cleaned",
     "images_root": r"E:\PHD\PhdData\CellScanData\Zoom10x - Quality Assessment_Cleaned",
     "skip_missing_images": False,
     "no_plots": False,
