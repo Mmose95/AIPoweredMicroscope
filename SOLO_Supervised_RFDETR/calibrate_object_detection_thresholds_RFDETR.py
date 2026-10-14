@@ -65,10 +65,18 @@ PATCH_KEY_RE = re.compile(r"(BF\.\d+_\d+_patch_x\d+_y\d+)(?:\.[^.\\/]+)?$", re.I
 
 PYCHARM_CALIBRATE = {
     "calibration_root": r"E:\PHD\PhdData\CellScanData\Object Detection Calibration Dataset",
-    "images_root": r"E:\PHD\PhdData\CellScanData\Zoom10x - Quality Assessment",
-    "run_dir": r"E:\PHD\Results\Quality Assessment\FINAL_B200\session_20260618_113853\TwoClass\HPO_Config_009",
-    "checkpoint": r"E:\PHD\Results\Quality Assessment\FINAL_B200\session_20260618_113853\TwoClass\HPO_Config_009\checkpoint_best_ema.pth",
-    "output_dir": r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\EvaluationOutput\RFDETR_ThresholdCalibration",
+    "images_root": r"E:\PHD\PhdData\CellScanData\Zoom10x - Quality Assessment_Cleaned",
+    "run_dir": (
+        r"E:\PHD\Results\Quality Assessment\Final Results V2"
+        r"\FOCUSED_LARGE_HPO\FOCUSED_LARGE_HPO\LR\session_20261008_154321"
+        r"\TwoClass\HPO_Config_009"
+    ),
+    "checkpoint": (
+        r"E:\PHD\Results\Quality Assessment\Final Results V2"
+        r"\FOCUSED_LARGE_HPO\FOCUSED_LARGE_HPO\LR\session_20261008_154321"
+        r"\TwoClass\HPO_Config_009\checkpoint_best_ema.pth"
+    ),
+    "output_dir": r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\EvaluationOutput\RFDETR_ThresholdCalibration_HPO009",
     "model_class": "auto",
     "score_floor": 0.001,
     "iou_threshold": 0.50,
