@@ -60,8 +60,8 @@ DEFAULT_CLASS_NAMES = [
 ]
 CLASS_SCORE_THRESHOLDS: Dict[str, float] = {
     # Fixed by the independent threshold-calibration run used for deployment.
-    "Leucocyte": 0.35,
-    "Squamous Epithelial Cell": 0.24,
+    "Leucocyte": 0.31,
+    "Squamous Epithelial Cell": 0.54,
 }
 DOWNSTREAM_LABELS = {
     1: "Qualified",
