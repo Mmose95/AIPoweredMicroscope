@@ -54,8 +54,8 @@ from rfdetr_model_registry import (
 PYCHARM_USE_TOP_LEVEL_CONFIG = True
 
 DEFAULT_CLASS_SCORE_THRESHOLDS: Dict[str, float] = {
-    "Leucocyte": 0.35,
-    "Squamous Epithelial Cell": 0.24,
+    "Leucocyte": 0.31,
+    "Squamous Epithelial Cell": 0.54,
 }
 DEFAULT_CLASS_SCORE_THRESHOLDS_TEXT = ";".join(
     f"{name}={threshold}" for name, threshold in DEFAULT_CLASS_SCORE_THRESHOLDS.items()
@@ -65,7 +65,7 @@ PYCHARM_EVALUATE = {
     "run_dir": r"E:\PHD\Results\Quality Assessment\Final Results V2\FOCUSED_LARGE_HPO\FOCUSED_LARGE_HPO\LR\session_20261008_154321\TwoClass\HPO_Config_009",
     "checkpoint": r"E:\PHD\Results\Quality Assessment\Final Results V2\FOCUSED_LARGE_HPO\FOCUSED_LARGE_HPO\LR\session_20261008_154321\TwoClass\HPO_Config_009\checkpoint_best_ema.pth",
     "test_json": r"E:\PHD\Results\Quality Assessment\Final Results V2\FOCUSED_LARGE_HPO\FOCUSED_LARGE_HPO\LR\QA-2025v1_TwoClass_OVR_V2_20260618-101346_RESOLVED\test\_annotations.coco.json",
-    "output_dir": r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\EvaluationOutput\TwoClass_HPO009_Large_EMA_TestEval",
+    "output_dir": r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\EvaluationOutput\TwoClass_HPO009_Large_EMA_TestEval_NewCalibration",
     "model_class": "RFDETRLarge",
     "score_floor": 0.001,
     "score_threshold": 0.001,

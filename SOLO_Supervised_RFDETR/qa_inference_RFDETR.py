@@ -633,7 +633,9 @@ def load_model_for_fov(
     num_classes: Optional[int],
     class_names: Optional[Sequence[str]],
 ) -> Any:
-    force_repo_local_rfdetr()
+    # Use the installed RF-DETR package.  The repository also contains an
+    # older vendored copy (``rfdetr_local``), but it is incompatible with the
+    # RF-DETR 1.8/Transformers 5 environment used for the current checkpoint.
     model_kwargs: dict[str, Any] = {"pretrain_weights": str(checkpoint)}
     model_kwargs.update(_checkpoint_constructor_kwargs(checkpoint))
     if resolution is not None:
