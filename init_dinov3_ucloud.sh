@@ -129,45 +129,67 @@ fi
 ENV_SIGNATURE="v2-py${PYTHON_VERSION}-torch${TORCH_VERSION}-tv${TORCHVISION_VERSION}-rfdetr${RFDETR_VERSION}-dinov3-${DINOV3_COMMIT}"
 ENV_MARKER="$ENV_DIR/.aipoweredmicroscope-${ENV_SIGNATURE}.ready"
 environment_audit() {
-  python - <<PY
+  local audit_status
+  if timeout --kill-after=10s "${DINOV3_ENV_AUDIT_TIMEOUT:-90}s" python -u - <<PY
 import importlib.metadata
 import importlib.util
 import sys
 
 def installed(distribution: str, expected: str) -> bool:
+    print(f"[DINOv3 Init] Checking {distribution} metadata", flush=True)
     try:
         return importlib.metadata.version(distribution).split("+")[0] == expected
     except importlib.metadata.PackageNotFoundError:
         return False
 
+print("[DINOv3 Init] Metadata audit Python started", flush=True)
 checks = (
     sys.version_info[:2] == tuple(map(int, "${PYTHON_VERSION}".split("."))),
     installed("torch", "${TORCH_VERSION}"),
     installed("torchvision", "${TORCHVISION_VERSION}"),
     installed("rfdetr", "${RFDETR_VERSION}"),
-    importlib.util.find_spec("dinov3") is not None,
-    importlib.util.find_spec("ipykernel") is not None,
 )
-raise SystemExit(0 if all(checks) else 1)
+print("[DINOv3 Init] Checking DINOv3 and ipykernel package paths", flush=True)
+packages_found = all(importlib.util.find_spec(name) is not None for name in ("dinov3", "ipykernel"))
+raise SystemExit(0 if all(checks) and packages_found else 10)
 PY
+  then
+    return 0
+  else
+    audit_status=$?
+  fi
+  if [[ "$audit_status" == 10 ]]; then
+    return 1
+  fi
+  echo "[DINOv3 Init][ERROR] Metadata audit could not finish (exit $audit_status). Check the shared environment mount before retrying." >&2
+  exit "$audit_status"
 }
 
-echo "[DINOv3 Init] Auditing pinned environment metadata"
-if environment_audit; then
-  touch "$ENV_MARKER"
+environment_ready() {
+  if [[ -f "$ENV_MARKER" && "${DINOV3_FORCE_ENV_AUDIT:-0}" != 1 ]]; then
+    echo "[DINOv3 Init] Found readiness marker for the pinned environment"
+    return 0
+  fi
+  echo "[DINOv3 Init] Auditing pinned environment metadata"
+  environment_audit
+}
+
+if environment_ready; then
+  [[ -f "$ENV_MARKER" ]] || touch "$ENV_MARKER"
   echo "[DINOv3 Init] Environment audit passed; dependency installation skipped"
 else
   lock_dir="${DINOV3_ENV_LOCK_DIR:-/work/CondaEnv/.locks}"
   mkdir -p "$lock_dir"
   exec 9>"$lock_dir/phd-dinov3-install.lock"
-  if command -v flock >/dev/null 2>&1; then
-    echo "[DINOv3 Init] Waiting for the shared environment installation lock"
-    flock 9
+  echo "[DINOv3 Init] Waiting for the shared environment installation lock"
+  if ! flock -w "${DINOV3_ENV_LOCK_TIMEOUT:-300}" 9; then
+    echo "[DINOv3 Init][ERROR] Could not obtain the shared environment installation lock" >&2
+    exit 1
   fi
 
   # Another job may have repaired the shared environment while this job was
   # waiting for the lock. Audit again before performing any writes.
-  if environment_audit; then
+  if environment_ready; then
     echo "[DINOv3 Init] Environment was prepared by another job; installation skipped"
   else
     echo "[DINOv3 Init] Environment audit failed; installing pinned dependencies"
@@ -193,13 +215,13 @@ PY
     # the DINOv3 bridge is tested against its model/training interfaces.
     python -m pip install --upgrade "rfdetr[train,augment]==${RFDETR_VERSION}"
     python -m pip install --upgrade ipykernel
-  fi
-
-  if ! environment_audit; then
-    echo "[DINOv3 Init][ERROR] Environment audit still fails after installation." >&2
-    exit 1
+    if ! environment_audit; then
+      echo "[DINOv3 Init][ERROR] Environment audit still fails after installation." >&2
+      exit 1
+    fi
   fi
   touch "$ENV_MARKER"
+  exec 9>&-
 fi
 
 # The home directory is job-local, so register the persistent environment's
