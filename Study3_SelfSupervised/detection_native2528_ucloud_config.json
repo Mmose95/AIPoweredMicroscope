@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "experiment_name": "study3_native2528_vits16_rfdetr_large_40x",
+  "arms": ["public_ssl"],
+  "seeds": [0],
+  "annotation_budgets": [1.0],
+  "model": {
+    "architecture": "dinov3_vits16",
+    "detector_variant": "large",
+    "feature_layers": [2, 5, 8, 11],
+    "resolution": 2528,
+    "patch_size": 16,
+    "positional_encoding_size": 158,
+    "num_queries": 300,
+    "class_names": ["Leucocyte", "Squamous Epithelial Cell"]
+  },
+  "training": {
+    "epochs": 50,
+    "batch_size": 1,
+    "grad_accum_steps": 16,
+    "lr": 0.00005,
+    "weight_decay": 0.0007,
+    "num_workers": 4,
+    "checkpoint_interval": 5,
+    "amp": true,
+    "gradient_checkpointing": true,
+    "multi_scale": false,
+    "scale_jitter": false,
+    "do_random_resize_via_padding": false
+  },
+  "selection": {
+    "split": "valid",
+    "metric": "val/ema_mAP_50_95",
+    "test_during_training": false,
+    "early_stopping": false
+  }
+}

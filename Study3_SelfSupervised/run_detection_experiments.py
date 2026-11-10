@@ -125,6 +125,7 @@ def parse_args() -> argparse.Namespace:
     defaults = _defaults()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--smoke-test", action="store_true", help="One train and validation image, one epoch")
     parser.add_argument("--arms", nargs="+", choices=DEFAULT_ARMS, default=list(DEFAULT_ARMS))
     parser.add_argument("--dinov3-repo", type=Path, default=defaults["dinov3_repo"])
     parser.add_argument("--dataset-dir", type=Path, default=defaults["dataset_dir"])
@@ -226,6 +227,7 @@ def _materialize_dataset(
     image_root: Path,
     budget: float,
     seed: int,
+    image_limit: int | None = None,
 ) -> dict:
     if not (0.0 < budget <= 1.0):
         raise ValueError(f"Annotation budget must be in (0, 1], received {budget}")
@@ -256,6 +258,8 @@ def _materialize_dataset(
             images = sorted(original_images, key=lambda item: _rank(item, seed))[:keep_count]
         else:
             images = original_images
+        if image_limit is not None:
+            images = images[:image_limit]
         image_ids = {item["id"] for item in images}
         annotations = [a for a in coco.get("annotations", []) if a.get("image_id") in image_ids]
         print(f"[Detector data] {split}: checking {len(images):,} image paths", flush=True)
@@ -442,7 +446,8 @@ def _run_one(
             dataset_report = previous_dataset_report
     else:
         dataset_report = _materialize_dataset(
-            args.dataset_dir.resolve(), dataset_dir, args.image_root.resolve(), budget, seed
+            args.dataset_dir.resolve(), dataset_dir, args.image_root.resolve(), budget, seed,
+            image_limit=1 if args.smoke_test else None,
         )
     checkpoint = args.ssl_checkpoint.resolve() if arm in ("own_data_ssl", "public_domain_ssl") else None
     public_weights = args.public_ssl_weights.resolve() if arm in ("public_ssl", "public_domain_ssl") else None
@@ -557,6 +562,8 @@ def _run_one(
             num_queries=int(model_config["num_queries"]),
             gradient_checkpointing=bool(training["gradient_checkpointing"]),
             freeze_encoder=bool(model_config.get("freeze_encoder", False)),
+            **({"positional_encoding_size": model_config["positional_encoding_size"]}
+               if "positional_encoding_size" in model_config else {}),
         )
         print(
             "[Detector run] Launching training; RF-DETR will print validation metrics each epoch",
@@ -623,6 +630,11 @@ def main() -> int:
     args = parse_args()
     args.config = args.config.expanduser().resolve()
     config = json.loads(args.config.read_text(encoding="utf-8"))
+    if args.smoke_test:
+        if args.resume:
+            raise ValueError("Smoke tests start a fresh run")
+        config["experiment_name"] += "_smoke"
+        config["training"].update(epochs=1, batch_size=1, grad_accum_steps=1, num_workers=0)
     _validate_config(config)
     for required in (args.dinov3_repo / "hubconf.py", args.dataset_dir, args.image_root):
         if not required.exists():

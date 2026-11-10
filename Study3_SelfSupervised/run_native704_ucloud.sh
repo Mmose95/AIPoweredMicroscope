@@ -10,8 +10,8 @@ fi
 
 mode="${1:-}"
 case "$mode" in
-  prepare|scratch|public_ssl|ssl|ssl-scratch|ssl-adapt|own_data_ssl|public_domain_ssl) ;;
-  *) echo "Usage: $0 {prepare|scratch|public_ssl|ssl|ssl-scratch|ssl-adapt|own_data_ssl|public_domain_ssl}" >&2; exit 2 ;;
+  prepare|prepare-full|scratch|public_ssl|public_ssl_full|public_ssl_full_smoke|ssl|ssl-scratch|ssl-adapt|own_data_ssl|public_domain_ssl) ;;
+  *) echo "Usage: $0 {prepare|prepare-full|scratch|public_ssl|public_ssl_full|public_ssl_full_smoke|ssl|ssl-scratch|ssl-adapt|own_data_ssl|public_domain_ssl}" >&2; exit 2 ;;
 esac
 
 : "${OUTPUT_ROOT:?Source the UCloud environment or set OUTPUT_ROOT to persistent storage}"
@@ -23,11 +23,16 @@ public_weights="${STUDY3_PUBLIC_SSL_WEIGHTS:-}"
 python_bin="${PYTHON_BIN:-python}"
 
 case "$mode" in
-  prepare)
+  prepare|prepare-full)
     : "${CORRECTED_PATCH_ROOT:?Set this to the uploaded flat folder of corrected JPEG patches}"
+    geometry=(--tile-size 704 --min-overlap 0.25)
+    if [[ "$mode" == prepare-full ]]; then
+      tiles="$work/full_native2528"
+      geometry=(--tile-size 2528 --pad-only)
+    fi
     exec "$python_bin" "$repo_dir/40x_Study2_Preprocessing/tileDetectorDataset.py" \
       --source "$source_split" --image-root "$CORRECTED_PATCH_ROOT" --output "$tiles" \
-      --tile-size 704 --min-overlap 0.25 --workers "${NATIVE704_TILE_WORKERS:-8}"
+      "${geometry[@]}" --workers "${NATIVE704_TILE_WORKERS:-8}"
     ;;
 esac
 
@@ -90,11 +95,22 @@ case "$mode" in
     ;;
 esac
 
+config="$study_dir/detection_native704_ucloud_config.json"
+prepare_mode=prepare
+extra=()
+if [[ "$mode" == public_ssl_full || "$mode" == public_ssl_full_smoke ]]; then
+  tiles="$work/full_native2528"
+  config="$study_dir/detection_native2528_ucloud_config.json"
+  prepare_mode=prepare-full
+  if [[ "$mode" == public_ssl_full_smoke ]]; then
+    extra+=(--smoke-test)
+  fi
+  mode=public_ssl
+fi
 if [[ ! -f "$tiles/tiling_summary.json" ]]; then
-  echo "Run '$0 prepare' once with the shared OUTPUT_ROOT before starting detector training." >&2
+  echo "Run '$0 $prepare_mode' once with the shared OUTPUT_ROOT before starting detector training." >&2
   exit 2
 fi
-extra=()
 if [[ "$mode" == public_ssl || "$mode" == public_domain_ssl ]]; then
   require_public_weights
   extra+=(--public-ssl-weights "$public_weights")
@@ -114,6 +130,6 @@ fi
 echo "[Native704] Starting $mode detector with $python_bin"
 echo "[Native704] Shared tiles: $tiles"
 exec "$python_bin" -u "$study_dir/run_detection_experiments.py" \
-  --config "$study_dir/detection_native704_ucloud_config.json" --arms "$mode" \
+  --config "$config" --arms "$mode" \
   --dinov3-repo "$DINOV3_REPO" --dataset-dir "$tiles" --image-root "$tiles" \
   --output-root "${NATIVE704_DETECTION_OUTPUT:-$work/detection_local_runtime}" "${extra[@]}" --train

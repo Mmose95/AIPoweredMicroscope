@@ -35,7 +35,7 @@ def clip_box(bbox, left, top, size):
     return None
 
 
-def plan_split(coco, image_root, split_dir, size, max_stride):
+def plan_split(coco, image_root, split_dir, size, max_stride, pad_only=False):
     by_image = defaultdict(list)
     for annotation in coco["annotations"]:
         by_image[annotation["image_id"]].append(annotation)
@@ -48,8 +48,13 @@ def plan_split(coco, image_root, split_dir, size, max_stride):
             raise FileNotFoundError(parent_path)
         specimen = parent_path.stem.split("_CAL10PATCH_", 1)[0]
         specimens.add(specimen)
-        xs = offsets(parent["width"], size, max_stride)
-        ys = offsets(parent["height"], size, max_stride)
+        if pad_only:
+            if max(parent["width"], parent["height"]) > size:
+                raise ValueError(f"Cannot pad {parent_path} to {size} without cropping")
+            xs = ys = [0]
+        else:
+            xs = offsets(parent["width"], size, max_stride)
+            ys = offsets(parent["height"], size, max_stride)
         for axis in (xs, ys):
             overlap_pixels.update(size - (b - a) for a, b in zip(axis, axis[1:]))
         crops = []
@@ -105,6 +110,7 @@ def main():
     parser.add_argument("--output", type=Path, default=OUTPUT)
     parser.add_argument("--image-root", type=Path)
     parser.add_argument("--tile-size", type=int, default=704)
+    parser.add_argument("--pad-only", action="store_true", help="Keep each whole patch and pad right/bottom")
     parser.add_argument("--min-overlap", type=float, default=0.25)
     parser.add_argument("--workers", type=int, default=8)
     args = parser.parse_args()
@@ -119,14 +125,15 @@ def main():
     plans, specimens_seen = {}, set()
     for split in SPLITS:
         coco = json.loads((args.source / split / COCO_NAME).read_text(encoding="utf-8"))
-        plans[split] = plan_split(coco, image_root, staging / split, args.tile_size, stride)
+        plans[split] = plan_split(coco, image_root, staging / split, args.tile_size, stride, args.pad_only)
         specimens = plans[split][3]
         if specimens & specimens_seen:
             raise ValueError(f"Specimens appear in multiple splits: {specimens & specimens_seen}")
         specimens_seen.update(specimens)
     staging.mkdir(parents=True)
     report = {"source_dataset": str(args.source.resolve()), "tile_size": args.tile_size,
-              "minimum_overlap_fraction": args.min_overlap, "resized": False, "splits": {}}
+              "minimum_overlap_fraction": None if args.pad_only else args.min_overlap,
+              "pad_only": args.pad_only, "resized": False, "splits": {}}
     for split, (coco, jobs, summary, specimens) in plans.items():
         split_dir = staging / split
         split_dir.mkdir()
