@@ -19,12 +19,6 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-import numpy as np
-import torch
-
-from rfdetr_dinov3_bridge import train_rfdetr_with_dinov3, write_bridge_provenance
-
-
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 
@@ -264,7 +258,10 @@ def _materialize_dataset(
             images = original_images
         image_ids = {item["id"] for item in images}
         annotations = [a for a in coco.get("annotations", []) if a.get("image_id") in image_ids]
-        for image in images:
+        print(f"[Detector data] {split}: checking {len(images):,} image paths", flush=True)
+        for index, image in enumerate(images, 1):
+            if index % 500 == 0:
+                print(f"[Detector data] {split}: checking image {index:,}/{len(images):,}", flush=True)
             raw_name = str(image["file_name"])
             raw_path = Path(raw_name)
             normalized_name = raw_name.replace("\\", "/").lstrip("./")
@@ -290,6 +287,7 @@ def _materialize_dataset(
             image["file_name"] = str(
                 _resolve_image(raw_name, image_root, by_relative, by_name)
             )
+        print(f"[Detector data] {split}: all {len(images):,} paths checked", flush=True)
         materialized = dict(coco)
         materialized["images"] = images
         materialized["annotations"] = annotations
@@ -314,6 +312,9 @@ def _materialize_dataset(
 
 
 def _seed_everything(seed: int) -> None:
+    import numpy as np
+    import torch
+
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -456,6 +457,9 @@ def _run_one(
     if arm == "scratch" and checkpoint is not None:
         raise AssertionError("Scratch arm unexpectedly received a checkpoint")
 
+    if checkpoint or public_weights:
+        print(f"[Detector run] {arm}: hashing initialization checkpoint files", flush=True)
+
     run_record = {
         "status": "planned" if not args.train else "starting",
         "created_utc": _utc_now(),
@@ -526,10 +530,12 @@ def _run_one(
         return run_dir
 
     try:
+        print("[Detector run] Loading NumPy and PyTorch and seeding the run", flush=True)
+        _seed_everything(seed)
         print("[Detector run] Importing RF-DETR", flush=True)
         from rfdetr import RFDETRLarge, RFDETRSmall
+        from rfdetr_dinov3_bridge import train_rfdetr_with_dinov3, write_bridge_provenance
 
-        _seed_everything(seed)
         training = config["training"]
         spatial_options = {
             name: training[name]
@@ -613,6 +619,7 @@ def _run_one(
 
 
 def main() -> int:
+    print("[Detector run] Python launcher started", flush=True)
     args = parse_args()
     args.config = args.config.expanduser().resolve()
     config = json.loads(args.config.read_text(encoding="utf-8"))
