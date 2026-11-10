@@ -34,7 +34,7 @@ FILE_NAME_MODE = "relative"
 
 SPLIT_NAMES = ("train", "valid", "test")
 SPLIT_ORDER = {name: idx for idx, name in enumerate(SPLIT_NAMES)}
-SAMPLE_RE = re.compile(r"^sample\s*([0-9]+)", re.IGNORECASE)
+SAMPLE_RE = re.compile(r"^sample[_\s]*([0-9]+)", re.IGNORECASE)
 
 
 def nowstamp() -> str:

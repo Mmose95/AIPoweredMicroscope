@@ -32,7 +32,7 @@ from datetime import datetime
 import pandas as pd
 
 # =============== CONFIG =================
-BASE_DIR = Path(r"E:\PHD\PhdData\Patologi afd. - Aalborg\Annotation_Backups_40x")
+BASE_DIR = Path(r"C:\Users\SH37YE\Desktop\Patologi afd. - Aalborg\Annotation_Backups_40x")
 
 CSV_BACKUP_OVERVIEW = "Annotated_Frames_Only.csv"
 CSV_ALL_FRAMES = "All_Frames.csv"

@@ -14,6 +14,7 @@ import csv
 import json
 import math
 import os
+import random
 import re
 import sys
 import time
@@ -75,6 +76,8 @@ EXPECTED_THRESHOLDS = {
     "Squamous Epithelial Cell": 0.54,
 }
 EXPECTED_SLICE_SIZE = 640
+DEFAULT_BOOTSTRAP_REPLICATES = 5000
+DEFAULT_BOOTSTRAP_SEED = 20261023
 
 LABELS_BY_ID = dict(qa.DOWNSTREAM_LABELS)
 LABEL_IDS = sorted(LABELS_BY_ID)
@@ -123,6 +126,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sheet-name", default=DEFAULT_SHEET_NAME)
     parser.add_argument("--calibration-summary", type=Path, default=DEFAULT_CALIBRATION_SUMMARY)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument(
+        "--bootstrap-replicates", type=int, default=DEFAULT_BOOTSTRAP_REPLICATES,
+        help="Specimen-cluster bootstrap draws for accuracy confidence intervals.",
+    )
+    parser.add_argument(
+        "--bootstrap-seed", type=int, default=DEFAULT_BOOTSTRAP_SEED,
+        help="Fixed random seed for reproducible specimen-cluster resampling.",
+    )
+    parser.add_argument(
+        "--bootstrap-existing-predictions", type=Path,
+        help=(
+            "Add specimen-cluster bootstrap intervals to an existing final "
+            "downstream_predictions.csv without rerunning detector inference."
+        ),
+    )
     parser.add_argument(
         "--preflight-only",
         action="store_true",
@@ -678,24 +696,203 @@ def calculate_named_metrics(
         )
 
     accuracy = safe_ratio(sum(matrix[i][i] for i in range(len(labels))), total)
-    macro_recall = sum(row["recall"] for row in per_class) / len(per_class)
-    macro_f1 = sum(row["f1"] for row in per_class) / len(per_class)
-    true_counts = Counter(true_labels)
-    predicted_counts = Counter(predicted_labels)
-    expected = sum(
-        true_counts[label] * predicted_counts[label] for label in labels
-    ) / (total * total)
     return (
         {
             "n_images": total,
             "accuracy": accuracy,
-            "balanced_accuracy": macro_recall,
-            "macro_f1": macro_f1,
-            "cohen_kappa": safe_ratio(accuracy - expected, 1.0 - expected),
         },
         per_class,
         matrix,
     )
+
+
+def percentile(values: Sequence[float], probability: float) -> float:
+    """Linear-interpolated empirical percentile, matching the common default."""
+    if not values:
+        raise ValueError("Cannot calculate a percentile from no values.")
+    if not 0.0 <= probability <= 1.0:
+        raise ValueError("Percentile probability must be between zero and one.")
+    ordered = sorted(float(value) for value in values)
+    position = (len(ordered) - 1) * probability
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    fraction = position - lower
+    return ordered[lower] * (1.0 - fraction) + ordered[upper] * fraction
+
+
+def specimen_id_from_image_name(image_name: str) -> str:
+    match = re.search(r"Sample\s*(\d+)", image_name, re.IGNORECASE)
+    if not match:
+        raise ValueError(f"Could not determine specimen ID from FOV name: {image_name!r}")
+    return f"Sample{match.group(1)}"
+
+
+def minimum_distance_from_expert_bin(expert_bin: str, predicted_count: int) -> int:
+    """Return the minimum possible absolute count error from a binned reference.
+
+    Because 26+ is open-ended, this value is a lower bound rather than an exact
+    count error whenever the expert's true count is not otherwise known.
+    """
+    intervals = {"0-9": (0, 9), "10-25": (10, 25), "26+": (26, None)}
+    if expert_bin not in intervals:
+        raise ValueError(f"Unsupported expert count bin: {expert_bin!r}")
+    lower, upper = intervals[expert_bin]
+    count = int(predicted_count)
+    if count < lower:
+        return lower - count
+    if upper is not None and count > upper:
+        return count - upper
+    return 0
+
+
+def minimum_count_discrepancy_analysis(
+    rows: Sequence[dict[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Summarize count discrepancy lower bounds among errors in each scheme."""
+    scheme_fields = {
+        "geckler": ("geckler_class", "predicted_geckler_class"),
+        "collapsed_geckler": (
+            "collapsed_geckler_label", "predicted_collapsed_geckler_label"
+        ),
+        "murray_washington": (
+            "murray_washington_label", "predicted_murray_washington_label"
+        ),
+    }
+    summary: dict[str, Any] = {
+        "name": "minimum_count_discrepancy_among_misclassified_fovs",
+        "reference": "expert_count_bins",
+        "interpretation": (
+            "For each FOV misclassified under a scheme, the model's exact predicted "
+            "count is compared with the interval represented by the expert's count "
+            "bin. The distance to that interval is the minimum possible count "
+            "discrepancy, not the exact count error; the expert's 26+ bin is open-ended."
+        ),
+        "discrepancy_definition": (
+            "Zero when the prediction lies inside the expert bin; otherwise the "
+            "distance to the nearest count in that bin."
+        ),
+        "schemes": {},
+    }
+    detail_rows: list[dict[str, Any]] = []
+
+    def describe(values: Sequence[int]) -> dict[str, Any]:
+        return {
+            "mean_minimum_discrepancy": safe_ratio(sum(values), len(values)),
+            "median_minimum_discrepancy": percentile(values, 0.5) if values else None,
+            "fovs_with_nonzero_minimum_discrepancy": sum(value > 0 for value in values),
+        }
+
+    for scheme, (reference_field, prediction_field) in scheme_fields.items():
+        incorrect = [
+            row for row in rows
+            if str(row[reference_field]) != str(row[prediction_field])
+        ]
+        epi_discrepancies = [
+            minimum_distance_from_expert_bin(
+                str(row["epithelial_count_bin"]), int(row["n_squamous_epithelial_cell"])
+            )
+            for row in incorrect
+        ]
+        leu_discrepancies = [
+            minimum_distance_from_expert_bin(
+                str(row["leucocyte_count_bin"]), int(row["n_leucocyte"])
+            )
+            for row in incorrect
+        ]
+        total_discrepancies = [
+            epithelial + leucocyte
+            for epithelial, leucocyte in zip(epi_discrepancies, leu_discrepancies)
+        ]
+        summary["schemes"][scheme] = {
+            "misclassified_fov_count": len(incorrect),
+            "misclassified_fov_fraction": safe_ratio(len(incorrect), len(rows)),
+            "epithelial_count": describe(epi_discrepancies),
+            "leucocyte_count": describe(leu_discrepancies),
+            "sum_across_cell_types": describe(total_discrepancies),
+        }
+        for row, epi_min, leu_min, total_min in zip(
+            incorrect, epi_discrepancies, leu_discrepancies, total_discrepancies
+        ):
+            detail_rows.append(
+                {
+                    "scheme": scheme,
+                    "source_row": row.get("source_row", ""),
+                    "source_image_name": row.get("source_image_name", ""),
+                    "specimen_id": specimen_id_from_image_name(
+                        str(row.get("source_image_name", ""))
+                    ),
+                    "reference_class": row[reference_field],
+                    "predicted_class": row[prediction_field],
+                    "expert_epithelial_bin": row["epithelial_count_bin"],
+                    "predicted_epithelial_count": row["n_squamous_epithelial_cell"],
+                    "minimum_epithelial_count_discrepancy": epi_min,
+                    "expert_leucocyte_bin": row["leucocyte_count_bin"],
+                    "predicted_leucocyte_count": row["n_leucocyte"],
+                    "minimum_leucocyte_count_discrepancy": leu_min,
+                    "minimum_total_count_discrepancy": total_min,
+                }
+            )
+    return summary, detail_rows
+
+
+def bootstrap_accuracy_by_specimen(
+    scheme_inputs: dict[str, tuple[Sequence[str], Sequence[str], Sequence[str]]],
+    specimen_ids: Sequence[str],
+    *,
+    replicates: int = DEFAULT_BOOTSTRAP_REPLICATES,
+    seed: int = DEFAULT_BOOTSTRAP_SEED,
+) -> dict[str, dict[str, Any]]:
+    """Percentile CIs for observed accuracy, resampling whole specimens.
+
+    A single specimen draw is shared across schemes in every replicate so
+    comparisons retain the paired design of the three endpoints.
+    """
+    if replicates < 100:
+        raise ValueError("Use at least 100 bootstrap replicates.")
+    if len(specimen_ids) == 0:
+        raise ValueError("Specimen IDs are required for cluster bootstrap.")
+    if any(len(true) != len(predicted) or len(true) != len(specimen_ids)
+           for true, predicted, _labels in scheme_inputs.values()):
+        raise ValueError("Every scheme and specimen ID must align by FOV.")
+
+    specimen_to_rows: dict[str, list[int]] = defaultdict(list)
+    for index, specimen_id in enumerate(specimen_ids):
+        specimen_to_rows[str(specimen_id)].append(index)
+    specimen_keys = sorted(specimen_to_rows)
+    if len(specimen_keys) < 2:
+        raise ValueError("Cluster bootstrap requires at least two specimens.")
+
+    rng = random.Random(seed)
+    distributions = {name: [] for name in scheme_inputs}
+    for _ in range(replicates):
+        sampled_specimens = [rng.choice(specimen_keys) for _ in specimen_keys]
+        sampled_rows = [
+            row_index
+            for specimen_id in sampled_specimens
+            for row_index in specimen_to_rows[specimen_id]
+        ]
+        for scheme_name, (true, predicted, _labels) in scheme_inputs.items():
+            correct = sum(true[i] == predicted[i] for i in sampled_rows)
+            distributions[scheme_name].append(correct / len(sampled_rows))
+
+    results: dict[str, dict[str, Any]] = {}
+    for scheme_name, values in distributions.items():
+        results[scheme_name] = {
+            "method": "specimen_cluster_percentile_bootstrap",
+            "confidence_level": 0.95,
+            "replicates": replicates,
+            "seed": seed,
+            "clusters_resampled": len(specimen_keys),
+            "fov_count": len(specimen_ids),
+            "valid_replicates": len(values),
+            "accuracy_ci_95": {
+                "lower": percentile(values, 0.025),
+                "upper": percentile(values, 0.975),
+            },
+        }
+    return results
 
 
 def save_named_confusion_csv(
@@ -900,11 +1097,29 @@ def evaluate(args: argparse.Namespace, preflight: dict[str, Any]) -> Path:
             ["Acceptable", "Unacceptable", "Unknown"],
         ),
     }
+    specimen_ids = [specimen_id_from_image_name(row["source_image_name"]) for row in rows]
+    bootstrap_results = bootstrap_accuracy_by_specimen(
+        scheme_inputs,
+        specimen_ids,
+        replicates=args.bootstrap_replicates,
+        seed=args.bootstrap_seed,
+    )
     scheme_results: dict[str, Any] = {}
     for scheme_name, (true_labels, predicted_labels, scheme_labels) in scheme_inputs.items():
         scheme_metrics, scheme_per_class, scheme_matrix = calculate_named_metrics(
             true_labels, predicted_labels, scheme_labels
         )
+        category_support = [
+            {
+                "category": label,
+                "reference_support": scheme_per_class[index]["support"],
+                "predicted_support": sum(scheme_matrix[row][index] for row in range(len(scheme_labels))),
+                "correct": scheme_matrix[index][index],
+                "recall": scheme_per_class[index]["recall"],
+            }
+            for index, label in enumerate(scheme_labels)
+        ]
+        scheme_metrics["accuracy_ci_95"] = bootstrap_results[scheme_name]["accuracy_ci_95"]
         scheme_csv = output_dir / f"downstream_{scheme_name}_confusion_matrix.csv"
         save_named_confusion_csv(scheme_csv, scheme_matrix, scheme_labels)
         scheme_results[scheme_name] = {
@@ -912,10 +1127,54 @@ def evaluate(args: argparse.Namespace, preflight: dict[str, Any]) -> Path:
             "reference_label_counts": dict(Counter(true_labels)),
             "predicted_label_counts": dict(Counter(predicted_labels)),
             "metrics": scheme_metrics,
-            "per_class_metrics": scheme_per_class,
+            "category_support": category_support,
+            "bootstrap": bootstrap_results[scheme_name],
             "confusion_matrix": scheme_matrix,
             "confusion_matrix_csv": str(scheme_csv.resolve()),
         }
+
+    minimum_discrepancy, minimum_discrepancy_rows = minimum_count_discrepancy_analysis(rows)
+    minimum_discrepancy_csv = output_dir / "downstream_minimum_count_discrepancy.csv"
+    minimum_discrepancy_fields = [
+        "scheme", "source_row", "source_image_name", "specimen_id",
+        "reference_class", "predicted_class", "expert_epithelial_bin",
+        "predicted_epithelial_count", "minimum_epithelial_count_discrepancy",
+        "expert_leucocyte_bin", "predicted_leucocyte_count",
+        "minimum_leucocyte_count_discrepancy", "minimum_total_count_discrepancy",
+    ]
+    write_csv(minimum_discrepancy_csv, minimum_discrepancy_rows, minimum_discrepancy_fields)
+
+    bootstrap_csv = output_dir / "downstream_accuracy_bootstrap.csv"
+    write_csv(
+        bootstrap_csv,
+        [
+            {
+                "scheme": scheme_name,
+                "n_fov": bootstrap_results[scheme_name]["fov_count"],
+                "n_specimens": bootstrap_results[scheme_name]["clusters_resampled"],
+                "observed_accuracy": scheme_results[scheme_name]["metrics"]["accuracy"],
+                "ci95_lower": bootstrap_results[scheme_name]["accuracy_ci_95"]["lower"],
+                "ci95_upper": bootstrap_results[scheme_name]["accuracy_ci_95"]["upper"],
+                "bootstrap_replicates": args.bootstrap_replicates,
+                "bootstrap_seed": args.bootstrap_seed,
+            }
+            for scheme_name in scheme_results
+        ],
+        [
+            "scheme", "n_fov", "n_specimens", "observed_accuracy", "ci95_lower",
+            "ci95_upper", "bootstrap_replicates", "bootstrap_seed",
+        ],
+    )
+    support_csv = output_dir / "downstream_category_support.csv"
+    write_csv(
+        support_csv,
+        [
+            {"scheme": scheme_name, **record}
+            for scheme_name, result in scheme_results.items()
+            for record in result["category_support"]
+        ],
+        ["scheme", "category", "reference_support", "predicted_support", "correct", "recall"],
+    )
 
     prediction_fields = list(rows[0])
     predictions_path = output_dir / "downstream_predictions.csv"
@@ -946,6 +1205,19 @@ def evaluate(args: argparse.Namespace, preflight: dict[str, Any]) -> Path:
             "exclusions": exclusion_rows,
         },
         "classification_schemes": scheme_results,
+        "secondary_minimum_count_discrepancy_analysis": minimum_discrepancy,
+        "bootstrap": {
+            "method": "specimen_cluster_percentile_bootstrap",
+            "confidence_level": 0.95,
+            "replicates": args.bootstrap_replicates,
+            "seed": args.bootstrap_seed,
+            "cluster_unit": "specimen",
+            "cluster_count": len(set(specimen_ids)),
+            "resampling_note": (
+                "All FOVs from each sampled specimen were retained together; "
+                "the same specimen draws were used for all classification schemes."
+            ),
+        },
         "runtime": {
             "total_evaluation_seconds": elapsed_seconds,
             "mean_inference_seconds_per_image": safe_ratio(
@@ -956,6 +1228,9 @@ def evaluate(args: argparse.Namespace, preflight: dict[str, Any]) -> Path:
         "outputs": {
             "predictions_csv": str(predictions_path.resolve()),
             "exclusions_csv": str(exclusions_path.resolve()),
+            "accuracy_bootstrap_csv": str(bootstrap_csv.resolve()),
+            "category_support_csv": str(support_csv.resolve()),
+            "minimum_count_discrepancy_csv": str(minimum_discrepancy_csv.resolve()),
             "overlays_dir": (
                 str(overlays_dir.resolve()) if not args.no_overlays else None
             ),
@@ -971,13 +1246,148 @@ def evaluate(args: argparse.Namespace, preflight: dict[str, Any]) -> Path:
     return output_dir
 
 
+def bootstrap_existing_predictions(
+    predictions_path: Path,
+    *,
+    replicates: int = DEFAULT_BOOTSTRAP_REPLICATES,
+    seed: int = DEFAULT_BOOTSTRAP_SEED,
+) -> Path:
+    """Add CIs/support to a completed output using its saved FOV predictions."""
+    predictions_path = predictions_path.expanduser().resolve()
+    if not predictions_path.is_file():
+        raise FileNotFoundError(f"Predictions CSV does not exist: {predictions_path}")
+    with predictions_path.open("r", newline="", encoding="utf-8-sig") as handle:
+        rows = list(csv.DictReader(handle))
+    if not rows:
+        raise ValueError(f"Predictions CSV contains no rows: {predictions_path}")
+
+    scheme_inputs = {
+        "geckler": (
+            [row["geckler_class"] for row in rows],
+            [row["predicted_geckler_class"] for row in rows],
+            [f"G{index}" for index in range(1, 7)],
+        ),
+        "collapsed_geckler": (
+            [row["collapsed_geckler_label"] for row in rows],
+            [row["predicted_collapsed_geckler_label"] for row in rows],
+            ["Acceptable", "Unacceptable", "Unknown"],
+        ),
+        "murray_washington": (
+            [row["murray_washington_label"] for row in rows],
+            [row["predicted_murray_washington_label"] for row in rows],
+            ["Acceptable", "Unacceptable"],
+        ),
+    }
+    specimen_ids = [specimen_id_from_image_name(row["source_image_name"]) for row in rows]
+    bootstrap_results = bootstrap_accuracy_by_specimen(
+        scheme_inputs, specimen_ids, replicates=replicates, seed=seed
+    )
+
+    summary_path = predictions_path.parent / "downstream_evaluation_summary.json"
+    if not summary_path.is_file():
+        raise FileNotFoundError(f"Evaluation summary does not exist: {summary_path}")
+    with summary_path.open("r", encoding="utf-8") as handle:
+        summary = json.load(handle)
+
+    support_rows = []
+    bootstrap_rows = []
+    for scheme_name, (true, predicted, labels) in scheme_inputs.items():
+        metrics, per_class, matrix = calculate_named_metrics(true, predicted, labels)
+        support = [
+            {
+                "category": label,
+                "reference_support": per_class[index]["support"],
+                "predicted_support": sum(matrix[row][index] for row in range(len(labels))),
+                "correct": matrix[index][index],
+                "recall": per_class[index]["recall"],
+            }
+            for index, label in enumerate(labels)
+        ]
+        metrics["accuracy_ci_95"] = bootstrap_results[scheme_name]["accuracy_ci_95"]
+        scheme_result = summary["classification_schemes"][scheme_name]
+        scheme_result["metrics"] = metrics
+        scheme_result["category_support"] = support
+        scheme_result["bootstrap"] = bootstrap_results[scheme_name]
+        for record in support:
+            support_rows.append({"scheme": scheme_name, **record})
+        bootstrap_rows.append(
+            {
+                "scheme": scheme_name,
+                "n_fov": len(rows),
+                "n_specimens": len(set(specimen_ids)),
+                "observed_accuracy": metrics["accuracy"],
+                "ci95_lower": bootstrap_results[scheme_name]["accuracy_ci_95"]["lower"],
+                "ci95_upper": bootstrap_results[scheme_name]["accuracy_ci_95"]["upper"],
+                "bootstrap_replicates": replicates,
+                "bootstrap_seed": seed,
+            }
+        )
+
+    minimum_discrepancy, minimum_discrepancy_rows = minimum_count_discrepancy_analysis(rows)
+    minimum_discrepancy_csv = predictions_path.parent / "downstream_minimum_count_discrepancy.csv"
+    minimum_discrepancy_fields = [
+        "scheme", "source_row", "source_image_name", "specimen_id",
+        "reference_class", "predicted_class", "expert_epithelial_bin",
+        "predicted_epithelial_count", "minimum_epithelial_count_discrepancy",
+        "expert_leucocyte_bin", "predicted_leucocyte_count",
+        "minimum_leucocyte_count_discrepancy", "minimum_total_count_discrepancy",
+    ]
+    write_csv(minimum_discrepancy_csv, minimum_discrepancy_rows, minimum_discrepancy_fields)
+    summary["secondary_minimum_count_discrepancy_analysis"] = minimum_discrepancy
+
+    summary["bootstrap"] = {
+        "method": "specimen_cluster_percentile_bootstrap",
+        "confidence_level": 0.95,
+        "replicates": replicates,
+        "seed": seed,
+        "cluster_unit": "specimen",
+        "cluster_count": len(set(specimen_ids)),
+        "resampling_note": (
+            "All FOVs from each sampled specimen were retained together; "
+            "the same specimen draws were used for all classification schemes."
+        ),
+    }
+    bootstrap_csv = predictions_path.parent / "downstream_accuracy_bootstrap.csv"
+    support_csv = predictions_path.parent / "downstream_category_support.csv"
+    fields = [
+        "scheme", "n_fov", "n_specimens", "observed_accuracy", "ci95_lower",
+        "ci95_upper", "bootstrap_replicates", "bootstrap_seed",
+    ]
+    write_csv(bootstrap_csv, bootstrap_rows, fields)
+    write_csv(
+        support_csv, support_rows,
+        ["scheme", "category", "reference_support", "predicted_support", "correct", "recall"],
+    )
+    summary.setdefault("outputs", {})["accuracy_bootstrap_csv"] = str(bootstrap_csv.resolve())
+    summary["outputs"]["category_support_csv"] = str(support_csv.resolve())
+    summary["outputs"]["minimum_count_discrepancy_csv"] = str(minimum_discrepancy_csv.resolve())
+    with summary_path.open("w", encoding="utf-8") as handle:
+        json.dump(summary, handle, indent=2, ensure_ascii=False)
+    print(f"Added {replicates:,} specimen-cluster bootstrap resamples to {summary_path.parent}")
+    for result in bootstrap_rows:
+        print(
+            f"{result['scheme']}: accuracy={result['observed_accuracy']:.4f}, "
+            f"95% CI [{result['ci95_lower']:.4f}, {result['ci95_upper']:.4f}]"
+        )
+    return summary_path
+
+
 def main() -> int:
     args = parse_args()
     try:
+        if args.bootstrap_existing_predictions:
+            bootstrap_existing_predictions(
+                args.bootstrap_existing_predictions,
+                replicates=args.bootstrap_replicates,
+                seed=args.bootstrap_seed,
+            )
+            return 0
         preflight = run_preflight(args)
         print_preflight(preflight)
         if args.preflight_only:
             return 0
+        if args.bootstrap_replicates < 100:
+            raise ValueError("Use at least 100 bootstrap replicates.")
         evaluate(args, preflight)
         return 0
     except Exception as exc:

@@ -9,8 +9,8 @@ import csv
 from collections import defaultdict, Counter
 from pathlib import Path
 src = Path(
-    r"E:\PHD\PhdData\Patologi afd. - Aalborg\Annotation_Backups_40x"
-    r"\01-09-2026_40x\annotations\instances_default.json"
+    r"C:\Users\SH37YE\Desktop\Patologi afd. - Aalborg\Annotation_Backups_40x"
+    r"\09-11-2026_40x\annotations\instances_default.json"
 )
 with open(src, "r", encoding="utf-8") as f:
     coco = json.load(f)

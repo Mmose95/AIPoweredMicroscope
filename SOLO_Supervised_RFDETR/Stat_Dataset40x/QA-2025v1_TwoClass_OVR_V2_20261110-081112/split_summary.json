@@ -1,0 +1,223 @@
+{
+  "dataset_name": "QA-2025v1_TwoClass_OVR_V2_20261110-081112",
+  "source_coco": "C:\\Users\\SH37YE\\Desktop\\Patologi afd. - Aalborg\\Annotation_Backups_40x\\09-11-2026_40x\\annotations\\instances_default.json",
+  "images_root": "C:/Users/SH37YE/Desktop/Patologi afd. - Aalborg/40x Corrected CVAT candidates by sample/images",
+  "target_class_mode": "multi_class",
+  "target_classes": [
+    "Leucocyte",
+    "Squamous Epithelial Cell"
+  ],
+  "balance_per_class": true,
+  "seed": 42,
+  "split_ratio": {
+    "train": 0.6,
+    "valid": 0.2,
+    "test": 0.2
+  },
+  "split_strategy": "forced_test_annotation_aware",
+  "forced_test_samples_requested": [],
+  "forced_test_samples_used": [],
+  "forced_test_samples_without_target_annotations": [],
+  "target_box_planning": {
+    "balance_per_class": true,
+    "total_target_boxes": 19111,
+    "ratio_targets": {
+      "train": 11466.6,
+      "valid": 3822.2,
+      "test": 3822.2
+    },
+    "assignment_targets": {
+      "train": 11466.6,
+      "valid": 3822.2,
+      "test": 3822.2
+    },
+    "actual_sample_assignment": {
+      "train": 11786,
+      "valid": 3657,
+      "test": 3668
+    },
+    "per_class": {
+      "Leucocyte": {
+        "total_target_boxes": 15440,
+        "ratio_targets": {
+          "train": 9264.0,
+          "valid": 3088.0,
+          "test": 3088.0
+        },
+        "assignment_targets": {
+          "train": 9264.0,
+          "valid": 3088.0,
+          "test": 3088.0
+        },
+        "actual_sample_assignment": {
+          "train": 9610,
+          "valid": 2889,
+          "test": 2941
+        }
+      },
+      "Squamous Epithelial Cell": {
+        "total_target_boxes": 3671,
+        "ratio_targets": {
+          "train": 2202.6,
+          "valid": 734.2,
+          "test": 734.2
+        },
+        "assignment_targets": {
+          "train": 2202.6,
+          "valid": 734.2,
+          "test": 734.2
+        },
+        "actual_sample_assignment": {
+          "train": 2176,
+          "valid": 768,
+          "test": 727
+        }
+      }
+    },
+    "classes_exceeding_test_target_due_to_forced_samples": []
+  },
+  "target_sample_planning": {
+    "ratio_targets": {
+      "train": 53,
+      "valid": 17,
+      "test": 19
+    },
+    "assignment_targets": {
+      "train": 53,
+      "valid": 17,
+      "test": 19
+    },
+    "actual_sample_assignment": {
+      "train": 53,
+      "valid": 17,
+      "test": 19
+    }
+  },
+  "file_name_mode": "relative",
+  "samples": {
+    "train": [
+      "Sample 100",
+      "Sample 104",
+      "Sample 106",
+      "Sample 107",
+      "Sample 108",
+      "Sample 13",
+      "Sample 15",
+      "Sample 16",
+      "Sample 18",
+      "Sample 19",
+      "Sample 20",
+      "Sample 22",
+      "Sample 23",
+      "Sample 25",
+      "Sample 27",
+      "Sample 28",
+      "Sample 29",
+      "Sample 31",
+      "Sample 33",
+      "Sample 34",
+      "Sample 35",
+      "Sample 36",
+      "Sample 37",
+      "Sample 39",
+      "Sample 40",
+      "Sample 41",
+      "Sample 44",
+      "Sample 46",
+      "Sample 50",
+      "Sample 52",
+      "Sample 57",
+      "Sample 59",
+      "Sample 60",
+      "Sample 61",
+      "Sample 63",
+      "Sample 67",
+      "Sample 68",
+      "Sample 69",
+      "Sample 70",
+      "Sample 72",
+      "Sample 73",
+      "Sample 74",
+      "Sample 75",
+      "Sample 77",
+      "Sample 78",
+      "Sample 79",
+      "Sample 83",
+      "Sample 87",
+      "Sample 91",
+      "Sample 92",
+      "Sample 94",
+      "Sample 97",
+      "Sample 99"
+    ],
+    "valid": [
+      "Sample 102",
+      "Sample 105",
+      "Sample 14",
+      "Sample 21",
+      "Sample 26",
+      "Sample 30",
+      "Sample 38",
+      "Sample 42",
+      "Sample 43",
+      "Sample 49",
+      "Sample 53",
+      "Sample 58",
+      "Sample 64",
+      "Sample 80",
+      "Sample 81",
+      "Sample 85",
+      "Sample 90"
+    ],
+    "test": [
+      "Sample 101",
+      "Sample 103",
+      "Sample 109",
+      "Sample 12",
+      "Sample 17",
+      "Sample 24",
+      "Sample 51",
+      "Sample 54",
+      "Sample 55",
+      "Sample 56",
+      "Sample 62",
+      "Sample 65",
+      "Sample 76",
+      "Sample 86",
+      "Sample 88",
+      "Sample 89",
+      "Sample 93",
+      "Sample 96",
+      "Sample 98"
+    ]
+  },
+  "counts": {
+    "train": {
+      "n_samples": 53,
+      "n_images": 507,
+      "n_target_boxes": 11786,
+      "n_target_boxes_by_class": {
+        "Leucocyte": 9610,
+        "Squamous Epithelial Cell": 2176
+      }
+    },
+    "valid": {
+      "n_samples": 17,
+      "n_images": 233,
+      "n_target_boxes": 3657,
+      "n_target_boxes_by_class": {
+        "Leucocyte": 2889,
+        "Squamous Epithelial Cell": 768
+      }
+    },
+    "test": {
+      "n_samples": 19,
+      "n_images": 131,
+      "n_target_boxes": 3668,
+      "n_target_boxes_by_class": {
+        "Leucocyte": 2941,
+        "Squamous Epithelial Cell": 727
+      }
+    }
+  }
+}

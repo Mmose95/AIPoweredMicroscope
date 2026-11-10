@@ -1,7 +1,9 @@
 """Batch-tile whole-slide images for local storage and later CVAT selection.
 
-The default 2584 x 1936 level-0 tile geometry is the calibrated CellScan field
-size used elsewhere in this project.  Tiles are laid out from the actual
+Default tiles match the physical coverage of a 640 x 640 source patch at 10x.
+Dimensions are calculated from each slide's X/Y pixel spacing. Tiles use a NEW
+output root so the original CVAT images remain available for annotation transfer.
+Tiles are laid out from the actual
 scanned-area origin recorded in each slide's ``Slidedat.ini``.  No tile is
 discarded by default: background statistics are written to the manifest so a
 CVAT subset can be selected later without repeating WSI decoding.
@@ -39,6 +41,7 @@ from typing import Iterable, Optional
 
 import numpy as np
 from PIL import Image
+from physical_patch_calibration import target_patch_size
 
 # Allow this script to be launched directly from its preprocessing subfolder.
 PROJECT_DIR = Path(__file__).resolve().parent.parent
@@ -64,10 +67,8 @@ except ImportError as exc:  # pragma: no cover - depends on local installation
     ) from exc
 
 
-DEFAULT_INPUT = Path(r"E:/Patologi afd. - Aalborg/Original 40x Hammamatsu scans")
-DEFAULT_OUTPUT = Path("E:/Patologi afd. - Aalborg/40x Input tiles for CVAT")
-CALIBRATED_TILE_WIDTH = 2584
-CALIBRATED_TILE_HEIGHT = 1936
+DEFAULT_INPUT = Path(r"E:/PHD/PhdData/Patologi afd. - Aalborg/Original 40x Hammamatsu scans")
+DEFAULT_OUTPUT = Path("E:/PHD/PhdData/Patologi afd. - Aalborg/40x Calibrated input tiles for CVAT")
 DEFAULT_WORKERS = 8
 DEFAULT_EXISTING_SAMPLE_ACTION = "skip"  # "skip", "resume", or "overwrite"
 SUPPORTED_WSI_EXTENSIONS = (".mrxs", ".ndpi", ".svs", ".tif", ".tiff")
@@ -243,22 +244,6 @@ def process_slide(slide_path: Path, args: argparse.Namespace) -> dict[str, objec
     manifest_path = slide_output / "tiles.csv"
     started = time.monotonic()
 
-    if args.existing_sample == "skip":
-        previous = completed_sample_summary(
-            slide_output=slide_output,
-            source_slide=paths.slide_path,
-            level=args.level,
-            tile_width=args.tile_width,
-            tile_height=args.tile_height,
-            image_format=args.format,
-        )
-        if previous is not None:
-            print(
-                f"[SKIP] {slide_id}: completed tiling already exists "
-                f"({int(previous['tile_count']):,} tiles)"
-            )
-            return {**previous, "run_status": "skipped_existing_sample"}
-
     with openslide.OpenSlide(str(paths.slide_path)) as slide:
         if not 0 <= args.level < slide.level_count:
             raise ValueError(
@@ -266,6 +251,36 @@ def process_slide(slide_path: Path, args: argparse.Namespace) -> dict[str, objec
                 f"requested {args.level}."
             )
         ini = read_slidedat_ini(paths.data_dir)
+        # Keep the caller's arguments unchanged when slides have different MPP.
+        args = argparse.Namespace(**vars(args))
+        geometry_mode = "physical_10x_640_patch" if args.tile_width is None else "explicit_pixels"
+        if args.tile_width is None:
+            spacing_x = slide.properties.get("openslide.mpp-x") or get_ini_float(
+                ini, "LAYER_0_LEVEL_0_SECTION", "MICROMETER_PER_PIXEL_X"
+            )
+            spacing_y = slide.properties.get("openslide.mpp-y") or get_ini_float(
+                ini, "LAYER_0_LEVEL_0_SECTION", "MICROMETER_PER_PIXEL_Y"
+            )
+            args.tile_width, args.tile_height = target_patch_size(
+                spacing_x, spacing_y, float(slide.level_downsamples[args.level])
+            )
+        if args.existing_sample == "skip":
+            previous = completed_sample_summary(
+                slide_output, paths.slide_path, args.level,
+                args.tile_width, args.tile_height, args.format,
+            )
+            if previous is not None:
+                print(f"[SKIP] {slide_id}: completed calibrated tiling exists")
+                return {**previous, "run_status": "skipped_existing_sample"}
+        # A changed geometry cannot resume or overwrite an old coordinate grid.
+        if slide_output.exists():
+            summary_path = slide_output / "slide_summary.json"
+            if summary_path.is_file():
+                previous = json.loads(summary_path.read_text(encoding="utf-8"))
+                if previous.get("tile_size") != [args.tile_width, args.tile_height]:
+                    raise ValueError(f"Different tile geometry in {slide_output}; use a new output root")
+            elif any(slide_output.iterdir()):
+                raise ValueError(f"Incomplete output in {slide_output}; use a new output root")
         geometry = make_geometry(
             slide, ini, args.level, args.origin, args.tile_width, args.tile_height
         )
@@ -285,6 +300,7 @@ def process_slide(slide_path: Path, args: argparse.Namespace) -> dict[str, objec
         print(
             f"[PLAN] {slide_id}: {geometry.max_col + 1} cols x "
             f"{geometry.max_row + 1} rows = {total:,} tiles; "
+            f"patch={args.tile_width}x{args.tile_height} px; mode={geometry_mode}; "
             f"area={geometry.area_width}x{geometry.area_height} level-0 px; "
             f"workers={args.workers}"
         )
@@ -364,6 +380,9 @@ def process_slide(slide_path: Path, args: argparse.Namespace) -> dict[str, objec
                 "width": geometry.area_width, "height": geometry.area_height,
             },
             "tile_size": [args.tile_width, args.tile_height],
+            "geometry_mode": geometry_mode,
+            "physical_tile_um": [args.tile_width * downsample * mpp_x,
+                                 args.tile_height * downsample * mpp_y] if mpp_x and mpp_y else None,
             "grid": {"rows": geometry.max_row + 1, "columns": geometry.max_col + 1},
             "tile_count": total,
             "workers": args.workers,
@@ -383,8 +402,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT, help="WSI file, MRXS data folder, or folder containing slides.")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Local root directory for tiles and manifests.")
     parser.add_argument("--level", type=int, default=0, help="OpenSlide pyramid level (default: full resolution level 0).")
-    parser.add_argument("--tile-width", type=int, default=CALIBRATED_TILE_WIDTH)
-    parser.add_argument("--tile-height", type=int, default=CALIBRATED_TILE_HEIGHT)
+    parser.add_argument("--tile-width", type=int, default=None, help="Explicit pixel override; requires --tile-height. Default: calibrated physical coverage.")
+    parser.add_argument("--tile-height", type=int, default=None)
     parser.add_argument("--origin", choices=("scanned-area", "slide"), default="scanned-area")
     parser.add_argument("--format", choices=("png", "jpg"), default="jpg", help="JPEG is much smaller for brightfield WSI tiles.")
     parser.add_argument("--jpeg-quality", type=int, default=95)
@@ -407,7 +426,9 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="Report tile counts without creating output files.")
     parser.add_argument("--progress-every", type=int, default=100)
     args = parser.parse_args(argv)
-    if args.tile_width <= 0 or args.tile_height <= 0:
+    if (args.tile_width is None) != (args.tile_height is None):
+        parser.error("Set both tile dimensions, or neither for physical calibration")
+    if args.tile_width is not None and min(args.tile_width, args.tile_height) <= 0:
         parser.error("tile dimensions must be positive")
     if not 1 <= args.jpeg_quality <= 100:
         parser.error("--jpeg-quality must be between 1 and 100")

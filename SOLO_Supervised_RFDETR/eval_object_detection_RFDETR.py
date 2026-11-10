@@ -9,7 +9,7 @@ common detection metrics:
 - Confusion matrix with background class
 - Threshold sweep (precision/recall/F1 + FP/image)
 - Per-image count errors at the locked class-specific thresholds
-- Count-density strata with per-patch signed-error stems, sample sizes, and MAE
+- Class-specific Bland-Altman plots for patch-level count agreement
 - PR and ROC-style curves from IoU-matched detections
 - Optional overlay images
 
@@ -62,9 +62,9 @@ DEFAULT_CLASS_SCORE_THRESHOLDS_TEXT = ";".join(
 )
 
 PYCHARM_EVALUATE = {
-    "run_dir": r"E:\PHD\Results\Quality Assessment\Final Results V2\FOCUSED_LARGE_HPO\FOCUSED_LARGE_HPO\LR\session_20261008_154321\TwoClass\HPO_Config_009",
-    "checkpoint": r"E:\PHD\Results\Quality Assessment\Final Results V2\FOCUSED_LARGE_HPO\FOCUSED_LARGE_HPO\LR\session_20261008_154321\TwoClass\HPO_Config_009\checkpoint_best_ema.pth",
-    "test_json": r"E:\PHD\Results\Quality Assessment\Final Results V2\FOCUSED_LARGE_HPO\FOCUSED_LARGE_HPO\LR\QA-2025v1_TwoClass_OVR_V2_20260618-101346_RESOLVED\test\_annotations.coco.json",
+    "run_dir": r"E:\PHD\Results\Quality Assessment\Final Results V2\FOCUSED_LARGE_HPO\LR\session_20261008_154321\TwoClass\HPO_Config_009",
+    "checkpoint": r"E:\PHD\Results\Quality Assessment\Final Results V2\FOCUSED_LARGE_HPO\LR\session_20261008_154321\TwoClass\HPO_Config_009\checkpoint_best_ema.pth",
+    "test_json": r"E:\PHD\Results\Quality Assessment\Final Results V2\FOCUSED_LARGE_HPO\LR\QA-2025v1_TwoClass_OVR_V2_20260618-101346_RESOLVED\test\_annotations.coco.json",
     "output_dir": r"C:\Users\SH37YE\Desktop\PhD_Code_github\AIPoweredMicroscope\EvaluationOutput\TwoClass_HPO009_Large_EMA_TestEval_NewCalibration",
     "model_class": "RFDETRLarge",
     "score_floor": 0.001,
@@ -1019,6 +1019,49 @@ def detection_counts(
     return tp, fp, fn
 
 
+def detection_counts_per_class(
+    samples: Sequence[Dict[str, Any]],
+    class_names: Sequence[str],
+    score_threshold: float,
+    iou_thr: float,
+    class_score_thresholds: Optional[np.ndarray] = None,
+) -> List[Dict[str, Any]]:
+    """Return one-vs-rest TP/FP/FN and metrics at the fixed operating point.
+
+    Matching is one-to-one and class-aware. A wrong-class prediction is an FP
+    for its predicted class, while the unmatched ground-truth object is an FN
+    for its true class.
+    """
+    rows: List[Dict[str, Any]] = []
+    for class_idx, class_name in enumerate(class_names):
+        tp = fp = fn = 0
+        for sample in samples:
+            gt_mask = sample["gt_cls"] == class_idx
+            gt_boxes = sample["gt_boxes"][gt_mask]
+            keep = prediction_keep_mask(
+                sample["pred_scores"], sample["pred_cls"], score_threshold,
+                class_score_thresholds,
+            )
+            pred_mask = keep & (sample["pred_cls"] == class_idx)
+            pred_boxes = sample["pred_boxes"][pred_mask]
+            matches = greedy_match(
+                iou_matrix(gt_boxes, pred_boxes), iou_thr=iou_thr,
+            )
+            matched = len(matches)
+            tp += matched
+            fn += max(0, len(gt_boxes) - matched)
+            fp += max(0, len(pred_boxes) - matched)
+        precision = float(tp / (tp + fp)) if tp + fp else 0.0
+        recall = float(tp / (tp + fn)) if tp + fn else 0.0
+        f1 = float(2 * precision * recall / (precision + recall)) if precision + recall else 0.0
+        rows.append({
+            "class": class_name,
+            "tp": int(tp), "fp": int(fp), "fn": int(fn),
+            "precision": precision, "recall": recall, "f1": f1,
+        })
+    return rows
+
+
 def count_error_metrics(
     samples: Sequence[Dict[str, Any]],
     class_names: Sequence[str],
@@ -1746,14 +1789,31 @@ def run_evaluate_mode(args: argparse.Namespace) -> None:
     operating_point = {
         "score_threshold": cfg.score_threshold,
         "class_score_thresholds": resolved_class_thresholds,
+        "matching_rule": "one-to-one, class-aware IoU matching",
+        "iou_threshold": cfg.curve_iou,
         "tp": int(operating_tp),
         "fp": int(operating_fp),
         "fn": int(operating_fn),
         "precision": operating_precision,
         "recall": operating_recall,
         "f1": operating_f1,
+        "averaging": "micro (pooled TP, FP, and FN across classes)",
         "fp_per_image": float(operating_fp / max(1, len(samples))),
     }
+    per_class_operating = detection_counts_per_class(
+        samples,
+        labels,
+        score_threshold=cfg.score_threshold,
+        iou_thr=cfg.curve_iou,
+        class_score_thresholds=class_thresholds,
+    )
+    macro_f1 = float(np.mean([row["f1"] for row in per_class_operating])) if per_class_operating else 0.0
+    per_class_operating_path = cfg.output_dir / "per_class_operating_metrics.csv"
+    write_csv(
+        per_class_operating_path,
+        ["class", "tp", "fp", "fn", "precision", "recall", "f1"],
+        per_class_operating,
+    )
 
     per_image_count_rows, count_error_rows = count_error_metrics(
         samples,
@@ -1772,10 +1832,10 @@ def run_evaluate_mode(args: argparse.Namespace) -> None:
         count_error_rows,
     )
 
-    # Derive density-stratified errors from this run's thresholded patch counts.
-    # This is descriptive held-out analysis; it does not select any thresholds.
-    from SOLO_Supervised_RFDETR.plot_patch_count_strata import build as build_count_strata
-    count_strata_rows = build_count_strata(
+    # Summarize count agreement continuously across observed patch counts.
+    # These descriptive plots do not select or tune any thresholds.
+    from SOLO_Supervised_RFDETR.plot_patch_bland_altman import build as build_bland_altman
+    bland_altman_rows = build_bland_altman(
         cfg.output_dir / "per_image_count_errors.csv",
         cfg.output_dir,
         make_plot=not cfg.no_plots,
@@ -1893,8 +1953,11 @@ def run_evaluate_mode(args: argparse.Namespace) -> None:
                 "calibrated operating thresholds."
             ),
             "threshold_dependent_metrics": (
-                "The confusion matrix and operating-point precision/recall/F1 "
-                "use the independently calibrated class thresholds."
+                "Operating-point metrics use independently calibrated class thresholds "
+                "and one-to-one class-aware matching at the stated IoU. Micro metrics "
+                "pool counts across classes; macro-F1 is the unweighted mean of the "
+                "class-specific F1 values. The confusion matrix separately uses "
+                "class-agnostic box matching to display wrong-class matches off diagonal."
             ),
             "threshold_sweep": (
                 "Saved for descriptive sensitivity analysis only; no threshold "
@@ -1909,7 +1972,9 @@ def run_evaluate_mode(args: argparse.Namespace) -> None:
         },
         "coco_standard": coco_std,
         "operating_point": operating_point,
-        "schema_version": 2,
+        "per_class_operating_point": per_class_operating,
+        "macro_f1": macro_f1,
+        "schema_version": 3,
         "analysis_stages": {
             "coco_standard": "coco_ranking",
             "operating_point": "calibrated_test_detection",
@@ -1924,11 +1989,11 @@ def run_evaluate_mode(args: argparse.Namespace) -> None:
             "bootstrap_replicates": None,
         },
         "count_error_metrics": count_error_rows,
-        "count_error_strata": {
-            "grouping": "annotated_count_per_class_per_patch",
-            "bins": ["0–9", "10–25", "26–50", ">50"],
-            "purpose": "exploratory_descriptive_density_analysis",
-            "summary": count_strata_rows,
+        "bland_altman_count_agreement": {
+            "unit": "test_patch",
+            "difference": "predicted_minus_annotated_count",
+            "limits_of_agreement": "mean_difference_plus_or_minus_1.96_sample_SD",
+            "summary": bland_altman_rows,
         },
         "pr_auc": pr_auc,
         "roc_auc": roc_auc,
@@ -1938,11 +2003,11 @@ def run_evaluate_mode(args: argparse.Namespace) -> None:
             "iou_sweep_metrics": str(cfg.output_dir / "iou_sweep_metrics.csv"),
             "per_class_metrics": str(cfg.output_dir / "per_class_metrics.csv"),
             "count_error_metrics": str(cfg.output_dir / "count_error_metrics.csv"),
+            "per_class_operating_metrics": str(per_class_operating_path),
             "per_image_count_errors": str(cfg.output_dir / "per_image_count_errors.csv"),
-            "per_patch_count_strata": str(cfg.output_dir / "per_patch_count_strata.csv"),
-            "count_strata_summary": str(cfg.output_dir / "count_strata_summary.csv"),
-            "count_strata_figure": (
-                str(cfg.output_dir / "supplementary_patch_count_errors.png")
+            "bland_altman_count_agreement": str(cfg.output_dir / "bland_altman_count_agreement.csv"),
+            "bland_altman_count_agreement_figure": (
+                str(cfg.output_dir / "bland_altman_count_agreement.png")
                 if not cfg.no_plots else None
             ),
             "confusion_matrix_csv": str(cfg.output_dir / "confusion_matrix.csv"),
@@ -1964,6 +2029,14 @@ def run_evaluate_mode(args: argparse.Namespace) -> None:
         f"(precision={operating_precision:.4f}, recall={operating_recall:.4f}, "
         f"fp/image={operating_point['fp_per_image']:.2f})"
     )
+    print(f"[EVALUATE] Macro-F1={macro_f1:.4f} (unweighted mean of class-specific F1 values)")
+    for class_row in per_class_operating:
+        print(
+            f"[EVALUATE] {class_row['class']}: TP={class_row['tp']} "
+            f"FP={class_row['fp']} FN={class_row['fn']} "
+            f"P={class_row['precision']:.4f} R={class_row['recall']:.4f} "
+            f"F1={class_row['f1']:.4f}"
+        )
     print(
         "[EVALUATE] Threshold sweep is descriptive only; "
         "no threshold was selected on the held-out test set."
