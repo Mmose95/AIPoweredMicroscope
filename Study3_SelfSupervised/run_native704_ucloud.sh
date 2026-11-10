@@ -102,6 +102,7 @@ if [[ "$mode" == public_ssl_full || "$mode" == public_ssl_full_smoke ]]; then
   tiles="$work/full_native2528"
   config="$study_dir/detection_native2528_ucloud_config.json"
   prepare_mode=prepare-full
+  extra+=(--progress-bar tqdm)
   if [[ "$mode" == public_ssl_full_smoke ]]; then
     extra+=(--smoke-test)
   fi

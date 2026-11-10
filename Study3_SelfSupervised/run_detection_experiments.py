@@ -126,6 +126,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--smoke-test", action="store_true", help="One train and validation image, one epoch")
+    parser.add_argument("--progress-bar", choices=("tqdm", "rich"), help="Show live batch progress")
     parser.add_argument("--arms", nargs="+", choices=DEFAULT_ARMS, default=list(DEFAULT_ARMS))
     parser.add_argument("--dinov3-repo", type=Path, default=defaults["dinov3_repo"])
     parser.add_argument("--dataset-dir", type=Path, default=defaults["dataset_dir"])
@@ -547,6 +548,8 @@ def _run_one(
             for name in ("multi_scale", "scale_jitter", "do_random_resize_via_padding")
             if name in training
         }
+        if args.progress_bar:
+            spatial_options["progress_bar"] = args.progress_bar
         detector_variant = model_config.get("detector_variant", "small")
         detector_class = {"small": RFDETRSmall, "large": RFDETRLarge}[detector_variant]
         print(
