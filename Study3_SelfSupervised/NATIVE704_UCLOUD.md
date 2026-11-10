@@ -1,14 +1,17 @@
 # Corrected 40× four-arm experiment on UCloud
 
-Use `init_dinov3_ucloud.sh` as the initializer for each GPU job. It installs the
-pinned environment and checks out the project. In the terminal, source the
-generated `dinov3_ucloud_env.sh` from that checkout.
+Use `init_native704_ucloud.sh` as the initializer for each GPU job. Attach the
+prepared `/work/CondaEnv/envs/phd-dinov3` environment. The initializer checks
+out the experiment and pinned DINOv3 code and writes the environment file.
+In the terminal, source the generated `dinov3_ucloud_env.sh` from the checkout.
 
-Use the same persistent `OUTPUT_ROOT` in all jobs. `CORRECTED_PATCH_ROOT` points to
+Use the same persistent `OUTPUT_ROOT` in all jobs. Set `DINOV3_OUTPUT_ROOT` in
+the initializer if the shared member folder is mounted under a different layout.
+`CORRECTED_PATCH_ROOT` points to
 the flat directory of corrected annotated parent JPEGs. `SSL_IMAGE_ROOT` points
 to the original full level-0 image pool, with one folder per specimen. It defaults
-to the initializer's `IMAGE_ROOT`. Set `DINOV3_IMAGE_ROOT` before initialization if
-the initializer cannot locate that original pool. For the public arm and public
+to `IMAGE_ROOT` if configured with `DINOV3_IMAGE_ROOT` in the initializer.
+For the public arm and public
 adaptation, set `STUDY3_PUBLIC_SSL_WEIGHTS` to the official DINOv3-S/16
 LVD-1689M checkpoint.
 
