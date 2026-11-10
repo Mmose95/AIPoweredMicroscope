@@ -1,8 +1,8 @@
 # Corrected 40× four-arm experiment on UCloud
 
-Use `init_native704_ucloud.sh` as the initializer for each GPU job. Attach the
-prepared `/work/CondaEnv/envs/phd-dinov3` environment. The initializer checks
-out the experiment and pinned DINOv3 code and writes the environment file.
+Use `init_native704_ucloud.sh` as the initializer for each GPU job. Use a GPU
+image with local Python 3.11 or Conda in `/opt/conda`. The initializer builds
+the pinned environment on job-local storage and verifies the CUDA runtime.
 In the terminal, source the generated `dinov3_ucloud_env.sh` from the checkout.
 
 Use the same persistent `OUTPUT_ROOT` in all jobs. Set `DINOV3_OUTPUT_ROOT` in
@@ -44,4 +44,5 @@ All four arms use RF-DETR Large at fixed 704 × 704 with the same DINOv3-S/16
 backbone architecture, two classes, 50 detector epochs, batch size 2, and
 gradient accumulation of 8. The launcher keeps the test split out of training
 and checkpoint selection. The shared experiment directory is
-`$OUTPUT_ROOT/Native704_20261110`.
+`$OUTPUT_ROOT/Native704_20261110`. Detector retries with the job-local runtime
+write under `detection_local_runtime`.

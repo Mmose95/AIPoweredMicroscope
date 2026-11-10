@@ -116,4 +116,4 @@ echo "[Native704] Shared tiles: $tiles"
 exec "$python_bin" -u "$study_dir/run_detection_experiments.py" \
   --config "$study_dir/detection_native704_ucloud_config.json" --arms "$mode" \
   --dinov3-repo "$DINOV3_REPO" --dataset-dir "$tiles" --image-root "$tiles" \
-  --output-root "$work/detection" "${extra[@]}" --train
+  --output-root "${NATIVE704_DETECTION_OUTPUT:-$work/detection_local_runtime}" "${extra[@]}" --train

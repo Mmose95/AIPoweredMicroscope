@@ -1,18 +1,14 @@
 #!/usr/bin/env bash
-# UCloud initializer for the Native704 four-arm jobs. Reuses a prepared environment.
+# UCloud initializer for the Native704 four-arm jobs.
 set -Eeuo pipefail
 
-ENV_DIR="${DINOV3_ENV_DIR:-/work/CondaEnv/envs/phd-dinov3}"
+RUNTIME_ROOT="${NATIVE704_RUNTIME_ROOT:-/tmp/native704-runtime}"
+ENV_DIR="$RUNTIME_ROOT/env"
 PROJECT_DIR="${PROJECT_DIR:-/work/projects/myproj}"
-DINOV3_REPO="${DINOV3_REPO:-/work/projects/dinov3}"
+DINOV3_REPO="$RUNTIME_ROOT/dinov3"
 PROJECT_URL="${PROJECT_REPO_URL:-https://github.com/Mmose95/AIPoweredMicroscope.git}"
 DINOV3_URL="${DINOV3_REPO_URL:-https://github.com/facebookresearch/dinov3.git}"
 DINOV3_COMMIT="${DINOV3_COMMIT:-6876159a11b4df116f30f667f8c9888617df0751}"
-
-if [[ ! -x "$ENV_DIR/bin/python" ]]; then
-  echo "[Native704 Init][ERROR] Mount the prepared Conda environment at $ENV_DIR." >&2
-  exit 1
-fi
 
 OUTPUT_ROOT="${DINOV3_OUTPUT_ROOT:-${OUTPUT_ROOT:-}}"
 if [[ -z "$OUTPUT_ROOT" ]]; then
@@ -48,9 +44,54 @@ if [[ "$(git -C "$DINOV3_REPO" rev-parse --verify HEAD 2>/dev/null || true)" != 
   git -C "$DINOV3_REPO" checkout --detach "$DINOV3_COMMIT"
 fi
 
+echo "[Native704 Init] Setting up the job-local Python environment: $ENV_DIR"
+if [[ ! -x "$ENV_DIR/bin/python" ]]; then
+  bootstrap="${NATIVE704_BOOTSTRAP_PYTHON:-}"
+  if [[ -z "$bootstrap" ]]; then
+    for candidate in /opt/conda/bin/python3.11 /usr/bin/python3.11 /usr/local/bin/python3.11; do
+      if [[ -x "$candidate" ]]; then
+        bootstrap="$candidate"
+        break
+      fi
+    done
+  fi
+  if [[ -n "$bootstrap" && "$(readlink -f -- "$bootstrap")" != /work/* ]]; then
+    "$bootstrap" -m venv --copies "$ENV_DIR"
+  elif [[ -x /opt/conda/bin/conda ]]; then
+    /opt/conda/bin/conda create -y -p "$ENV_DIR" python=3.11 pip
+  else
+    echo "[Native704 Init][ERROR] Select a job image with Python 3.11 or local Conda." >&2
+    exit 1
+  fi
+fi
+
+python_bin="$ENV_DIR/bin/python"
+torch_index="${DINOV3_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
+marker="$RUNTIME_ROOT/ready-torch2.7.1-rfdetr1.9.1-${DINOV3_COMMIT}"
+if [[ ! -f "$marker" ]]; then
+  echo "[Native704 Init] Installing pinned CUDA PyTorch and training dependencies"
+  "$python_bin" -m pip install --index-url "$torch_index" torch==2.7.1 torchvision==0.22.1
+  constraints="$RUNTIME_ROOT/constraints.txt"
+  printf '%s\n' torch==2.7.1 torchvision==0.22.1 'rfdetr==1.9.1' > "$constraints"
+  "$python_bin" -m pip install -c "$constraints" -r "$DINOV3_REPO/requirements.txt" \
+    -e "$DINOV3_REPO" 'rfdetr[train,augment]==1.9.1'
+fi
+echo "[Native704 Init] Verifying PyTorch, DINOv3, RF-DETR and CUDA"
+"$python_bin" -u - <<'PY'
+import torch
+import dinov3
+from rfdetr import RFDETRLarge
+
+if not torch.cuda.is_available():
+    raise SystemExit("CUDA is unavailable in the job-local environment")
+print(f"PyTorch {torch.__version__}; GPU: {torch.cuda.get_device_name(0)}")
+PY
+touch "$marker"
+
 env_file="$PROJECT_DIR/dinov3_ucloud_env.sh"
 {
   printf 'export DINOV3_ENV_DIR=%q\n' "$ENV_DIR"
+  printf 'export PYTHON_BIN=%q\n' "$python_bin"
   printf 'export DINOV3_REPO=%q\n' "$DINOV3_REPO"
   printf 'export PROJECT_DIR=%q\n' "$PROJECT_DIR"
   printf 'export STUDY3_DIR=%q\n' "$PROJECT_DIR/Study3_SelfSupervised"
