@@ -224,12 +224,19 @@ PY
   exec 9>&-
 fi
 
-# The home directory is job-local, so register the persistent environment's
-# kernel on every job even when package installation is skipped.
-python -m ipykernel install --user \
-  --name "$ENV_NAME" --display-name "Python ($ENV_NAME)" || true
+# Kernel registration is only needed for notebooks. Terminal training jobs can skip it.
+if [[ "${DINOV3_REGISTER_KERNEL:-1}" == "1" ]]; then
+  echo "[DINOv3 Init] Registering the Jupyter kernel"
+  if ! timeout --kill-after=5s "${DINOV3_KERNEL_TIMEOUT:-30}s" python -u -m ipykernel install --user \
+      --name "$ENV_NAME" --display-name "Python ($ENV_NAME)"; then
+    echo "[DINOv3 Init][WARN] Kernel registration did not finish. Terminal training can continue." >&2
+  fi
+else
+  echo "[DINOv3 Init] Jupyter kernel registration skipped"
+fi
 
 # Prefer an explicit path. Otherwise check common storage layouts, then search.
+echo "[DINOv3 Init] Locating the original image pool"
 if [[ -n "${DINOV3_IMAGE_ROOT:-}" ]]; then
   IMAGE_ROOT="$DINOV3_IMAGE_ROOT"
 else
@@ -245,7 +252,8 @@ else
     fi
   done
   if [[ -z "$IMAGE_ROOT" ]]; then
-    IMAGE_ROOT="$(find "$USER_BASE_PATH" -maxdepth 6 -type d -name '40x Input tiles for CVAT' -print -quit 2>/dev/null || true)"
+    echo "[DINOv3 Init] Searching the shared mount for the original image pool"
+    IMAGE_ROOT="$(timeout --kill-after=5s 30s find "$USER_BASE_PATH" -maxdepth 6 -type d -name '40x Input tiles for CVAT' -print -quit 2>/dev/null || true)"
   fi
 fi
 if [[ -z "$IMAGE_ROOT" || ! -d "$IMAGE_ROOT" ]]; then
@@ -299,9 +307,11 @@ EOF
 fi
 
 echo "[DINOv3 Init] Final verification"
-python - <<'PY'
+if ! timeout --kill-after=10s "${DINOV3_VERIFY_TIMEOUT:-120}s" python -u - <<'PY'
 import sys
+print("[DINOv3 Init] Importing PyTorch", flush=True)
 import torch
+print("[DINOv3 Init] Importing DINOv3", flush=True)
 import dinov3
 print(" python:", sys.executable)
 print(" torch:", torch.__version__)
@@ -314,6 +324,10 @@ for index in range(torch.cuda.device_count()):
     print(f" gpu{index}:", torch.cuda.get_device_name(index))
 print(" DINOv3 import: passed")
 PY
+then
+  echo "[DINOv3 Init][ERROR] GPU verification failed or timed out. Check the last reported step." >&2
+  exit 1
+fi
 
 if [[ "${DINOV3_VALIDATE_DATA:-0}" == "1" ]]; then
   python "$STUDY3_DIR/validate_uploaded_ssl_pool.py" \
