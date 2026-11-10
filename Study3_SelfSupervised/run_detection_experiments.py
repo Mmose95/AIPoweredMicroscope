@@ -127,7 +127,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--smoke-test", action="store_true", help="One train and validation image, one epoch")
     parser.add_argument("--progress-bar", choices=("tqdm", "rich"), help="Show live batch progress")
-    parser.add_argument("--arms", nargs="+", choices=DEFAULT_ARMS, default=list(DEFAULT_ARMS))
+    parser.add_argument("--arms", nargs="+", choices=(*DEFAULT_ARMS, "stock_pretrained"), default=list(DEFAULT_ARMS))
+    parser.add_argument("--stock-weights", type=Path, help="Published RF-DETR Large checkpoint")
     parser.add_argument("--dinov3-repo", type=Path, default=defaults["dinov3_repo"])
     parser.add_argument("--dataset-dir", type=Path, default=defaults["dataset_dir"])
     parser.add_argument("--image-root", type=Path, default=defaults["image_root"])
@@ -353,7 +354,7 @@ def _assert_same_dataset_identity(previous: dict, current: dict) -> None:
 
 
 def _validate_config(config: dict) -> None:
-    supported_arms = set(DEFAULT_ARMS)
+    supported_arms = {*DEFAULT_ARMS, "stock_pretrained"}
     configured_arms = set(config.get("arms", []))
     if not configured_arms or not configured_arms <= supported_arms:
         raise ValueError(f"Config arms must be a non-empty subset of {sorted(supported_arms)}")
@@ -362,7 +363,10 @@ def _validate_config(config: dict) -> None:
     if config.get("selection", {}).get("test_during_training") is not False:
         raise ValueError("test_during_training must be false")
     model = config.get("model", {})
-    if model.get("architecture") not in ("dinov3_vits16", "dinov3_vitb16"):
+    if configured_arms == {"stock_pretrained"}:
+        if model.get("architecture") != "dinov2_windowed_small" or model.get("detector_variant") != "large":
+            raise ValueError("The stock baseline requires RF-DETR Large with its DINOv2 Windowed Small backbone")
+    elif "stock_pretrained" in configured_arms or model.get("architecture") not in ("dinov3_vits16", "dinov3_vitb16"):
         raise ValueError("Supported DINOv3 architectures are dinov3_vits16 and dinov3_vitb16")
     if int(model.get("patch_size", 0)) != 16:
         raise ValueError("This paired experiment requires patch_size=16")
@@ -379,6 +383,9 @@ def _run_one(
     config: dict,
 ) -> Path:
     model_config = config["model"]
+    stock_weights = args.stock_weights.resolve() if arm == "stock_pretrained" else None
+    if stock_weights is not None and not stock_weights.is_file():
+        raise FileNotFoundError(f"Stock RF-DETR checkpoint not found: {stock_weights}")
     budget_label = f"budget_{budget:.3f}".replace(".", "p")
     config_fingerprint = hashlib.sha256(
         json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -487,13 +494,16 @@ def _run_one(
                 "public_ssl": f"official_{model_config['architecture']}_lvd1689m",
                 "own_data_ssl": "own_data_ssl_ema_teacher",
                 "public_domain_ssl": f"official_{model_config['architecture']}_then_domain_ssl_ema_teacher",
+                "stock_pretrained": "published_rfdetr_large_2026_dinov2_windowed_small",
             }[arm],
-            "detector": "random",
-            "external_pretrained_weights": arm in ("public_ssl", "public_domain_ssl"),
+            "detector": "published_rfdetr_large_2026" if stock_weights else "random",
+            "external_pretrained_weights": arm != "scratch" and arm != "own_data_ssl",
             "checkpoint": str(checkpoint) if checkpoint else None,
             "checkpoint_sha256": _sha256(checkpoint) if checkpoint else None,
             "public_weights": str(public_weights) if public_weights else None,
             "public_weights_sha256": _sha256(public_weights) if public_weights else None,
+            **({"stock_weights": str(stock_weights), "stock_weights_sha256": _sha256(stock_weights)}
+               if stock_weights else {}),
         },
         "dataset": dataset_report,
         "test_policy": "Test split is not materialized and run_test=False.",
@@ -540,7 +550,6 @@ def _run_one(
         _seed_everything(seed)
         print("[Detector run] Importing RF-DETR", flush=True)
         from rfdetr import RFDETRLarge, RFDETRSmall
-        from rfdetr_dinov3_bridge import train_rfdetr_with_dinov3, write_bridge_provenance
 
         training = config["training"]
         spatial_options = {
@@ -559,7 +568,7 @@ def _run_one(
             flush=True,
         )
         rf_model = detector_class(
-            pretrain_weights=None,
+            pretrain_weights=str(stock_weights) if stock_weights else None,
             resolution=int(model_config["resolution"]),
             patch_size=int(model_config["patch_size"]),
             num_queries=int(model_config["num_queries"]),
@@ -572,14 +581,7 @@ def _run_one(
             "[Detector run] Launching training; RF-DETR will print validation metrics each epoch",
             flush=True,
         )
-        encoder = train_rfdetr_with_dinov3(
-            rf_model,
-            dinov3_repo=args.dinov3_repo.resolve(),
-            initialization=arm,
-            checkpoint=checkpoint,
-            public_weights=public_weights,
-            architecture=model_config["architecture"],
-            feature_layers=tuple(model_config["feature_layers"]),
+        train_options = dict(
             dataset_dir=str(dataset_dir.resolve()),
             output_dir=str(run_dir.resolve()),
             class_names=list(model_config["class_names"]),
@@ -596,8 +598,24 @@ def _run_one(
             run_test=False,
             **spatial_options,
         )
-        write_bridge_provenance(encoder, run_dir / "backbone_provenance.json")
-        run_record["backbone_provenance"] = encoder.provenance_dict()
+        if stock_weights:
+            rf_model.train(**train_options)
+            encoder = rf_model.model.model.backbone[0].encoder
+        else:
+            from rfdetr_dinov3_bridge import train_rfdetr_with_dinov3, write_bridge_provenance
+
+            encoder = train_rfdetr_with_dinov3(
+                rf_model,
+                dinov3_repo=args.dinov3_repo.resolve(),
+                initialization=arm,
+                checkpoint=checkpoint,
+                public_weights=public_weights,
+                architecture=model_config["architecture"],
+                feature_layers=tuple(model_config["feature_layers"]),
+                **train_options,
+            )
+            write_bridge_provenance(encoder, run_dir / "backbone_provenance.json")
+            run_record["backbone_provenance"] = encoder.provenance_dict()
         trainable_encoder_parameters = sum(
             parameter.numel() for parameter in encoder.parameters() if parameter.requires_grad
         )
@@ -633,13 +651,23 @@ def main() -> int:
     args = parse_args()
     args.config = args.config.expanduser().resolve()
     config = json.loads(args.config.read_text(encoding="utf-8"))
+    if "stock_pretrained" in args.arms:
+        if args.arms != ["stock_pretrained"] or args.stock_weights is None:
+            raise ValueError("Run stock_pretrained separately with --stock-weights")
+        config["experiment_name"] += "_stock"
+        config["arms"] = ["stock_pretrained"]
+        config["model"]["architecture"] = "dinov2_windowed_small"
+        config["model"].pop("feature_layers", None)
     if args.smoke_test:
         if args.resume:
             raise ValueError("Smoke tests start a fresh run")
         config["experiment_name"] += "_smoke"
         config["training"].update(epochs=1, batch_size=1, grad_accum_steps=1, num_workers=0)
     _validate_config(config)
-    for required in (args.dinov3_repo / "hubconf.py", args.dataset_dir, args.image_root):
+    required_paths = [args.dataset_dir, args.image_root]
+    if "stock_pretrained" not in args.arms:
+        required_paths.append(args.dinov3_repo / "hubconf.py")
+    for required in required_paths:
         if not required.exists():
             raise FileNotFoundError(f"Required path not found: {required}")
     requested_arms = list(args.arms)

@@ -10,8 +10,8 @@ fi
 
 mode="${1:-}"
 case "$mode" in
-  prepare|prepare-full|scratch|public_ssl|public_ssl_full|public_ssl_full_smoke|ssl|ssl-scratch|ssl-adapt|own_data_ssl|public_domain_ssl) ;;
-  *) echo "Usage: $0 {prepare|prepare-full|scratch|public_ssl|public_ssl_full|public_ssl_full_smoke|ssl|ssl-scratch|ssl-adapt|own_data_ssl|public_domain_ssl}" >&2; exit 2 ;;
+  prepare|prepare-full|scratch|public_ssl|stock_pretrained|public_ssl_full|public_ssl_full_smoke|ssl|ssl-scratch|ssl-adapt|own_data_ssl|public_domain_ssl) ;;
+  *) echo "Usage: $0 {prepare|prepare-full|scratch|public_ssl|stock_pretrained|public_ssl_full|public_ssl_full_smoke|ssl|ssl-scratch|ssl-adapt|own_data_ssl|public_domain_ssl}" >&2; exit 2 ;;
 esac
 
 : "${OUTPUT_ROOT:?Source the UCloud environment or set OUTPUT_ROOT to persistent storage}"
@@ -111,6 +111,22 @@ fi
 if [[ ! -f "$tiles/tiling_summary.json" ]]; then
   echo "Run '$0 $prepare_mode' once with the shared OUTPUT_ROOT before starting detector training." >&2
   exit 2
+fi
+if [[ "$mode" == stock_pretrained ]]; then
+  stock_weights="${STUDY3_STOCK_RFDETR_WEIGHTS:-${TMPDIR:-/tmp}/rf-detr-large-2026.pth}"
+  expected_md5=5cb72153541cbcb9aa6efa26222acc75
+  if [[ ! -f "$stock_weights" && -z "${STUDY3_STOCK_RFDETR_WEIGHTS:-}" ]]; then
+    echo "[Native704] Downloading published RF-DETR Large checkpoint"
+    curl --fail --location --output "$stock_weights.part" \
+      https://storage.googleapis.com/rfdetr/rf-detr-large-2026.pth
+    printf '%s  %s\n' "$expected_md5" "$stock_weights.part" | md5sum --check --status
+    mv -- "$stock_weights.part" "$stock_weights"
+  fi
+  if ! printf '%s  %s\n' "$expected_md5" "$stock_weights" | md5sum --check --status; then
+    echo "[Native704][ERROR] Missing checkpoint or checksum mismatch: $stock_weights" >&2
+    exit 2
+  fi
+  extra+=(--stock-weights "$stock_weights" --progress-bar tqdm)
 fi
 if [[ "$mode" == public_ssl || "$mode" == public_domain_ssl ]]; then
   require_public_weights

@@ -46,3 +46,10 @@ gradient accumulation of 8. The launcher keeps the test split out of training
 and checkpoint selection. The shared experiment directory is
 `$OUTPUT_ROOT/Native704_20261110`. Detector retries with the job-local runtime
 write under `detection_local_runtime`.
+
+For the additional stock RF-DETR Large baseline, run
+`bash Study3_SelfSupervised/run_native704_ucloud.sh stock_pretrained` in a GPU
+job after the shared tiles are prepared. This uses the same Native704 training
+settings and split with the stock DINOv2 backbone and published detector
+checkpoint. The launcher downloads and verifies `rf-detr-large-2026.pth`.
+If you already have the published file, point `STUDY3_STOCK_RFDETR_WEIGHTS` at it.
