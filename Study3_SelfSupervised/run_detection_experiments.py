@@ -268,6 +268,10 @@ def _materialize_dataset(
             raw_name = str(image["file_name"])
             raw_path = Path(raw_name)
             normalized_name = raw_name.replace("\\", "/").lstrip("./")
+            split_relative = source / split / normalized_name
+            if image_root == source and not raw_path.is_absolute() and split_relative.is_file():
+                image["file_name"] = str(split_relative.resolve())
+                continue
             direct_path = image_root / normalized_name
             normalized_parts = PurePosixPath(normalized_name).parts
             suffix_exists = any(
@@ -527,6 +531,11 @@ def _run_one(
 
         _seed_everything(seed)
         training = config["training"]
+        spatial_options = {
+            name: training[name]
+            for name in ("multi_scale", "scale_jitter", "do_random_resize_via_padding")
+            if name in training
+        }
         detector_variant = model_config.get("detector_variant", "small")
         detector_class = {"small": RFDETRSmall, "large": RFDETRLarge}[detector_variant]
         print(
@@ -569,6 +578,7 @@ def _run_one(
             seed=seed,
             early_stopping=False,
             run_test=False,
+            **spatial_options,
         )
         write_bridge_provenance(encoder, run_dir / "backbone_provenance.json")
         run_record["backbone_provenance"] = encoder.provenance_dict()

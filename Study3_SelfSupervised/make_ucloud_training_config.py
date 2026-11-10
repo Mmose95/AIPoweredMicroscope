@@ -31,6 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--base-config", type=Path, default=DEFAULT_BASE)
+    parser.add_argument("--architecture", choices=("vit_base", "vit_small"), default="vit_base")
     return parser.parse_args()
 
 
@@ -48,10 +49,9 @@ def main() -> int:
     global_batch = args.gpus * args.batch_size_per_gpu
     iterations_per_epoch = math.ceil(image_count / global_batch)
     cfg = OmegaConf.load(args.base_config)
-    if str(cfg.student.arch) != "vit_base" or int(cfg.student.patch_size) != 16:
+    if str(cfg.student.arch) != args.architecture or int(cfg.student.patch_size) != 16:
         raise ValueError(
-            "Study 3 full SSL generation requires DINOv3-B/16 "
-            "(student.arch=vit_base, student.patch_size=16)"
+            f"Base config must use student.arch={args.architecture} and student.patch_size=16"
         )
     cfg.train.batch_size_per_gpu = args.batch_size_per_gpu
     cfg.train.num_workers = args.num_workers
@@ -72,7 +72,7 @@ def main() -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     OmegaConf.save(cfg, output)
     print(f"Saved: {output}")
-    print("Architecture: DINOv3-B/16 (vit_base, patch 16)")
+    print(f"Architecture: {args.architecture}, patch 16")
     print(f"Images: {image_count:,}")
     print(f"Global batch: {global_batch:,}")
     print(f"Seed: {args.seed}")
