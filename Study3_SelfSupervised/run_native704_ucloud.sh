@@ -10,8 +10,8 @@ fi
 
 mode="${1:-}"
 case "$mode" in
-  prepare|prepare-full|scratch|public_ssl|stock_pretrained|stock_pretrained_full|stock_pretrained_full_smoke|public_ssl_full|public_ssl_full_smoke|ssl|ssl-scratch|ssl-adapt|own_data_ssl|public_domain_ssl) ;;
-  *) echo "Usage: $0 {prepare|prepare-full|scratch|public_ssl|stock_pretrained|stock_pretrained_full|stock_pretrained_full_smoke|public_ssl_full|public_ssl_full_smoke|ssl|ssl-scratch|ssl-adapt|own_data_ssl|public_domain_ssl}" >&2; exit 2 ;;
+  prepare|prepare-full|scratch|public_ssl|stock_pretrained|stock_pretrained_frozen|stock_pretrained_gentle|stock_pretrained_full|stock_pretrained_full_smoke|public_ssl_full|public_ssl_full_smoke|ssl|ssl-scratch|ssl-adapt|own_data_ssl|public_domain_ssl) ;;
+  *) echo "Usage: $0 {prepare|prepare-full|scratch|public_ssl|stock_pretrained|stock_pretrained_frozen|stock_pretrained_gentle|stock_pretrained_full|stock_pretrained_full_smoke|public_ssl_full|public_ssl_full_smoke|ssl|ssl-scratch|ssl-adapt|own_data_ssl|public_domain_ssl}" >&2; exit 2 ;;
 esac
 
 : "${OUTPUT_ROOT:?Source the UCloud environment or set OUTPUT_ROOT to persistent storage}"
@@ -99,6 +99,10 @@ config="$study_dir/detection_native704_ucloud_config.json"
 prepare_mode=prepare
 extra=()
 case "$mode" in
+  stock_pretrained_frozen|stock_pretrained_gentle)
+    extra+=(--stock-policy "${mode#stock_pretrained_}")
+    mode=stock_pretrained
+    ;;
   public_ssl_full*|stock_pretrained_full*)
     tiles="$work/full_native2528"
     config="$study_dir/detection_native2528_ucloud_config.json"

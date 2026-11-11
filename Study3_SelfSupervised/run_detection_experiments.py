@@ -129,6 +129,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--progress-bar", choices=("tqdm", "rich"), help="Show live batch progress")
     parser.add_argument("--arms", nargs="+", choices=(*DEFAULT_ARMS, "stock_pretrained"), default=list(DEFAULT_ARMS))
     parser.add_argument("--stock-weights", type=Path, help="Published RF-DETR Large checkpoint")
+    parser.add_argument("--stock-policy", choices=("frozen", "gentle"))
     parser.add_argument("--dinov3-repo", type=Path, default=defaults["dinov3_repo"])
     parser.add_argument("--dataset-dir", type=Path, default=defaults["dataset_dir"])
     parser.add_argument("--image-root", type=Path, default=defaults["image_root"])
@@ -552,13 +553,14 @@ def _run_one(
         from rfdetr import RFDETRLarge, RFDETRSmall
 
         training = config["training"]
-        spatial_options = {
+        extra_train_options = {
             name: training[name]
-            for name in ("multi_scale", "scale_jitter", "do_random_resize_via_padding")
+            for name in ("multi_scale", "scale_jitter", "do_random_resize_via_padding",
+                         "lr_encoder", "warmup_epochs")
             if name in training
         }
         if args.progress_bar:
-            spatial_options["progress_bar"] = args.progress_bar
+            extra_train_options["progress_bar"] = args.progress_bar
         detector_variant = model_config.get("detector_variant", "small")
         detector_class = {"small": RFDETRSmall, "large": RFDETRLarge}[detector_variant]
         print(
@@ -596,7 +598,7 @@ def _run_one(
             seed=seed,
             early_stopping=False,
             run_test=False,
-            **spatial_options,
+            **extra_train_options,
         )
         if stock_weights:
             rf_model.train(**train_options)
@@ -651,6 +653,8 @@ def main() -> int:
     args = parse_args()
     args.config = args.config.expanduser().resolve()
     config = json.loads(args.config.read_text(encoding="utf-8"))
+    if args.stock_policy and args.arms != ["stock_pretrained"]:
+        raise ValueError("--stock-policy requires --arms stock_pretrained")
     if "stock_pretrained" in args.arms:
         if args.arms != ["stock_pretrained"] or args.stock_weights is None:
             raise ValueError("Run stock_pretrained separately with --stock-weights")
@@ -658,6 +662,13 @@ def main() -> int:
         config["arms"] = ["stock_pretrained"]
         config["model"]["architecture"] = "dinov2_windowed_small"
         config["model"].pop("feature_layers", None)
+        if args.stock_policy == "frozen":
+            config["experiment_name"] += "_frozen"
+            config["model"]["freeze_encoder"] = True
+        elif args.stock_policy == "gentle":
+            config["experiment_name"] += "_gentle"
+            # About 159 optimizer updates, close to three 10x epochs (156).
+            config["training"].update(lr_encoder=3e-5, warmup_epochs=0.2)
     if args.smoke_test:
         if args.resume:
             raise ValueError("Smoke tests start a fresh run")
