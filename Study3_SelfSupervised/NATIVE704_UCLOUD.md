@@ -53,3 +53,9 @@ job after the shared tiles are prepared. This uses the same Native704 training
 settings and split with the stock DINOv2 backbone and published detector
 checkpoint. The launcher downloads and verifies `rf-detr-large-2026.pth`.
 If you already have the published file, point `STUDY3_STOCK_RFDETR_WEIGHTS` at it.
+
+For stock RF-DETR Large at 2528 × 2528, reuse the output from `prepare-full`.
+Run `bash Study3_SelfSupervised/run_native704_ucloud.sh stock_pretrained_full_smoke`
+to check checkpoint loading and GPU memory. Run the same command with
+`stock_pretrained_full` for the full experiment. It shares the full-patch
+dataset and training settings with `public_ssl_full`.

@@ -10,8 +10,8 @@ fi
 
 mode="${1:-}"
 case "$mode" in
-  prepare|prepare-full|scratch|public_ssl|stock_pretrained|public_ssl_full|public_ssl_full_smoke|ssl|ssl-scratch|ssl-adapt|own_data_ssl|public_domain_ssl) ;;
-  *) echo "Usage: $0 {prepare|prepare-full|scratch|public_ssl|stock_pretrained|public_ssl_full|public_ssl_full_smoke|ssl|ssl-scratch|ssl-adapt|own_data_ssl|public_domain_ssl}" >&2; exit 2 ;;
+  prepare|prepare-full|scratch|public_ssl|stock_pretrained|stock_pretrained_full|stock_pretrained_full_smoke|public_ssl_full|public_ssl_full_smoke|ssl|ssl-scratch|ssl-adapt|own_data_ssl|public_domain_ssl) ;;
+  *) echo "Usage: $0 {prepare|prepare-full|scratch|public_ssl|stock_pretrained|stock_pretrained_full|stock_pretrained_full_smoke|public_ssl_full|public_ssl_full_smoke|ssl|ssl-scratch|ssl-adapt|own_data_ssl|public_domain_ssl}" >&2; exit 2 ;;
 esac
 
 : "${OUTPUT_ROOT:?Source the UCloud environment or set OUTPUT_ROOT to persistent storage}"
@@ -98,16 +98,20 @@ esac
 config="$study_dir/detection_native704_ucloud_config.json"
 prepare_mode=prepare
 extra=()
-if [[ "$mode" == public_ssl_full || "$mode" == public_ssl_full_smoke ]]; then
-  tiles="$work/full_native2528"
-  config="$study_dir/detection_native2528_ucloud_config.json"
-  prepare_mode=prepare-full
-  extra+=(--progress-bar tqdm)
-  if [[ "$mode" == public_ssl_full_smoke ]]; then
-    extra+=(--smoke-test)
-  fi
-  mode=public_ssl
-fi
+case "$mode" in
+  public_ssl_full*|stock_pretrained_full*)
+    tiles="$work/full_native2528"
+    config="$study_dir/detection_native2528_ucloud_config.json"
+    prepare_mode=prepare-full
+    if [[ "$mode" == *_smoke ]]; then
+      extra+=(--smoke-test)
+    fi
+    mode="${mode%%_full*}"
+    if [[ "$mode" == public_ssl ]]; then
+      extra+=(--progress-bar tqdm)
+    fi
+    ;;
+esac
 if [[ ! -f "$tiles/tiling_summary.json" ]]; then
   echo "Run '$0 $prepare_mode' once with the shared OUTPUT_ROOT before starting detector training." >&2
   exit 2
