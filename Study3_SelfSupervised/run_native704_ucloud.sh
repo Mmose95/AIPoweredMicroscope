@@ -22,7 +22,7 @@ manifest="$work/ssl_training_specimens.csv"
 public_weights="${STUDY3_PUBLIC_SSL_WEIGHTS:-}"
 python_bin="${PYTHON_BIN:-python}"
 detection_output="${NATIVE704_DETECTION_OUTPUT:-$work/detection_local_runtime}"
-sampled_full="$work/full_native2528_10x_sampling"
+sampled_full="$work/full_640_10x_sampling"
 
 case "$mode" in
   prepare|prepare-full|prepare-full-10x-sampling)
@@ -34,7 +34,7 @@ case "$mode" in
     fi
     if [[ "$mode" == prepare-full-10x-sampling ]]; then
       tiles="$sampled_full"
-      geometry+=(--sampling-size 640 640)
+      geometry=(--tile-size 640 --resize-full)
     fi
     exec "$python_bin" "$repo_dir/40x_Study2_Preprocessing/tileDetectorDataset.py" \
       --source "$source_split" --image-root "$CORRECTED_PATCH_ROOT" --output "$tiles" \
@@ -109,7 +109,7 @@ case "$mode" in
     tiles="$sampled_full"
     config="$study_dir/detection_native2528_ucloud_config.json"
     prepare_mode=prepare-full-10x-sampling
-    detection_output="$detection_output/10x_sampling"
+    extra+=(--stock-resolution 640)
     mode=stock_pretrained
     ;;
   stock_pretrained_frozen|stock_pretrained_gentle)

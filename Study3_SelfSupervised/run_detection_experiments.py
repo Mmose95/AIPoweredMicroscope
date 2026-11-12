@@ -130,6 +130,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--arms", nargs="+", choices=(*DEFAULT_ARMS, "stock_pretrained"), default=list(DEFAULT_ARMS))
     parser.add_argument("--stock-weights", type=Path, help="Published RF-DETR Large checkpoint")
     parser.add_argument("--stock-policy", choices=("frozen", "gentle"))
+    parser.add_argument("--stock-resolution", type=int, help="Override the stock detector input size")
     parser.add_argument("--dinov3-repo", type=Path, default=defaults["dinov3_repo"])
     parser.add_argument("--dataset-dir", type=Path, default=defaults["dataset_dir"])
     parser.add_argument("--image-root", type=Path, default=defaults["image_root"])
@@ -655,6 +656,15 @@ def main() -> int:
     config = json.loads(args.config.read_text(encoding="utf-8"))
     if args.stock_policy and args.arms != ["stock_pretrained"]:
         raise ValueError("--stock-policy requires --arms stock_pretrained")
+    if args.stock_resolution is not None:
+        if args.arms != ["stock_pretrained"] or args.stock_resolution < 32 or args.stock_resolution % 32:
+            raise ValueError("--stock-resolution requires the stock arm and a positive multiple of 32")
+        patch_size = config["model"]["patch_size"]
+        if patch_size != 16:
+            raise ValueError("--stock-resolution requires the stock 16-pixel patch size")
+        config["experiment_name"] += f"_input{args.stock_resolution}"
+        config["model"].update(resolution=args.stock_resolution,
+                               positional_encoding_size=args.stock_resolution // patch_size)
     if "stock_pretrained" in args.arms:
         if args.arms != ["stock_pretrained"] or args.stock_weights is None:
             raise ValueError("Run stock_pretrained separately with --stock-weights")

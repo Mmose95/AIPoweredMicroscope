@@ -35,7 +35,7 @@ def clip_box(bbox, left, top, size):
     return None
 
 
-def plan_split(coco, image_root, split_dir, size, max_stride, pad_only=False):
+def plan_split(coco, image_root, split_dir, size, max_stride, pad_only=False, resize_full=False):
     by_image = defaultdict(list)
     for annotation in coco["annotations"]:
         by_image[annotation["image_id"]].append(annotation)
@@ -48,7 +48,11 @@ def plan_split(coco, image_root, split_dir, size, max_stride, pad_only=False):
             raise FileNotFoundError(parent_path)
         specimen = parent_path.stem.split("_CAL10PATCH_", 1)[0]
         specimens.add(specimen)
-        if pad_only:
+        if resize_full:
+            if min(parent["width"], parent["height"]) < size:
+                raise ValueError(f"Cannot downsample {parent_path} to {size} without upscaling")
+            xs = ys = [0]
+        elif pad_only:
             if max(parent["width"], parent["height"]) > size:
                 raise ValueError(f"Cannot pad {parent_path} to {size} without cropping")
             xs = ys = [0]
@@ -67,11 +71,17 @@ def plan_split(coco, image_root, split_dir, size, max_stride, pad_only=False):
                                   tile_x=left, tile_y=top))
                 crops.append((left, top, split_dir / name))
                 for source in by_image[parent["id"]]:
-                    box = clip_box(source["bbox"], left, top, size)
+                    if resize_full:
+                        x, y, w, h = source["bbox"]
+                        sx, sy = size / parent["width"], size / parent["height"]
+                        box = clip_box([x*sx, y*sy, w*sx, h*sy], 0, 0, size)
+                        original_area = w * h * sx * sy
+                    else:
+                        box = clip_box(source["bbox"], left, top, size)
+                        original_area = source["bbox"][2] * source["bbox"][3]
                     if box is None:
                         continue
                     covered.add(source["id"])
-                    original_area = source["bbox"][2] * source["bbox"][3]
                     area = box[2] * box[3]
                     if math.isclose(area, original_area, rel_tol=1e-9):
                         fully_visible.add(source["id"])
@@ -94,13 +104,15 @@ def plan_split(coco, image_root, split_dir, size, max_stride, pad_only=False):
     return dict(images=tiles, annotations=annotations, categories=coco["categories"]), jobs, summary, specimens
 
 
-def write_parent_tiles(job, size, sampling_size=None):
+def write_parent_tiles(job, size, sampling_size=None, resize_full=False):
     path, expected_size, crops = job
     with Image.open(path) as parent:
         if parent.size != expected_size:
             raise ValueError(f"COCO dimensions do not match image: {path}")
         parent.load()
-        if sampling_size is not None:
+        if resize_full:
+            parent = parent.resize((size, size), Image.Resampling.LANCZOS)
+        elif sampling_size is not None:
             # Match the 10x sampling grid, then restore the native dimensions
             # so the detector and COCO annotations use the original geometry.
             parent = parent.resize(sampling_size, Image.Resampling.LANCZOS).resize(
@@ -116,7 +128,9 @@ def main():
     parser.add_argument("--output", type=Path, default=OUTPUT)
     parser.add_argument("--image-root", type=Path)
     parser.add_argument("--tile-size", type=int, default=704)
-    parser.add_argument("--pad-only", action="store_true", help="Keep each whole patch and pad right/bottom")
+    full_image = parser.add_mutually_exclusive_group()
+    full_image.add_argument("--pad-only", action="store_true", help="Keep each whole patch and pad right/bottom")
+    full_image.add_argument("--resize-full", action="store_true", help="Downsample each whole patch to the detector size")
     parser.add_argument("--sampling-size", type=int, nargs=2, metavar=("WIDTH", "HEIGHT"),
                         help="With --pad-only, downsample to this grid and restore the native dimensions")
     parser.add_argument("--min-overlap", type=float, default=0.25)
@@ -135,7 +149,8 @@ def main():
     plans, specimens_seen = {}, set()
     for split in SPLITS:
         coco = json.loads((args.source / split / COCO_NAME).read_text(encoding="utf-8"))
-        plans[split] = plan_split(coco, image_root, staging / split, args.tile_size, stride, args.pad_only)
+        plans[split] = plan_split(coco, image_root, staging / split, args.tile_size, stride,
+                                  args.pad_only, args.resize_full)
         if args.sampling_size is not None and any(
             any(sample >= native for sample, native in zip(args.sampling_size, dimensions))
             for _, dimensions, _ in plans[split][1]
@@ -147,9 +162,11 @@ def main():
         specimens_seen.update(specimens)
     staging.mkdir(parents=True)
     report = {"source_dataset": str(args.source.resolve()), "tile_size": args.tile_size,
-              "minimum_overlap_fraction": None if args.pad_only else args.min_overlap,
-              "pad_only": args.pad_only, "resized": args.sampling_size is not None, "splits": {}}
-    if args.sampling_size is not None:
+              "minimum_overlap_fraction": None if args.pad_only or args.resize_full else args.min_overlap,
+              "pad_only": args.pad_only, "resized": args.resize_full or args.sampling_size is not None, "splits": {}}
+    if args.resize_full:
+        report["sampling"] = {"output_size": [args.tile_size, args.tile_size], "downsampling_filter": "Lanczos"}
+    elif args.sampling_size is not None:
         report["sampling"] = {
             "intermediate_size": args.sampling_size,
             "downsampling_filter": "Lanczos",
@@ -164,7 +181,7 @@ def main():
         print(f"[{split}] {summary['tiles']:,} tiles from {len(jobs)} parent patches", flush=True)
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
             for index, _ in enumerate(executor.map(
-                lambda job: write_parent_tiles(job, args.tile_size, args.sampling_size), jobs
+                lambda job: write_parent_tiles(job, args.tile_size, args.sampling_size, args.resize_full), jobs
             ), 1):
                 if index % 100 == 0 or index == len(jobs):
                     print(f"[{split}] {index}/{len(jobs)} parent patches", flush=True)
