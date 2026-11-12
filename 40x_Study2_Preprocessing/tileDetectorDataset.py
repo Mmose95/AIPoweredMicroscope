@@ -94,12 +94,18 @@ def plan_split(coco, image_root, split_dir, size, max_stride, pad_only=False):
     return dict(images=tiles, annotations=annotations, categories=coco["categories"]), jobs, summary, specimens
 
 
-def write_parent_tiles(job, size):
+def write_parent_tiles(job, size, sampling_size=None):
     path, expected_size, crops = job
     with Image.open(path) as parent:
         if parent.size != expected_size:
             raise ValueError(f"COCO dimensions do not match image: {path}")
         parent.load()
+        if sampling_size is not None:
+            # Match the 10x sampling grid, then restore the native dimensions
+            # so the detector and COCO annotations use the original geometry.
+            parent = parent.resize(sampling_size, Image.Resampling.LANCZOS).resize(
+                expected_size, Image.Resampling.BICUBIC
+            )
         for left, top, target in crops:
             parent.crop((left, top, left + size, top + size)).save(target, compress_level=1)
 
@@ -111,12 +117,16 @@ def main():
     parser.add_argument("--image-root", type=Path)
     parser.add_argument("--tile-size", type=int, default=704)
     parser.add_argument("--pad-only", action="store_true", help="Keep each whole patch and pad right/bottom")
+    parser.add_argument("--sampling-size", type=int, nargs=2, metavar=("WIDTH", "HEIGHT"),
+                        help="With --pad-only, downsample to this grid and restore the native dimensions")
     parser.add_argument("--min-overlap", type=float, default=0.25)
     parser.add_argument("--workers", type=int, default=8)
     args = parser.parse_args()
     stride = int(args.tile_size * (1 - args.min_overlap))
     if args.tile_size < 1 or not 0 <= args.min_overlap < 1 or stride < 1 or args.workers < 1:
         parser.error("Tile size, stride and workers must be positive, and overlap in [0, 1).")
+    if args.sampling_size is not None and (not args.pad_only or min(args.sampling_size) < 1):
+        parser.error("--sampling-size requires --pad-only and positive dimensions.")
     image_root = args.image_root or Path(json.loads(
         (args.source / "split_summary.json").read_text(encoding="utf-8"))["images_root"])
     staging = args.output.with_name(args.output.name + ".partial")
@@ -126,6 +136,11 @@ def main():
     for split in SPLITS:
         coco = json.loads((args.source / split / COCO_NAME).read_text(encoding="utf-8"))
         plans[split] = plan_split(coco, image_root, staging / split, args.tile_size, stride, args.pad_only)
+        if args.sampling_size is not None and any(
+            any(sample >= native for sample, native in zip(args.sampling_size, dimensions))
+            for _, dimensions, _ in plans[split][1]
+        ):
+            raise ValueError(f"{split}: sampling dimensions must be smaller than every native patch")
         specimens = plans[split][3]
         if specimens & specimens_seen:
             raise ValueError(f"Specimens appear in multiple splits: {specimens & specimens_seen}")
@@ -133,7 +148,14 @@ def main():
     staging.mkdir(parents=True)
     report = {"source_dataset": str(args.source.resolve()), "tile_size": args.tile_size,
               "minimum_overlap_fraction": None if args.pad_only else args.min_overlap,
-              "pad_only": args.pad_only, "resized": False, "splits": {}}
+              "pad_only": args.pad_only, "resized": args.sampling_size is not None, "splits": {}}
+    if args.sampling_size is not None:
+        report["sampling"] = {
+            "intermediate_size": args.sampling_size,
+            "downsampling_filter": "Lanczos",
+            "restore_filter": "bicubic",
+            "restored_to_native_dimensions_before_padding": True,
+        }
     for split, (coco, jobs, summary, specimens) in plans.items():
         split_dir = staging / split
         split_dir.mkdir()
@@ -141,7 +163,9 @@ def main():
             (split_dir / specimen).mkdir()
         print(f"[{split}] {summary['tiles']:,} tiles from {len(jobs)} parent patches", flush=True)
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
-            for index, _ in enumerate(executor.map(lambda job: write_parent_tiles(job, args.tile_size), jobs), 1):
+            for index, _ in enumerate(executor.map(
+                lambda job: write_parent_tiles(job, args.tile_size, args.sampling_size), jobs
+            ), 1):
                 if index % 100 == 0 or index == len(jobs):
                     print(f"[{split}] {index}/{len(jobs)} parent patches", flush=True)
         (split_dir / COCO_NAME).write_text(json.dumps(coco), encoding="utf-8")

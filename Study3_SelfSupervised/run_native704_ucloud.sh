@@ -10,8 +10,8 @@ fi
 
 mode="${1:-}"
 case "$mode" in
-  prepare|prepare-full|scratch|public_ssl|stock_pretrained|stock_pretrained_frozen|stock_pretrained_gentle|stock_pretrained_full|stock_pretrained_full_smoke|public_ssl_full|public_ssl_full_smoke|ssl|ssl-scratch|ssl-adapt|own_data_ssl|public_domain_ssl) ;;
-  *) echo "Usage: $0 {prepare|prepare-full|scratch|public_ssl|stock_pretrained|stock_pretrained_frozen|stock_pretrained_gentle|stock_pretrained_full|stock_pretrained_full_smoke|public_ssl_full|public_ssl_full_smoke|ssl|ssl-scratch|ssl-adapt|own_data_ssl|public_domain_ssl}" >&2; exit 2 ;;
+  prepare|prepare-full|prepare-full-10x-sampling|scratch|public_ssl|stock_pretrained|stock_pretrained_frozen|stock_pretrained_gentle|stock_pretrained_full|stock_pretrained_full_smoke|stock_pretrained_full_10x_sampling|public_ssl_full|public_ssl_full_smoke|ssl|ssl-scratch|ssl-adapt|own_data_ssl|public_domain_ssl) ;;
+  *) echo "Usage: $0 {prepare|prepare-full|prepare-full-10x-sampling|scratch|public_ssl|stock_pretrained|stock_pretrained_frozen|stock_pretrained_gentle|stock_pretrained_full|stock_pretrained_full_smoke|stock_pretrained_full_10x_sampling|public_ssl_full|public_ssl_full_smoke|ssl|ssl-scratch|ssl-adapt|own_data_ssl|public_domain_ssl}" >&2; exit 2 ;;
 esac
 
 : "${OUTPUT_ROOT:?Source the UCloud environment or set OUTPUT_ROOT to persistent storage}"
@@ -21,14 +21,20 @@ tiles="$work/tiles"
 manifest="$work/ssl_training_specimens.csv"
 public_weights="${STUDY3_PUBLIC_SSL_WEIGHTS:-}"
 python_bin="${PYTHON_BIN:-python}"
+detection_output="${NATIVE704_DETECTION_OUTPUT:-$work/detection_local_runtime}"
+sampled_full="$work/full_native2528_10x_sampling"
 
 case "$mode" in
-  prepare|prepare-full)
+  prepare|prepare-full|prepare-full-10x-sampling)
     : "${CORRECTED_PATCH_ROOT:?Set this to the uploaded flat folder of corrected JPEG patches}"
     geometry=(--tile-size 704 --min-overlap 0.25)
-    if [[ "$mode" == prepare-full ]]; then
+    if [[ "$mode" == prepare-full* ]]; then
       tiles="$work/full_native2528"
       geometry=(--tile-size 2528 --pad-only)
+    fi
+    if [[ "$mode" == prepare-full-10x-sampling ]]; then
+      tiles="$sampled_full"
+      geometry+=(--sampling-size 640 640)
     fi
     exec "$python_bin" "$repo_dir/40x_Study2_Preprocessing/tileDetectorDataset.py" \
       --source "$source_split" --image-root "$CORRECTED_PATCH_ROOT" --output "$tiles" \
@@ -99,6 +105,13 @@ config="$study_dir/detection_native704_ucloud_config.json"
 prepare_mode=prepare
 extra=()
 case "$mode" in
+  stock_pretrained_full_10x_sampling)
+    tiles="$sampled_full"
+    config="$study_dir/detection_native2528_ucloud_config.json"
+    prepare_mode=prepare-full-10x-sampling
+    detection_output="$detection_output/10x_sampling"
+    mode=stock_pretrained
+    ;;
   stock_pretrained_frozen|stock_pretrained_gentle)
     extra+=(--stock-policy "${mode#stock_pretrained_}")
     mode=stock_pretrained
@@ -157,4 +170,4 @@ echo "[Native704] Shared tiles: $tiles"
 exec "$python_bin" -u "$study_dir/run_detection_experiments.py" \
   --config "$config" --arms "$mode" \
   --dinov3-repo "$DINOV3_REPO" --dataset-dir "$tiles" --image-root "$tiles" \
-  --output-root "${NATIVE704_DETECTION_OUTPUT:-$work/detection_local_runtime}" "${extra[@]}" --train
+  --output-root "$detection_output" "${extra[@]}" --train
