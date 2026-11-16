@@ -9,9 +9,14 @@ if [[ -f "$repo_dir/dinov3_ucloud_env.sh" ]]; then
 fi
 
 mode="${1:-}"
+encoder_mode=""
 case "$mode" in
+  dinov2-random|dinov2-own-ssl|dinov2-adapted-ssl|dinov2-adapt)
+    encoder_mode="$mode"
+    mode=stock_pretrained_full
+    ;;
   prepare|prepare-full|prepare-full-10x-sampling|scratch|public_ssl|stock_pretrained|stock_pretrained_frozen|stock_pretrained_gentle|stock_pretrained_full|stock_pretrained_full_smoke|stock_pretrained_full_10x_sampling|public_ssl_full|public_ssl_full_smoke|ssl|ssl-scratch|ssl-adapt|own_data_ssl|public_domain_ssl) ;;
-  *) echo "Usage: $0 {prepare|prepare-full|prepare-full-10x-sampling|scratch|public_ssl|stock_pretrained|stock_pretrained_frozen|stock_pretrained_gentle|stock_pretrained_full|stock_pretrained_full_smoke|stock_pretrained_full_10x_sampling|public_ssl_full|public_ssl_full_smoke|ssl|ssl-scratch|ssl-adapt|own_data_ssl|public_domain_ssl}" >&2; exit 2 ;;
+  *) echo "Usage: $0 {prepare|prepare-full|prepare-full-10x-sampling|scratch|public_ssl|stock_pretrained|stock_pretrained_frozen|stock_pretrained_gentle|stock_pretrained_full|stock_pretrained_full_smoke|stock_pretrained_full_10x_sampling|public_ssl_full|public_ssl_full_smoke|ssl|ssl-scratch|ssl-adapt|own_data_ssl|public_domain_ssl|dinov2-random|dinov2-own-ssl|dinov2-adapt|dinov2-adapted-ssl}" >&2; exit 2 ;;
 esac
 
 : "${OUTPUT_ROOT:?Source the UCloud environment or set OUTPUT_ROOT to persistent storage}"
@@ -149,6 +154,23 @@ if [[ "$mode" == stock_pretrained ]]; then
   fi
   extra+=(--stock-weights "$stock_weights" --progress-bar tqdm)
 fi
+case "$encoder_mode" in
+  dinov2-random)
+    extra+=(--stock-encoder random)
+    ;;
+  dinov2-own-ssl)
+    extra+=(--stock-encoder own_ssl --stock-encoder-teacher "$work/ssl_dinov2_small16_scratch/teacher_epoch_020.pth")
+    ;;
+  dinov2-adapt)
+    # Match the scratch SSL schedule and data for the initialization comparison.
+    DINOV2_SSL_OUTPUT="$work/ssl_dinov2_small16_adapt" \
+      exec bash "$study_dir/run_dinov2_ssl_ucloud.sh" --initial-checkpoint "$stock_weights" \
+        --epochs 20 --warmup 2 --batch-size 32
+    ;;
+  dinov2-adapted-ssl)
+    extra+=(--stock-encoder adapted_ssl --stock-encoder-teacher "$work/ssl_dinov2_small16_adapt/teacher_epoch_020.pth")
+    ;;
+esac
 if [[ "$mode" == public_ssl || "$mode" == public_domain_ssl ]]; then
   require_public_weights
   extra+=(--public-ssl-weights "$public_weights")

@@ -50,6 +50,14 @@ def make_encoder():
                   patch_size=16, positional_encoding_size=158, num_windows=1).encoder
 
 
+def stock_encoder_state(source, encoder):
+    from rfdetr.models.weights import interpolate_position_embeddings
+
+    state = {name: value for name, value in source["model"].items() if name.startswith(PREFIX)}
+    interpolate_position_embeddings(state, encoder.config.image_size // encoder.config.patch_size)
+    return {name.removeprefix(PREFIX): value for name, value in state.items()}
+
+
 def tokens(encoder, images, masks=None):
     embeddings = encoder.embeddings(images, bool_masked_pos=masks)
     encoded = encoder.encoder(embeddings, return_dict=False)[0]
@@ -75,8 +83,7 @@ def train(args):
     encoder = make_encoder()
     if args.initial_checkpoint:
         source = torch.load(args.initial_checkpoint, map_location="cpu", weights_only=False)
-        encoder.load_state_dict({name.removeprefix(PREFIX): value for name, value in source["model"].items()
-                                 if name.startswith(PREFIX)}, strict=True)
+        encoder.load_state_dict(stock_encoder_state(source, encoder), strict=True)
     student = ssl_network(encoder)
     teacher = ssl_network(make_encoder()).requires_grad_(False).eval()
     teacher.load_state_dict(student.state_dict())

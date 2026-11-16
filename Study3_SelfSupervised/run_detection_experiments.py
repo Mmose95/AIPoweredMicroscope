@@ -131,6 +131,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stock-weights", type=Path, help="Published RF-DETR Large checkpoint")
     parser.add_argument("--stock-policy", choices=("frozen", "gentle"))
     parser.add_argument("--stock-resolution", type=int, help="Override the stock detector input size")
+    parser.add_argument("--stock-encoder", choices=("random", "own_ssl", "adapted_ssl"),
+                        help="Replace only the stock DINOv2 encoder at native 2528 resolution")
+    parser.add_argument("--stock-encoder-teacher", type=Path)
     parser.add_argument("--dinov3-repo", type=Path, default=defaults["dinov3_repo"])
     parser.add_argument("--dataset-dir", type=Path, default=defaults["dataset_dir"])
     parser.add_argument("--image-root", type=Path, default=defaults["image_root"])
@@ -496,7 +499,7 @@ def _run_one(
                 "public_ssl": f"official_{model_config['architecture']}_lvd1689m",
                 "own_data_ssl": "own_data_ssl_ema_teacher",
                 "public_domain_ssl": f"official_{model_config['architecture']}_then_domain_ssl_ema_teacher",
-                "stock_pretrained": "published_rfdetr_large_2026_dinov2_windowed_small",
+                "stock_pretrained": args.stock_encoder or "published_rfdetr_large_2026_dinov2_windowed_small",
             }[arm],
             "detector": "published_rfdetr_large_2026" if stock_weights else "random",
             "external_pretrained_weights": arm != "scratch" and arm != "own_data_ssl",
@@ -506,6 +509,11 @@ def _run_one(
             "public_weights_sha256": _sha256(public_weights) if public_weights else None,
             **({"stock_weights": str(stock_weights), "stock_weights_sha256": _sha256(stock_weights)}
                if stock_weights else {}),
+            "stock_encoder_override": args.stock_encoder,
+            "stock_encoder_teacher": str(args.stock_encoder_teacher.resolve()) if args.stock_encoder_teacher else None,
+            "stock_encoder_teacher_sha256": (
+                _sha256(args.stock_encoder_teacher) if args.stock_encoder_teacher else None
+            ),
         },
         "dataset": dataset_report,
         "test_policy": "Test split is not materialized and run_test=False.",
@@ -570,8 +578,13 @@ def _run_one(
             f"frozen_backbone={bool(model_config.get('freeze_encoder', False))})",
             flush=True,
         )
+        initialization_weights = stock_weights
+        if args.stock_encoder:
+            from dinov2_stock_initialization import write_initialization
+            initialization_weights = run_dir / "initialization.pth"
+            write_initialization(stock_weights, initialization_weights, args.stock_encoder_teacher)
         rf_model = detector_class(
-            pretrain_weights=str(stock_weights) if stock_weights else None,
+            pretrain_weights=str(initialization_weights) if initialization_weights else None,
             resolution=int(model_config["resolution"]),
             patch_size=int(model_config["patch_size"]),
             num_queries=int(model_config["num_queries"]),
@@ -654,6 +667,16 @@ def main() -> int:
     args = parse_args()
     args.config = args.config.expanduser().resolve()
     config = json.loads(args.config.read_text(encoding="utf-8"))
+    if args.stock_encoder or args.stock_encoder_teacher:
+        if (args.arms != ["stock_pretrained"] or args.stock_resolution is not None
+                or config["model"]["resolution"] != 2528 or args.stock_policy or args.resume):
+            raise ValueError("Encoder replacement requires a fresh native 2528 stock fine-tuning run")
+        needs_teacher = args.stock_encoder in ("own_ssl", "adapted_ssl")
+        if not args.stock_encoder or needs_teacher != bool(args.stock_encoder_teacher):
+            raise ValueError("Supply a teacher checkpoint for the SSL encoder arms only")
+        if needs_teacher and not args.stock_encoder_teacher.is_file():
+            raise FileNotFoundError(args.stock_encoder_teacher)
+        config["experiment_name"] += f"_encoder_{args.stock_encoder}"
     if args.stock_policy and args.arms != ["stock_pretrained"]:
         raise ValueError("--stock-policy requires --arms stock_pretrained")
     if args.stock_resolution is not None:
