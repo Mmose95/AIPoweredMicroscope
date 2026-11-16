@@ -20,7 +20,11 @@ fi
 
 "$PYTHON_BIN" "$study_dir/build_native704_ssl_manifest.py" \
   --dataset "$dataset" --image-root "$images" --output "$manifest"
-exec "$PYTHON_BIN" -u "$study_dir/train_dinov2_small_ssl.py" \
+command=("$PYTHON_BIN" -u)
+if [[ "${DINOV2_SSL_GPUS:-1}" != 1 ]]; then
+  command+=(-m torch.distributed.run --standalone --nproc-per-node "$DINOV2_SSL_GPUS")
+fi
+exec "${command[@]}" "$study_dir/train_dinov2_small_ssl.py" \
   --manifest "$manifest" --images "$images" --output "$output" \
-  --batch-size "${STUDY3_SSL_BATCH_PER_GPU:-32}" --epochs "${STUDY3_SSL_SCRATCH_EPOCHS:-20}" \
+  --batch-size "${DINOV2_SSL_GLOBAL_BATCH:-${STUDY3_SSL_BATCH_PER_GPU:-32}}" --epochs "${STUDY3_SSL_SCRATCH_EPOCHS:-20}" \
   --warmup "${STUDY3_SSL_SCRATCH_WARMUP:-2}" --workers "${STUDY3_SSL_NUM_WORKERS:-8}" "$@"
