@@ -29,29 +29,50 @@ def worker(args):
     np.random.seed(0)
     torch.cuda.manual_seed_all(0)
     args.output.mkdir(parents=True)
-    initialization = args.output / "initialization.pth"
-    write_initialization(args.weights, initialization, args.teacher)
+    initialization = args.initialization or args.output / "initialization.pth"
+    if args.initialization is None:
+        write_initialization(args.weights, initialization, args.teacher)
     detector = RFDETRLarge if args.full_finetune else RFDETRSmall
     model = detector(pretrain_weights=str(initialization), resolution=2528, patch_size=16,
                      positional_encoding_size=158, num_queries=300,
                      gradient_checkpointing=args.full_finetune, freeze_encoder=not args.full_finetune)
-    provenance = dict(teacher=str(args.teacher), teacher_sha256=hashlib.sha256(args.teacher.read_bytes()).hexdigest(),
+    provenance = dict(teacher=str(args.teacher) if args.teacher else None,
+                      teacher_sha256=hashlib.sha256(args.teacher.read_bytes()).hexdigest() if args.teacher else None,
                       stock_weights=str(args.weights), stock_sha256=hashlib.sha256(args.weights.read_bytes()).hexdigest(),
                       epochs=args.epochs, seed=0, resolution=2528, frozen_encoder=not args.full_finetune,
                       detector="large" if args.full_finetune else "small", dataset=str(args.dataset))
+    provenance["resume_checkpoint"] = str(args.resume) if args.resume else None
+    provenance["backbone_initialization"] = "own_ssl" if args.teacher else "random"
+    if args.history:
+        (args.output / "metrics_first10.csv").write_bytes(args.history.read_bytes())
     (args.output / "probe.json").write_text(json.dumps(provenance, indent=2))
     model.train(dataset_dir=str(args.dataset), output_dir=str(args.output),
                 class_names=["Leucocyte", "Squamous Epithelial Cell"], epochs=args.epochs,
                 batch_size=1, grad_accum_steps=16, lr=5e-5, weight_decay=.0007,
                 num_workers=4 if args.full_finetune else 2, checkpoint_interval=5, seed=0, multi_scale=False,
                 scale_jitter=False, do_random_resize_via_padding=False, early_stopping=False,
-                run_test=False, progress_bar="tqdm")
+                run_test=False, progress_bar="tqdm", resume=str(args.resume) if args.resume else None)
     encoder = model.model.model.backbone[0].encoder
     if not args.full_finetune and any(parameter.requires_grad for parameter in encoder.parameters()):
         raise RuntimeError("The probe encoder must stay frozen")
     if args.full_finetune and not any(parameter.requires_grad for parameter in encoder.parameters()):
         raise RuntimeError("The screening encoder must be trainable")
+    if args.history:
+        merge_metrics(args.output / "metrics_first10.csv", args.output / "metrics.csv")
     (args.output / "complete.json").write_text(json.dumps(provenance, indent=2))
+
+
+def merge_metrics(history, destination):
+    """CSVLogger replaces existing logs; retain the first ten epochs explicitly."""
+    with history.open(newline="") as stream:
+        previous = list(csv.DictReader(stream))
+    with destination.open(newline="") as stream:
+        current = list(csv.DictReader(stream))
+    fields = list(dict.fromkeys(key for row in previous + current for key in row))
+    with destination.open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(previous + current)
 
 
 def prepare(args):
@@ -192,6 +213,9 @@ if __name__ == "__main__":
     parser.add_argument("--full-finetune", action="store_true",
                         help="Large, trainable backbone, all training patches; use a separate output")
     parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--resume", type=Path)
+    parser.add_argument("--initialization", type=Path)
+    parser.add_argument("--history", type=Path)
     options = parser.parse_args()
     if not options.worker and options.work is None:
         parser.error("--work is required for the six-GPU launcher")
