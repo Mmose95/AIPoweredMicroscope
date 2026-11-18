@@ -33,12 +33,12 @@ PREFIX = "backbone.0.encoder.encoder."
 
 
 class ManifestImages(Dataset):
-    def __init__(self, manifest, root):
+    def __init__(self, manifest, root, local_crops=8):
         with manifest.open(encoding="utf-8", newline="") as handle:
             self.paths = [root / row["relative_path"] for row in csv.DictReader(handle)]
         if len(self.paths) < 2:
             raise ValueError("SSL needs at least two training images")
-        self.transform = DataAugmentationDINO((0.32, 1.0), (0.05, 0.32), 8, 224, 96)
+        self.transform = DataAugmentationDINO((0.32, 1.0), (0.05, 0.32), local_crops, 224, 96)
 
     def __len__(self):
         return len(self.paths)
@@ -73,9 +73,12 @@ def tokens(encoder, images, masks=None):
 class SSLNetwork(nn.ModuleDict):
     def forward(self, global_views, local_views, mask):
         global_tokens = tokens(self["backbone"], global_views, mask)
-        local_tokens = tokens(self["backbone"], local_views)
+        local_logits = None
+        if local_views.shape[0]:
+            local_tokens = tokens(self["backbone"], local_views)
+            local_logits = self["dino"](local_tokens[:, 0]).float()
         return (self["dino"](global_tokens[:, 0]).float(),
-                self["dino"](local_tokens[:, 0]).float(),
+                local_logits,
                 self["ibot"](global_tokens[:, 1:][mask]).float(),
                 global_tokens[:, 0].float())
 
@@ -84,6 +87,15 @@ def ssl_network(encoder):
     return SSLNetwork({
         "backbone": encoder, "dino": DINOHead(384, 65536), "ibot": DINOHead(384, 65536),
     })
+
+
+def cross_view_dino_loss(dino, student_global, student_local, teacher_prob, local_count):
+    s0, s1 = student_global.chunk(2)
+    t0, t1 = teacher_prob.chunk(2)
+    loss = dino([s0], [t1]) + dino([s1], [t0])
+    if local_count:
+        loss = loss + dino(student_local.chunk(local_count), [t0, t1])
+    return loss / (2 + 2 * local_count)
 
 
 def train(args):
@@ -100,7 +112,7 @@ def train(args):
     random.seed(0)
     torch.manual_seed(0)
     device = torch.device("cuda", local_rank)
-    dataset = ManifestImages(args.manifest, args.images)
+    dataset = ManifestImages(args.manifest, args.images, args.local_crops)
     collate = partial(collate_data_and_cast, mask_ratio_tuple=(0.1, 0.5),
                       mask_probability=0.5, dtype=torch.float32, n_tokens=196,
                       mask_generator=MaskingGenerator((14, 14), max_num_patches=98))
@@ -133,6 +145,7 @@ def train(args):
     start_epoch = 0
     if args.resume:
         saved = torch.load(args.output / "last.pt", map_location="cpu", weights_only=True)
+        saved["config"].setdefault("local_crops", 8)
         if saved["config"] != {**record, "resume": False}:
             raise ValueError("Resume with the original configuration and GPU count")
         student.load_state_dict(saved["student"])
@@ -181,10 +194,7 @@ def train(args):
                     dino.update_center(cls_logits)
                     ibot.update_center(patch_logits.unsqueeze(0))
                 student_global, student_local, student_patch, features = parallel_student(global_views, local_views, mask)
-                s0, s1 = student_global.chunk(2)
-                t0, t1 = cls_prob.chunk(2)
-                local = student_local.chunk(8)
-                cls_loss = (dino([s0], [t1]) + dino([s1], [t0]) + dino(local, [t0, t1])) / 18
+                cls_loss = cross_view_dino_loss(dino, student_global, student_local, cls_prob, args.local_crops)
                 patch_loss = ibot.forward_masked(student_patch, patch_prob, mask)
                 diversity = koleo(torch.cat(all_gather(features)) if world > 1 else features)
                 loss = cls_loss + patch_loss + 0.1 * diversity
@@ -259,6 +269,8 @@ if __name__ == "__main__":
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--local-crops", type=int, choices=(0, 8), default=8,
+                        help="0 keeps two global crops and iBOT, without local-to-global DINO terms")
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--smoke", action="store_true", help="Run one training update and exit")
     parser.add_argument("--benchmark-steps", type=int, default=0)
