@@ -113,10 +113,17 @@ def train(args):
     torch.manual_seed(0)
     device = torch.device("cuda", local_rank)
     dataset = ManifestImages(args.manifest, args.images, args.local_crops)
+    native = args.view_recipe == "native-d"
+    global_grid = 48 if native else 14
+    if native:
+        from native_d_ssl import NativeViews, WeightedDistributedDraws, load_weights
+        dataset.transform = NativeViews()
+        weights = load_weights(args.sampling_weights, dataset.paths, args.images)
     collate = partial(collate_data_and_cast, mask_ratio_tuple=(0.1, 0.5),
-                      mask_probability=0.5, dtype=torch.float32, n_tokens=196,
-                      mask_generator=MaskingGenerator((14, 14), max_num_patches=98))
-    sampler = DistributedSampler(dataset, shuffle=True, seed=0) if world > 1 else None
+                      mask_probability=0.5, dtype=torch.float32, n_tokens=global_grid**2,
+                      mask_generator=MaskingGenerator((global_grid, global_grid), max_num_patches=global_grid**2//2))
+    sampler = (WeightedDistributedDraws(weights, args.batch_size, world, rank) if native else
+               DistributedSampler(dataset, shuffle=True, seed=0) if world > 1 else None)
     loader = DataLoader(dataset, batch_size=args.batch_size // world, shuffle=sampler is None,
                         sampler=sampler, num_workers=args.workers,
                         collate_fn=collate, pin_memory=True, persistent_workers=args.workers > 0)
@@ -142,10 +149,16 @@ def train(args):
     record = {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()}
     record.update(images_in_manifest=len(dataset), steps_per_epoch=len(loader),
                   torch=str(torch.__version__), rfdetr=version("rfdetr"), world_size=world)
+    if native:
+        import hashlib
+        record["sampling_weights_sha256"] = hashlib.sha256(args.sampling_weights.read_bytes()).hexdigest()
+        record["view_dimensions"] = {"global":768,"local":384,"mask_tokens":2304}
     start_epoch = 0
     if args.resume:
         saved = torch.load(args.output / "last.pt", map_location="cpu", weights_only=True)
         saved["config"].setdefault("local_crops", 8)
+        saved["config"].setdefault("view_recipe", "historical")
+        saved["config"].setdefault("sampling_weights", None)
         if saved["config"] != {**record, "resume": False}:
             raise ValueError("Resume with the original configuration and GPU count")
         student.load_state_dict(saved["student"])
@@ -162,6 +175,9 @@ def train(args):
         print(f"DINOv2 Small/16: {world} GPU(s), global batch {args.batch_size}, "
               f"{len(loader):,} steps/epoch, {steps:,} steps", flush=True)
     metrics_path = args.output / "metrics.jsonl"
+    run_start = time.perf_counter()
+    completed_steps = 0
+    torch.cuda.reset_peak_memory_stats()
     timed_images = torch.zeros((), dtype=torch.long, device=device)
     for epoch in range(start_epoch, args.epochs):
         if sampler:
@@ -183,6 +199,10 @@ def train(args):
             global_views = batch["collated_global_crops"].to(device, non_blocking=True)
             local_views = batch["collated_local_crops"].to(device, non_blocking=True)
             mask = batch["collated_masks"].to(device, non_blocking=True)
+            if step == start_epoch * len(loader) and rank == 0:
+                print(f"[TENSORS] globals={tuple(global_views.shape)} locals={tuple(local_views.shape)} masks={tuple(mask.shape)}", flush=True)
+            if native and (global_views.shape[-2:] != (768,768) or local_views.shape[-2:] != (384,384) or mask.shape[1] != 2304):
+                raise RuntimeError("Native D tensor contract failed")
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 with torch.no_grad():
@@ -209,9 +229,12 @@ def train(args):
             optimizer.step()
             with torch.no_grad():
                 torch._foreach_lerp_(list(teacher.parameters()), list(student.parameters()), 1 - momentum)
+            completed_steps += 1
             if rank == 0 and index % 10 == 0 and not args.benchmark_steps:
                 entry = dict(epoch=epoch+1, step=step+1, loss=loss.item(), dino=cls_loss.item(),
-                             ibot=patch_loss.item(), koleo=diversity.item())
+                             ibot=patch_loss.item(), koleo=diversity.item(),
+                             epoch_remaining_seconds=(time.perf_counter()-run_start)/completed_steps*(len(loader)-index-1),
+                             run_remaining_hours=(time.perf_counter()-run_start)/completed_steps*(steps-step-1)/3600)
                 with metrics_path.open("a", encoding="utf-8") as handle:
                     handle.write(json.dumps(entry) + "\n")
                 print(entry, flush=True)
@@ -233,7 +256,12 @@ def train(args):
                         elapsed = time.perf_counter() - benchmark_start
                         rate = timed_images.item() / elapsed
                         result = dict(gpus=world, images_per_second=rate,
-                                      gpu_seconds_per_1000_images=1000 * world / rate)
+                                      gpu_seconds_per_1000_images=1000 * world / rate,
+                                      peak_allocated_gib=torch.cuda.max_memory_allocated()/2**30,
+                                      peak_reserved_gib=torch.cuda.max_memory_reserved()/2**30,
+                                      global_batch=args.batch_size,view_recipe=args.view_recipe,
+                                      estimated_epoch_hours=len(loader)*args.batch_size/rate/3600,
+                                      estimated_run_hours=len(loader)*args.batch_size*args.epochs/rate/3600)
                         (args.output / "benchmark.json").write_text(json.dumps(result, indent=2))
                         print(result, flush=True)
                     return
@@ -265,6 +293,8 @@ if __name__ == "__main__":
     for name in ("manifest", "images", "output"):
         parser.add_argument(f"--{name}", type=Path, required=True)
     parser.add_argument("--initial-checkpoint", type=Path)
+    parser.add_argument("--view-recipe", choices=("historical","native-d"), default="historical")
+    parser.add_argument("--sampling-weights", type=Path)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--batch-size", type=int, default=32)
@@ -287,6 +317,8 @@ if __name__ == "__main__":
         parser.error("Benchmark and checkpoint intervals must be nonnegative.")
     if options.smoke and options.benchmark_steps:
         parser.error("Choose either --smoke or --benchmark-steps.")
+    if options.view_recipe == "native-d" and (options.sampling_weights is None or options.local_crops != 8):
+        parser.error("Native D requires --sampling-weights and eight local crops")
     try:
         train(options)
     finally:
