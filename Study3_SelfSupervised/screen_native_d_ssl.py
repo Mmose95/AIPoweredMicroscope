@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -9,7 +10,20 @@ import time
 from types import SimpleNamespace
 
 
+def latest_progress(path):
+    """Read only the tail, including carriage-return updates from Lightning."""
+    with path.open('rb') as stream:
+        stream.seek(max(0, stream.seek(0, 2) - 32768))
+        lines = stream.read().decode('utf-8', errors='replace').splitlines()
+    for line in reversed(lines):
+        match = re.search(r'(Epoch\s+(\d+)|Validation[^:]*):[^\r\n]*?\|\s*(\d+)\s*/\s*(\d+)', line)
+        if match:
+            return match.groups()
+    return None
+
+
 def main(a):
+    from tqdm import tqdm
     import torch
     from probe_dinov2_teachers import prepare
     from rfdetr import RFDETRSmall
@@ -30,6 +44,8 @@ def main(a):
         if dest.exists():raise FileExistsError(f'Interrupted output; preserve it and choose a new screen location: {dest}')
         queue.append((label,teacher,dest))
     active=[];free=list(range(count));failed=[]
+    bars={}
+    last_read={}
     while queue or active:
         while free and queue:
             gpu=free.pop(0);label,teacher,dest=queue.pop(0)
@@ -39,11 +55,26 @@ def main(a):
             log=(output/f'{label}.log').open('w')
             env=dict(os.environ,CUDA_VISIBLE_DEVICES=str(gpu),OMP_NUM_THREADS='2')
             active.append((gpu,label,subprocess.Popen(command,env=env,stdout=log,stderr=subprocess.STDOUT),log))
-            print(f'[PROBE] GPU{gpu} {label}: {output/ (label+".log")}',flush=True)
+            bars[label]=tqdm(total=a.epochs,desc=f'GPU {gpu} {label}',position=gpu,
+                             unit='epoch',dynamic_ncols=True,leave=False)
+            bars[label].set_postfix_str('starting')
         for item in active[:]:
             gpu,label,process,log=item
+            path=Path(log.name)
+            size=path.stat().st_size
+            bar=bars[label]
+            if last_read.get(label)!=size:
+                last_read[label]=size
+                progress=latest_progress(path)
+                if progress:
+                    phase,epoch,step,total=progress
+                    if epoch is not None and int(total)>0:
+                        bar.n=max(bar.n,int(epoch)+int(step)/int(total))
+                    bar.set_postfix_str(f'{phase}  {step}/{total} batches')
             status=process.poll()
             if status is not None:
+                bar.close()
+                tqdm.write(f'[{label}] {"failed" if status else "completed"} | {path}')
                 log.close();active.remove(item);free.append(gpu)
                 if status:failed.append(label)
         if active:time.sleep(5)
